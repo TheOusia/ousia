@@ -3,11 +3,16 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct IndexMeta {
-    pub values: BTreeMap<String, IndexValue>,
+pub struct IndexMeta(pub BTreeMap<String, IndexValue>);
+
+impl IndexMeta {
+    pub fn meta(&self) -> &BTreeMap<String, IndexValue> {
+        &self.0
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(untagged)]
 pub enum IndexValue {
     String(String),
     Int(i64),

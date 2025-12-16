@@ -15,12 +15,10 @@ mod test {
     use crate::engine::adapters::Field;
 
     use super::*;
-    use serde::{Deserialize, Serialize};
 
-    #[derive(OusiaObject, OusiaDefault, Serialize, Deserialize)]
+    #[derive(OusiaObject, OusiaDefault, Clone)]
     #[ousia(type_name = "User", index = "name:search")]
     struct User {
-        #[serde(skip_serializing)]
         _meta: Meta,
         name: String,
     }
@@ -38,7 +36,7 @@ mod test {
 
         assert_eq!(
             user.index_meta()
-                .values
+                .meta()
                 .get("name")
                 .map(|ik| ik.as_string().unwrap()),
             Some("John Doe")

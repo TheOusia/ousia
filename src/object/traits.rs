@@ -1,6 +1,8 @@
+use serde::{Deserialize, Serialize};
+
 use crate::object::{meta::Meta, query::IndexMeta};
 
-pub trait Object {
+pub trait Object: Serialize + for<'de> Deserialize<'de> + Clone + Send + Sync {
     const TYPE: &'static str;
     fn meta(&self) -> &Meta;
     fn meta_mut(&mut self) -> &mut Meta;

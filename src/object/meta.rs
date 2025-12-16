@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::object::SYSTEM_OWNER;
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Meta {
     pub id: ulid::Ulid,
 
