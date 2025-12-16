@@ -47,6 +47,7 @@ pub struct QuerySort {
     pub ascending: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Field {
     pub name: &'static str,
 }

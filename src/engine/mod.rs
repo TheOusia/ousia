@@ -1,2 +1,2 @@
-mod adapters;
+pub mod adapters;
 mod traits;

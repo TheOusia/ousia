@@ -12,6 +12,8 @@ pub struct Ousia {}
 
 #[cfg(test)]
 mod test {
+    use crate::engine::adapters::Field;
+
     use super::*;
     use serde::{Deserialize, Serialize};
 
@@ -41,5 +43,13 @@ mod test {
                 .map(|ik| ik.as_string().unwrap()),
             Some("John Doe")
         );
+    }
+
+    #[test]
+    fn test_query() {
+        let mut user = User::default();
+        user.name = "John Doe".to_string();
+
+        assert_eq!(User::INDEXES.name, Field { name: "name" });
     }
 }
