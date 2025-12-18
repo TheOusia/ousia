@@ -1,5 +1,5 @@
 use proc_macro::TokenStream;
-use quote::quote;
+use quote::{format_ident, quote};
 use syn::{
     Attribute, Data, DeriveInput, Expr, ExprLit, Field, Fields, Lit, Meta, parse_macro_input,
 };
@@ -181,7 +181,7 @@ pub fn derive_ousia_object(input: TokenStream) -> TokenStream {
 
     // --- generate index_meta insertions ---
     let index_meta_insertions = indexes.iter().map(|(name, _kind)| {
-        let field_name = syn::Ident::new(name, proc_macro2::Span::call_site());
+        let field_name = format_ident!("{}", name);
         let name_str = name.as_str();
 
         quote! {
@@ -193,8 +193,7 @@ pub fn derive_ousia_object(input: TokenStream) -> TokenStream {
     });
 
     // --- generate Indexes struct ---
-    let indexes_struct_name =
-        syn::Ident::new(&format!("{}Indexes", ident), proc_macro2::Span::call_site());
+    let indexes_struct_name = format_ident!("{}Indexes", ident);
 
     let unique_index_names: std::collections::HashSet<_> =
         indexes.iter().map(|(name, _)| name.clone()).collect();
@@ -202,17 +201,17 @@ pub fn derive_ousia_object(input: TokenStream) -> TokenStream {
     unique_index_names.sort();
 
     let indexes_struct_fields = unique_index_names.iter().map(|name| {
-        let field_ident = syn::Ident::new(name, proc_macro2::Span::call_site());
+        let field_ident = format_ident!("{}", name);
         quote! {
-            pub #field_ident: crate::engine::adapters::Field
+            pub #field_ident: crate::adapters::Field
         }
     });
 
     let indexes_const_fields = unique_index_names.iter().map(|name| {
-        let field_ident = syn::Ident::new(name, proc_macro2::Span::call_site());
+        let field_ident = format_ident!("{}", name);
         let name_str = name.as_str();
         quote! {
-            #field_ident: crate::engine::adapters::Field { name: #name_str }
+            #field_ident: crate::adapters::Field { name: #name_str }
         }
     });
 
@@ -238,10 +237,28 @@ pub fn derive_ousia_object(input: TokenStream) -> TokenStream {
         .map(|f| f.ident.as_ref().unwrap())
         .collect();
 
+    // Create UpperCamelCase enum variants from snake_case field names
+    // e.g., "username" -> Username, "display_name" -> DisplayName
+    let deserialize_field_variants: Vec<_> = deserialize_field_names
+        .iter()
+        .map(|name| {
+            let camel = name
+                .split('_')
+                .map(|word| {
+                    let mut chars = word.chars();
+                    match chars.next() {
+                        None => String::new(),
+                        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                    }
+                })
+                .collect::<String>();
+            format_ident!("{}", camel)
+        })
+        .collect();
+
     let deserialize_field_types: Vec<_> = non_meta_fields.iter().map(|f| &f.ty).collect();
 
-    let visitor_name =
-        syn::Ident::new(&format!("{}Visitor", ident), proc_macro2::Span::call_site());
+    let visitor_name = format_ident!("{}Visitor", ident);
 
     // --- generate impl ---
     let expanded = quote! {
@@ -280,7 +297,7 @@ pub fn derive_ousia_object(input: TokenStream) -> TokenStream {
         }
 
         impl #ident {
-            pub const INDEXES: #indexes_struct_name = #indexes_struct_name {
+            pub const FIELDS: #indexes_struct_name = #indexes_struct_name {
                 #(#indexes_const_fields),*
             };
         }
@@ -307,7 +324,7 @@ pub fn derive_ousia_object(input: TokenStream) -> TokenStream {
                 #[derive(serde::Deserialize)]
                 #[serde(field_identifier, rename_all = "snake_case")]
                 enum Field {
-                    #(#deserialize_field_idents,)*
+                    #(#deserialize_field_variants,)*
                 }
 
                 struct #visitor_name;
@@ -330,7 +347,7 @@ pub fn derive_ousia_object(input: TokenStream) -> TokenStream {
                         while let Some(key) = map.next_key()? {
                             match key {
                                 #(
-                                    Field::#deserialize_field_idents => {
+                                    Field::#deserialize_field_variants => {
                                         if #deserialize_field_idents.is_some() {
                                             return Err(serde::de::Error::duplicate_field(#deserialize_field_names));
                                         }

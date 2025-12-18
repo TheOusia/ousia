@@ -1,11 +1,22 @@
 use serde::{Deserialize, Serialize};
 
-use crate::object::{meta::Meta, query::IndexMeta};
+use crate::{object::meta::Meta, query::IndexMeta};
 
-pub trait Object: Serialize + for<'de> Deserialize<'de> + Clone + Send + Sync {
+pub trait Object: Serialize + for<'de> Deserialize<'de> + Sized + Send + Sync + 'static {
+    /// Object type name
     const TYPE: &'static str;
+
+    /// Object type name helper
+    fn type_name(&self) -> &'static str {
+        Self::TYPE
+    }
+
+    /// Object metadata (id, owner, created_at, updated_at)
     fn meta(&self) -> &Meta;
+
+    /// Mutable object metadata (id, owner, created_at, updated_at)
     fn meta_mut(&mut self) -> &mut Meta;
+
     // Derived, non-meta indexes only
     fn index_meta(&self) -> IndexMeta;
 }
@@ -39,14 +50,14 @@ where
 }
 
 pub trait ObjectType {
-    fn type_name() -> &'static str;
+    fn type_name(&self) -> &'static str;
 }
 
 impl<T: Object> ObjectType for T
 where
     T: Object,
 {
-    fn type_name() -> &'static str {
+    fn type_name(&self) -> &'static str {
         T::TYPE
     }
 }

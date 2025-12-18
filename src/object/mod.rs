@@ -1,5 +1,4 @@
 pub mod meta;
-pub(crate) mod query;
 pub mod traits;
 
 use once_cell::sync::Lazy;

@@ -55,12 +55,12 @@ pub trait Transaction: Send + Sync {
 ```rust
 engine
     .query::<Post>(user_id)
-    .filter_range(Post::INDEXES.created_at.name, start_date, end_date)
+    .filter_range(Post::FIELDS.created_at.name, start_date, end_date)
     .or(|q| q
-        .filter(Post::INDEXES.status.name, PostStatus::Published)
-        .filter(Post::INDEXES.status.name, PostStatus::Featured)
+        .filter(Post::FIELDS.status.name, PostStatus::Published)
+        .filter(Post::FIELDS.status.name, PostStatus::Featured)
     )
-    .search(Post::INDEXES.content.name, "rust programming")
+    .search(Post::FIELDS.content.name, "rust programming")
     .fetch()
     .await
 ```

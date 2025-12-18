@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
+use ulid::Ulid;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct IndexMeta(pub BTreeMap<String, IndexValue>);
@@ -126,4 +127,98 @@ pub struct IndexField {
 
 pub trait ObjectQuery {
     fn indexed_fields() -> &'static [IndexField];
+}
+
+#[derive(Debug)]
+pub(crate) struct QueryFilter {
+    pub field: &'static IndexField,
+    pub value: IndexValue,
+    pub mode: QueryMode,
+}
+
+#[derive(Debug)]
+pub enum QueryMode {
+    Search(QuerySearch),
+    Sort(QuerySort),
+}
+
+impl QueryMode {
+    pub fn as_search(&self) -> Option<&QuerySearch> {
+        match self {
+            QueryMode::Search(search) => Some(search),
+            _ => None,
+        }
+    }
+
+    pub fn as_sort(&self) -> Option<&QuerySort> {
+        match self {
+            QueryMode::Sort(sort) => Some(sort),
+            _ => None,
+        }
+    }
+
+    pub fn search(comp: Comparison, op: Option<Operator>) -> Self {
+        QueryMode::Search(QuerySearch {
+            comparison: comp,
+            operator: op.unwrap_or_default(),
+        })
+    }
+
+    /// Search using default comparison '=' and 'AND' operator
+    pub fn search_default() -> Self {
+        QueryMode::Search(QuerySearch {
+            comparison: Comparison::Equal,
+            operator: Operator::And,
+        })
+    }
+
+    pub fn sort(asc: bool) -> Self {
+        QueryMode::Sort(QuerySort { ascending: asc })
+    }
+
+    /// Sort using AND operator
+    pub fn sort_default() -> Self {
+        QueryMode::Sort(QuerySort { ascending: true })
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct QuerySearch {
+    pub comparison: Comparison,
+    pub operator: Operator,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct QuerySort {
+    pub ascending: bool,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum Comparison {
+    Equal,
+    BeginsWith,
+    Contains,
+    GreaterThan,
+    LessThan,
+    GreaterThanOrEqual,
+    LessThanOrEqual,
+    NotEqual,
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+pub enum Operator {
+    #[default]
+    And,
+    Or,
+}
+
+/// Pagination cursor
+pub struct Cursor {
+    last_id: Ulid,
+}
+
+impl Into<Cursor> for Ulid {
+    fn into(self) -> Cursor {
+        Cursor { last_id: self }
+    }
 }
