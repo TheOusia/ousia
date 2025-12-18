@@ -2,6 +2,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::{object::meta::Meta, query::IndexMeta};
 
+///
+/// Derive macro is expected to produce
+/// const FIELDS: &'static TypeNameIndexes {field_name: crate::query::IndexField,...}
+///
 pub trait Object: Serialize + for<'de> Deserialize<'de> + Sized + Send + Sync + 'static {
     /// Object type name
     const TYPE: &'static str;

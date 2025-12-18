@@ -1,7 +1,11 @@
 use serde::{Deserialize, Serialize};
+use ulid::Ulid;
 
 use crate::{Object, edges::meta::EdgeMeta, query::IndexMeta};
 
+///
+/// Derive macro is expected to produce
+/// const FIELDS: &'static TypeNameIndexes {field_name: crate::query::IndexField,...}
 pub trait Edge: Serialize + for<'de> Deserialize<'de> + Sized + Send + Sync + 'static {
     /// Source object type (compile-time only)
     type From: Object;
@@ -23,4 +27,22 @@ pub trait Edge: Serialize + for<'de> Deserialize<'de> + Sized + Send + Sync + 's
 
     /// Indexable fields
     fn index_meta(&self) -> IndexMeta;
+}
+
+pub trait EdgeMetaTrait {
+    fn from(&self) -> Ulid;
+    fn to(&self) -> Ulid;
+}
+
+impl<E> EdgeMetaTrait for E
+where
+    E: Edge,
+{
+    fn from(&self) -> ulid::Ulid {
+        self.meta().from()
+    }
+
+    fn to(&self) -> ulid::Ulid {
+        self.meta().to()
+    }
 }

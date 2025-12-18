@@ -1,16 +1,10 @@
 use serde::{Deserialize, Serialize};
 use ulid::Ulid;
 
-pub trait EdgeMetaTrait {
-    /// Edge owner (always = From.id)
-    fn from(&self) -> Ulid;
-
-    /// Edge target (points to To.id)
-    fn to(&self) -> Ulid;
-}
+use crate::edges::EdgeMetaTrait;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
-pub(crate) struct EdgeMeta {
+pub struct EdgeMeta {
     pub from: Ulid,
     pub to: Ulid,
 }

@@ -7,6 +7,8 @@ pub(crate) mod query;
 use crate::adapters::Adapter;
 use crate::adapters::ObjectRecord;
 use crate::adapters::QueryContext;
+pub use crate::edges::meta::*;
+pub use crate::edges::traits::*;
 use crate::error::Error;
 pub use crate::object::meta::*;
 pub use crate::object::traits::*;
@@ -182,8 +184,8 @@ mod test {
         INSERT INTO public.edges ("from", "to", type, data, index_meta)
             VALUES ($1, $2, $3, $4, $5)"#,
         )
-        .bind(follow.meta().from().to_string())
-        .bind(follow.meta().to().to_string())
+        .bind(follow.from().to_string())
+        .bind(follow.to().to_string())
         .bind(Follow::TYPE)
         .bind(serde_json::to_value(&follow).unwrap())
         .bind(serde_json::to_value(&follow.index_meta()).unwrap())
@@ -201,7 +203,7 @@ mod test {
 
         let followers = query_context
             .edge::<Follow, User>()
-            .where_eq(User::FIELDS.name, "John Doe")
+            .where_eq(&User::FIELDS.name, "John Doe")
             .collect() // unimplemented
             .await;
 
