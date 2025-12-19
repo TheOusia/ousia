@@ -1,18 +1,12 @@
 use serde::{Deserialize, Serialize};
 use ulid::Ulid;
 
-use crate::{Object, edges::meta::EdgeMeta, query::IndexMeta};
+use crate::{edge::meta::EdgeMeta, query::IndexMeta};
 
 ///
 /// Derive macro is expected to produce
 /// const FIELDS: &'static TypeNameIndexes {field_name: crate::query::IndexField,...}
 pub trait Edge: Serialize + for<'de> Deserialize<'de> + Sized + Send + Sync + 'static {
-    /// Source object type (compile-time only)
-    type From: Object;
-
-    /// Target object type (compile-time only)
-    type To: Object;
-
     /// Edge logical type (e.g. "Follow", "Member", "Like")
     const TYPE: &'static str;
 

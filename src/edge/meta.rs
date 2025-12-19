@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use ulid::Ulid;
 
-use crate::edges::EdgeMetaTrait;
+use crate::edge::EdgeMetaTrait;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct EdgeMeta {

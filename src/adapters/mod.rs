@@ -8,7 +8,7 @@ use ulid::Ulid;
 
 use crate::{
     Object,
-    edges::Edge,
+    edge::{Edge, query::EdgeQuery},
     error::Error,
     object::SYSTEM_OWNER,
     query::{
@@ -152,58 +152,6 @@ impl Query {
                 comparison: Comparison::Equal,
                 operator: Operator::default(),
             }),
-        });
-        consumed_self
-    }
-
-    pub fn with_limit(mut self, limit: u32) -> Self {
-        self.limit = Some(limit);
-        self
-    }
-
-    pub fn with_offset(mut self, offset: u32) -> Self {
-        self.offset = Some(offset);
-        self
-    }
-}
-
-/// -----------------------------
-/// Edge Query Plan (storage contract)
-/// -----------------------------
-
-#[derive(Debug)]
-pub struct EdgeQuery {
-    pub filters: Vec<QueryFilter>,
-    // pub sort: Vec<QuerySort>,
-    // pub search: Vec<QuerySearch>,
-    pub limit: Option<u32>,
-    pub offset: Option<u32>,
-}
-
-impl Default for EdgeQuery {
-    fn default() -> Self {
-        Self {
-            filters: Vec::new(),
-            // sort: Vec::new(),
-            // search: Vec::new(),
-            limit: None,
-            offset: None,
-        }
-    }
-}
-
-impl EdgeQuery {
-    pub fn with_filter(
-        self,
-        field: &'static IndexField,
-        value: impl ToIndexValue,
-        mode: QueryMode,
-    ) -> Self {
-        let mut consumed_self = self;
-        consumed_self.filters.push(QueryFilter {
-            field,
-            value: value.to_index_value(),
-            mode,
         });
         consumed_self
     }

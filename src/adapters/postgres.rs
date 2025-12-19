@@ -1134,7 +1134,7 @@ pub(crate) mod tests {
         let users = adapter
             .query_objects(
                 User::TYPE,
-                Query::default().where_eq(User::FIELDS.email, "efedua.bell@gmail.com"),
+                Query::default().where_eq(&User::FIELDS.email, "efedua.bell@gmail.com"),
             )
             .await
             .unwrap();
@@ -1143,7 +1143,7 @@ pub(crate) mod tests {
         let users = adapter
             .query_objects(
                 User::TYPE,
-                Query::default().where_eq(User::FIELDS.email, "test@gmail.com"),
+                Query::default().where_eq(&User::FIELDS.email, "test@gmail.com"),
             )
             .await
             .unwrap();
@@ -1175,7 +1175,7 @@ pub(crate) mod tests {
         let posts = adapter
             .query_objects(
                 Post::TYPE,
-                Query::new(user.id()).with_filter(Post::FIELDS.status, PostStatus::Published),
+                Query::new(user.id()).where_eq(&Post::FIELDS.status, PostStatus::Published),
             )
             .await
             .unwrap();
@@ -1184,7 +1184,7 @@ pub(crate) mod tests {
         let posts = adapter
             .query_objects(
                 Post::TYPE,
-                Query::new(user.id()).with_filter(Post::FIELDS.status, PostStatus::Draft),
+                Query::new(user.id()).where_eq(&Post::FIELDS.status, PostStatus::Draft),
             )
             .await
             .unwrap();

@@ -1,5 +1,5 @@
 mod adapters;
-mod edges;
+mod edge;
 pub mod error;
 mod object;
 pub(crate) mod query;
@@ -7,11 +7,11 @@ pub(crate) mod query;
 use crate::adapters::Adapter;
 use crate::adapters::ObjectRecord;
 use crate::adapters::QueryContext;
-pub use crate::edges::meta::*;
-pub use crate::edges::traits::*;
+pub use crate::edge::meta::*;
+pub use crate::edge::traits::*;
 use crate::error::Error;
-pub use crate::object::meta::*;
-pub use crate::object::traits::*;
+pub use crate::object::*;
+pub use crate::object::*;
 use chrono::Utc;
 use ulid::Ulid;
 
@@ -55,7 +55,7 @@ mod test {
 
     use crate::{
         adapters::{Adapter, postgres::PostgresAdapter},
-        edges::{Edge, meta::EdgeMeta},
+        edge::{Edge, meta::EdgeMeta},
         object::SYSTEM_OWNER,
         query::IndexMeta,
     };
@@ -106,31 +106,12 @@ mod test {
 
     #[tokio::test]
     async fn engine_test() {
-        #[derive(Debug, Serialize, Deserialize)] // #[derive(Debug, OusiaEdge)]
-        // #[edge(type_name = "Follow", from = User, to = User)]
+        #[derive(Debug, OusiaEdge)]
+        #[ousia(type_name = "Follow")]
         struct Follow {
             // #[edge(meta)] // explicitly mark the meta field
             _meta: EdgeMeta, // default meta field is _meta
             notification: bool,
-        }
-
-        // This is macro derived
-        impl Edge for Follow {
-            const TYPE: &'static str = "Follow";
-
-            type From = User;
-            type To = User;
-
-            fn meta(&self) -> &EdgeMeta {
-                &self._meta
-            }
-            fn meta_mut(&mut self) -> &mut EdgeMeta {
-                &mut self._meta
-            }
-
-            fn index_meta(&self) -> IndexMeta {
-                IndexMeta::default()
-            }
         }
 
         let (_resource, pool) = super::adapters::postgres::tests::setup_test_db().await;

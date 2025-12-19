@@ -125,7 +125,7 @@ pub struct IndexField {
     pub kinds: &'static [IndexKind],
 }
 
-pub trait ObjectQuery {
+pub trait IndexQuery {
     fn indexed_fields() -> &'static [IndexField];
 }
 

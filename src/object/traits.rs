@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{object::meta::Meta, query::IndexMeta};
+use crate::{object::Meta, query::IndexMeta};
 
 ///
 /// Derive macro is expected to produce

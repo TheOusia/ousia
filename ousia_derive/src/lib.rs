@@ -1,5 +1,6 @@
 use proc_macro::TokenStream;
 use quote::{format_ident, quote};
+use std::collections::BTreeMap;
 use syn::ExprPath;
 use syn::{
     Attribute, Data, DeriveInput, Expr, ExprLit, Field, Fields, Lit, Meta, Type, parse_macro_input,
@@ -91,6 +92,19 @@ fn parse_ousia_attr(attr: Option<&Attribute>) -> (Option<String>, Vec<(String, S
     (type_name, indexes)
 }
 
+/// Helper to parse kind strings into index kind tokens
+fn parse_index_kinds(kind_str: &str) -> Vec<proc_macro2::TokenStream> {
+    kind_str
+        .split('+')
+        .map(|k| k.trim())
+        .map(|k| match k {
+            "search" => quote!(crate::query::IndexKind::Search),
+            "sort" => quote!(crate::query::IndexKind::Sort),
+            _ => panic!("Invalid index kind `{}`. Valid kinds: search, sort", k),
+        })
+        .collect()
+}
+
 #[proc_macro_derive(OusiaObject, attributes(ousia))]
 pub fn derive_ousia_object(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
@@ -162,15 +176,7 @@ pub fn derive_ousia_object(input: TokenStream) -> TokenStream {
             panic!("Indexed field `{}` does not exist on {}", name, ident);
         }
 
-        let kinds: Vec<_> = kind
-            .split('+')
-            .map(|k| k.trim())
-            .map(|k| match k {
-                "search" => quote!(crate::query::IndexKind::Search),
-                "sort" => quote!(crate::query::IndexKind::Sort),
-                _ => panic!("Invalid index kind `{}`. Valid kinds: search, sort", k),
-            })
-            .collect();
+        let kinds = parse_index_kinds(kind);
 
         quote! {
             crate::query::IndexField {
@@ -196,26 +202,49 @@ pub fn derive_ousia_object(input: TokenStream) -> TokenStream {
     // --- generate Indexes struct ---
     let indexes_struct_name = format_ident!("{}Indexes", ident);
 
-    let unique_index_names: std::collections::HashSet<_> =
-        indexes.iter().map(|(name, _)| name.clone()).collect();
-    let mut unique_index_names: Vec<_> = unique_index_names.into_iter().collect();
-    unique_index_names.sort();
+    // Build a map of field names to their kinds (merge multiple declarations)
+    let mut field_kinds_map: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for (name, kind) in &indexes {
+        field_kinds_map
+            .entry(name.clone())
+            .or_insert_with(Vec::new)
+            .push(kind.clone());
+    }
 
-    let indexes_struct_fields = unique_index_names.iter().map(|name| {
+    let indexes_struct_fields = field_kinds_map.keys().map(|name| {
         let field_ident = format_ident!("{}", name);
         quote! {
             pub #field_ident: crate::query::IndexField
         }
     });
 
-    let indexes_const_fields = unique_index_names.iter().map(|name| {
+    let indexes_const_fields = field_kinds_map.iter().map(|(name, kinds)| {
         let field_ident = format_ident!("{}", name);
         let name_str = name.as_str();
+
+        // Collect all unique kinds for this field
+        let mut all_kinds = Vec::new();
+        for kind_str in kinds {
+            all_kinds.extend(parse_index_kinds(kind_str));
+        }
+
+        // Remove duplicates by converting to a set-like structure
+        let unique_kinds = {
+            let mut seen = std::collections::HashSet::new();
+            all_kinds
+                .into_iter()
+                .filter(move |k| {
+                    let key = k.to_string();
+                    seen.insert(key)
+                })
+                .collect::<Vec<_>>()
+        };
+
         quote! {
             #field_ident: crate::query::IndexField {
                 name: #name_str,
-                kinds: &[crate::query::IndexKind::Search],
-            }// fix this to construct the struct properly
+                kinds: &[#(#unique_kinds),*],
+            }
         }
     });
 
@@ -266,14 +295,14 @@ pub fn derive_ousia_object(input: TokenStream) -> TokenStream {
 
     // --- generate impl ---
     let expanded = quote! {
-        impl crate::object::traits::Object for #ident {
+        impl crate::object::Object for #ident {
             const TYPE: &'static str = #type_name;
 
-            fn meta(&self) -> &crate::object::meta::Meta {
+            fn meta(&self) -> &crate::object::Meta {
                 &self.#meta_field_ident
             }
 
-            fn meta_mut(&mut self) -> &mut crate::object::meta::Meta {
+            fn meta_mut(&mut self) -> &mut crate::object::Meta {
                 &mut self.#meta_field_ident
             }
 
@@ -290,7 +319,7 @@ pub fn derive_ousia_object(input: TokenStream) -> TokenStream {
             }
         }
 
-        impl crate::query::ObjectQuery for #ident {
+        impl crate::query::IndexQuery for #ident {
             fn indexed_fields() -> &'static [crate::query::IndexField] {
                 &[ #(#index_fields),* ]
             }
@@ -362,7 +391,7 @@ pub fn derive_ousia_object(input: TokenStream) -> TokenStream {
                         }
 
                         Ok(#ident {
-                            #meta_field_ident: crate::object::meta::Meta::default(),
+                            #meta_field_ident: crate::object::Meta::default(),
                             #(
                                 #deserialize_field_idents: #deserialize_field_idents
                                     .ok_or_else(|| serde::de::Error::missing_field(#deserialize_field_names))?,
@@ -386,7 +415,7 @@ const RESERVED_EDGE_FIELDS: &[&str] = &["from", "to", "type"];
 fn parse_edge_attr(
     attr: Option<&Attribute>,
     struct_name: &syn::Ident,
-) -> (String, Type, Type, Vec<(String, String)>) {
+) -> (String, Option<Type>, Option<Type>, Vec<(String, String)>) {
     let mut type_name = None;
     let mut from_type = None;
     let mut to_type = None;
@@ -458,8 +487,6 @@ fn parse_edge_attr(
     }
 
     let type_name = type_name.unwrap_or_else(|| struct_name.to_string());
-    let from_type = from_type.expect("Edge must specify 'from' type in #[ousia(from = Type)]");
-    let to_type = to_type.expect("Edge must specify 'to' type in #[ousia(to = Type)]");
 
     (type_name, from_type, to_type, indexes)
 }
@@ -534,15 +561,7 @@ pub fn derive_ousia_edge(input: TokenStream) -> TokenStream {
             panic!("Indexed field `{}` does not exist on {}", name, ident);
         }
 
-        let kinds: Vec<_> = kind
-            .split('+')
-            .map(|k| k.trim())
-            .map(|k| match k {
-                "search" => quote!(crate::query::IndexKind::Search),
-                "sort" => quote!(crate::query::IndexKind::Sort),
-                _ => panic!("Invalid index kind `{}`. Valid kinds: search, sort", k),
-            })
-            .collect();
+        let kinds = parse_index_kinds(kind);
 
         quote! {
             crate::query::IndexField {
@@ -568,23 +587,49 @@ pub fn derive_ousia_edge(input: TokenStream) -> TokenStream {
     // --- generate Indexes struct ---
     let indexes_struct_name = format_ident!("{}Indexes", ident);
 
-    let unique_index_names: std::collections::HashSet<_> =
-        indexes.iter().map(|(name, _)| name.clone()).collect();
-    let mut unique_index_names: Vec<_> = unique_index_names.into_iter().collect();
-    unique_index_names.sort();
+    // Build a map of field names to their kinds (merge multiple declarations)
+    let mut field_kinds_map: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for (name, kind) in &indexes {
+        field_kinds_map
+            .entry(name.clone())
+            .or_insert_with(Vec::new)
+            .push(kind.clone());
+    }
 
-    let indexes_struct_fields = unique_index_names.iter().map(|name| {
+    let indexes_struct_fields = field_kinds_map.keys().map(|name| {
         let field_ident = format_ident!("{}", name);
         quote! {
-            pub #field_ident: crate::query::IndexField //fix this to construct the struct properly
+            pub #field_ident: crate::query::IndexField
         }
     });
 
-    let indexes_const_fields = unique_index_names.iter().map(|name| {
+    let indexes_const_fields = field_kinds_map.iter().map(|(name, kinds)| {
         let field_ident = format_ident!("{}", name);
         let name_str = name.as_str();
+
+        // Collect all unique kinds for this field
+        let mut all_kinds = Vec::new();
+        for kind_str in kinds {
+            all_kinds.extend(parse_index_kinds(kind_str));
+        }
+
+        // Remove duplicates
+        let unique_kinds = {
+            let mut seen = std::collections::HashSet::new();
+            all_kinds
+                .into_iter()
+                .filter(move |k| {
+                    let key = k.to_string();
+                    seen.insert(key)
+                })
+                .collect::<Vec<_>>()
+        };
+
         quote! {
-            #field_ident: crate::query::IndexField { name: #name_str } // fix this to construct the struct properly
+            #field_ident: crate::query::IndexField {
+                name: #name_str,
+                kinds: &[#(#unique_kinds),*],
+            }
         }
     });
 
@@ -632,11 +677,8 @@ pub fn derive_ousia_edge(input: TokenStream) -> TokenStream {
 
     let visitor_name = format_ident!("{}Visitor", ident);
 
-    // --- generate impl ---
     let expanded = quote! {
         impl crate::edge::Edge for #ident {
-            type From = #from_type;
-            type To = #to_type;
             const TYPE: &'static str = #type_name;
 
             fn meta(&self) -> &crate::edge::EdgeMeta {
@@ -654,24 +696,24 @@ pub fn derive_ousia_edge(input: TokenStream) -> TokenStream {
             }
         }
 
-        impl #ident {
-            pub fn new(from: ulid::Ulid, to: ulid::Ulid) -> Self {
-                Self {
-                    #meta_field_ident: crate::edge::EdgeMeta::new(from, to),
-                    ..Default::default()
-                }
-            }
+        // impl #ident {
+        //     pub fn new(from: ulid::Ulid, to: ulid::Ulid) -> Self {
+        //         Self {
+        //             #meta_field_ident: crate::edge::EdgeMeta::new(from, to),
+        //             ..Default::default()
+        //         }
+        //     }
 
-            pub fn set_from(&mut self, from: ulid::Ulid) {
-                self.#meta_field_ident.from = from;
-            }
+        //     pub fn set_from(&mut self, from: ulid::Ulid) {
+        //         self.#meta_field_ident.from = from;
+        //     }
 
-            pub fn set_to(&mut self, to: ulid::Ulid) {
-                self.#meta_field_ident.to = to;
-            }
-        }
+        //     pub fn set_to(&mut self, to: ulid::Ulid) {
+        //         self.#meta_field_ident.to = to;
+        //     }
+        // }
 
-        impl crate::edge::query::EdgeQuery for #ident {
+        impl crate::query::IndexQuery for #ident {
             fn indexed_fields() -> &'static [crate::query::IndexField] {
                 &[ #(#index_fields),* ]
             }
@@ -794,7 +836,7 @@ pub fn derive_ousia_default(input: TokenStream) -> TokenStream {
     let default_fields = fields.iter().map(|f| {
         let name = f.ident.as_ref().unwrap();
         if name == meta_field_ident {
-            quote! { #name: crate::object::meta::Meta::default() }
+            quote! { #name: crate::object::Meta::default() }
         } else {
             quote! { #name: Default::default() }
         }
