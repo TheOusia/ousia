@@ -13,6 +13,7 @@ use crate::error::Error;
 pub use crate::object::*;
 pub use crate::object::*;
 use chrono::Utc;
+pub use query::IndexQuery;
 use ulid::Ulid;
 
 #[cfg(feature = "derive")]

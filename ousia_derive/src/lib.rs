@@ -295,14 +295,14 @@ pub fn derive_ousia_object(input: TokenStream) -> TokenStream {
 
     // --- generate impl ---
     let expanded = quote! {
-        impl crate::object::Object for #ident {
+        impl crate::object::traits::Object for #ident {
             const TYPE: &'static str = #type_name;
 
-            fn meta(&self) -> &crate::object::Meta {
+            fn meta(&self) -> &crate::object::meta::Meta {
                 &self.#meta_field_ident
             }
 
-            fn meta_mut(&mut self) -> &mut crate::object::Meta {
+            fn meta_mut(&mut self) -> &mut crate::object::meta::Meta {
                 &mut self.#meta_field_ident
             }
 
@@ -391,7 +391,7 @@ pub fn derive_ousia_object(input: TokenStream) -> TokenStream {
                         }
 
                         Ok(#ident {
-                            #meta_field_ident: crate::object::Meta::default(),
+                            #meta_field_ident: crate::object::meta::Meta::default(),
                             #(
                                 #deserialize_field_idents: #deserialize_field_idents
                                     .ok_or_else(|| serde::de::Error::missing_field(#deserialize_field_names))?,
@@ -411,14 +411,12 @@ pub fn derive_ousia_object(input: TokenStream) -> TokenStream {
 
 const RESERVED_EDGE_FIELDS: &[&str] = &["from", "to", "type"];
 
-/// Parse edge-specific attributes: type_name, from, to, and indexes
+/// Parse edge-specific attributes: type_name and indexes (from/to removed)
 fn parse_edge_attr(
     attr: Option<&Attribute>,
     struct_name: &syn::Ident,
-) -> (String, Option<Type>, Option<Type>, Vec<(String, String)>) {
+) -> (String, Vec<(String, String)>) {
     let mut type_name = None;
-    let mut from_type = None;
-    let mut to_type = None;
     let mut indexes = vec![];
 
     if let Some(attr) = attr {
@@ -441,26 +439,6 @@ fn parse_edge_attr(
                             type_name = Some(s.value());
                         } else {
                             panic!("type_name must be a string literal");
-                        }
-                    }
-                    Meta::NameValue(nv) if nv.path.is_ident("from") => {
-                        if let Expr::Path(ExprPath { path, .. }) = &nv.value {
-                            from_type = Some(Type::Path(syn::TypePath {
-                                qself: None,
-                                path: path.clone(),
-                            }));
-                        } else {
-                            panic!("from must be a type path");
-                        }
-                    }
-                    Meta::NameValue(nv) if nv.path.is_ident("to") => {
-                        if let Expr::Path(ExprPath { path, .. }) = &nv.value {
-                            to_type = Some(Type::Path(syn::TypePath {
-                                qself: None,
-                                path: path.clone(),
-                            }));
-                        } else {
-                            panic!("to must be a type path");
                         }
                     }
                     Meta::NameValue(nv) if nv.path.is_ident("index") => {
@@ -488,7 +466,7 @@ fn parse_edge_attr(
 
     let type_name = type_name.unwrap_or_else(|| struct_name.to_string());
 
-    (type_name, from_type, to_type, indexes)
+    (type_name, indexes)
 }
 
 #[proc_macro_derive(OusiaEdge, attributes(ousia))]
@@ -498,7 +476,7 @@ pub fn derive_ousia_edge(input: TokenStream) -> TokenStream {
 
     // --- get ousia attribute ---
     let attr = get_ousia_attr(&input.attrs);
-    let (type_name, from_type, to_type, indexes) = parse_edge_attr(attr, ident);
+    let (type_name, indexes) = parse_edge_attr(attr, ident);
 
     // --- extract fields and identify meta field ---
     let fields = match &input.data {
@@ -677,6 +655,7 @@ pub fn derive_ousia_edge(input: TokenStream) -> TokenStream {
 
     let visitor_name = format_ident!("{}Visitor", ident);
 
+    // --- generate impl ---
     let expanded = quote! {
         impl crate::edge::Edge for #ident {
             const TYPE: &'static str = #type_name;
@@ -695,23 +674,6 @@ pub fn derive_ousia_edge(input: TokenStream) -> TokenStream {
                 crate::query::IndexMeta(values)
             }
         }
-
-        // impl #ident {
-        //     pub fn new(from: ulid::Ulid, to: ulid::Ulid) -> Self {
-        //         Self {
-        //             #meta_field_ident: crate::edge::EdgeMeta::new(from, to),
-        //             ..Default::default()
-        //         }
-        //     }
-
-        //     pub fn set_from(&mut self, from: ulid::Ulid) {
-        //         self.#meta_field_ident.from = from;
-        //     }
-
-        //     pub fn set_to(&mut self, to: ulid::Ulid) {
-        //         self.#meta_field_ident.to = to;
-        //     }
-        // }
 
         impl crate::query::IndexQuery for #ident {
             fn indexed_fields() -> &'static [crate::query::IndexField] {
@@ -785,7 +747,7 @@ pub fn derive_ousia_edge(input: TokenStream) -> TokenStream {
                         }
 
                         Ok(#ident {
-                            #meta_field_ident: crate::edge::EdgeMeta::default(),
+                            #meta_field_ident: crate::edge::EdgeMeta::new(ulid::Ulid::nil(), ulid::Ulid::nil()),
                             #(
                                 #deserialize_field_idents: #deserialize_field_idents
                                     .ok_or_else(|| serde::de::Error::missing_field(#deserialize_field_names))?,
@@ -836,7 +798,7 @@ pub fn derive_ousia_default(input: TokenStream) -> TokenStream {
     let default_fields = fields.iter().map(|f| {
         let name = f.ident.as_ref().unwrap();
         if name == meta_field_ident {
-            quote! { #name: crate::object::Meta::default() }
+            quote! { #name: crate::object::meta::Meta::default() }
         } else {
             quote! { #name: Default::default() }
         }
