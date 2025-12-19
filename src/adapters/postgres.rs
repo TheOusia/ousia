@@ -296,7 +296,7 @@ impl PostgresAdapter {
     fn build_edge_query_conditions(filters: &Vec<QueryFilter>) -> String {
         let mut conditions = vec![
             ("type = $1".to_string(), "AND"),
-            ("from = $2".to_string(), "AND"),
+            (r#""from" = $2"#.to_string(), "AND"),
         ];
         let mut param_idx = 3;
         for filter in filters {
@@ -355,7 +355,7 @@ impl PostgresAdapter {
     fn build_edge_reverse_query_conditions(filters: &Vec<QueryFilter>) -> String {
         let mut conditions = vec![
             ("type = $1".to_string(), "AND"),
-            ("to = $2".to_string(), "AND"),
+            (r#""to" = $2"#.to_string(), "AND"),
         ];
         let mut param_idx = 3;
         for filter in filters {
@@ -419,6 +419,42 @@ impl PostgresAdapter {
 
         if sort.is_empty() {
             return "ORDER BY created_at DESC".to_string();
+        }
+
+        let order_terms: Vec<String> = sort
+            .iter()
+            .map(|s| {
+                let direction = if s.mode.as_sort().unwrap().ascending {
+                    "ASC"
+                } else {
+                    "DESC"
+                };
+
+                let index_type = match &s.value {
+                    IndexValue::String(_) => "text",
+                    IndexValue::Int(_) => "bigint",
+                    IndexValue::Float(_) => "double",
+                    IndexValue::Bool(_) => "boolean",
+                    IndexValue::Timestamp(_) => "timestamptz",
+                };
+                format!(
+                    "index_meta->>'{}'::{} {}",
+                    s.field.name, index_type, direction
+                )
+            })
+            .collect();
+
+        format!("ORDER BY {}", order_terms.join(", "))
+    }
+
+    fn build_edge_order_clause(filters: &Vec<QueryFilter>) -> String {
+        let sort: Vec<&QueryFilter> = filters
+            .iter()
+            .filter(|f| f.mode.as_sort().is_some())
+            .collect();
+
+        if sort.is_empty() {
+            return "".to_string();
         }
 
         let order_terms: Vec<String> = sort
@@ -683,16 +719,13 @@ impl Adapter for PostgresAdapter {
         match plan {
             Some(plan) => {
                 let where_clause = Self::build_object_query_conditions(&plan.filters);
-                let order_clause = Self::build_order_clause(&plan.filters);
 
                 let mut sql = format!(
                     r#"
-                    SELECT id, type, owner, created_at, updated_at, data, index_meta
-                    FROM objects
-                    {}
+                    SELECT COUNT(*) FROM objects
                     {}
                     "#,
-                    where_clause, order_clause
+                    where_clause
                 );
 
                 if let Some(limit) = plan.limit {
@@ -828,17 +861,19 @@ impl Adapter for PostgresAdapter {
         plan: EdgeQuery,
     ) -> Result<Vec<EdgeRecord>, Error> {
         let where_clause = Self::build_edge_query_conditions(&plan.filters);
-        let order_clause = Self::build_order_clause(&plan.filters);
+        let order_clause = Self::build_edge_order_clause(&plan.filters);
 
         let mut sql = format!(
             r#"
-            SELECT id, type, owner, created_at, updated_at, data, index_meta
-            FROM objects
+            SELECT "from", "to", "type", data, index_meta
+            FROM edges
             {}
             {}
             "#,
             where_clause, order_clause
         );
+
+        println!("SQL: {}", sql);
 
         if let Some(limit) = plan.limit {
             sql.push_str(&format!(" LIMIT {}", limit));
@@ -875,16 +910,13 @@ impl Adapter for PostgresAdapter {
         match plan {
             Some(plan) => {
                 let where_clause = Self::build_edge_query_conditions(&plan.filters);
-                let order_clause = Self::build_order_clause(&plan.filters);
 
                 let mut sql = format!(
                     r#"
-                SELECT id, type, owner, created_at, updated_at, data, index_meta
-                FROM objects
-                {}
+                SELECT COUNT(*) FROM edges
                 {}
                 "#,
-                    where_clause, order_clause
+                    where_clause
                 );
 
                 if let Some(limit) = plan.limit {
@@ -926,7 +958,7 @@ impl Adapter for PostgresAdapter {
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use crate::{Meta, Object, ObjectMeta, query::QueryMode};
+    use crate::{Meta, Object, ObjectMeta};
     use ousia_derive::{OusiaDefault, OusiaObject};
     use serde::{Deserialize, Serialize};
     use testcontainers::ContainerAsync;

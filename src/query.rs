@@ -129,14 +129,14 @@ pub trait IndexQuery {
     fn indexed_fields() -> &'static [IndexField];
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct QueryFilter {
     pub field: &'static IndexField,
     pub value: IndexValue,
     pub mode: QueryMode,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum QueryMode {
     Search(QuerySearch),
     Sort(QuerySort),
@@ -182,18 +182,18 @@ impl QueryMode {
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QuerySearch {
     pub comparison: Comparison,
     pub operator: Operator,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QuerySort {
     pub ascending: bool,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Comparison {
     Equal,
     BeginsWith,
@@ -205,7 +205,7 @@ pub enum Comparison {
     NotEqual,
 }
 
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum Operator {
     #[default]
     And,
