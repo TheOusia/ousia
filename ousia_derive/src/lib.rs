@@ -293,6 +293,112 @@ pub fn derive_ousia_object(input: TokenStream) -> TokenStream {
 
     let visitor_name = format_ident!("{}Visitor", ident);
 
+    // Handle the case where there are no data fields (only meta)
+    let deserialize_impl = if non_meta_fields.is_empty() {
+        // Simple case: no data fields, just create with default meta
+        quote! {
+            impl<'de> serde::Deserialize<'de> for #ident {
+                fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+                where
+                    D: serde::Deserializer<'de>,
+                {
+                    // For empty structs, we just need to consume the empty map
+                    struct #visitor_name;
+
+                    impl<'de> serde::de::Visitor<'de> for #visitor_name {
+                        type Value = #ident;
+
+                        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                            formatter.write_str(concat!("struct ", stringify!(#ident)))
+                        }
+
+                        fn visit_map<V>(self, mut map: V) -> Result<#ident, V::Error>
+                        where
+                            V: serde::de::MapAccess<'de>,
+                        {
+                            // Consume any fields in the map (ignore them)
+                            while map.next_entry::<String, serde_json::Value>()?.is_some() {}
+
+                            Ok(#ident {
+                                #meta_field_ident: crate::object::meta::Meta::default(),
+                            })
+                        }
+
+                        fn visit_unit<E>(self) -> Result<#ident, E>
+                        where
+                            E: serde::de::Error,
+                        {
+                            Ok(#ident {
+                                #meta_field_ident: crate::object::meta::Meta::default(),
+                            })
+                        }
+                    }
+
+                    deserializer.deserialize_struct(stringify!(#ident), &[], #visitor_name)
+                }
+            }
+        }
+    } else {
+        // Normal case: struct has data fields
+        quote! {
+            impl<'de> serde::Deserialize<'de> for #ident {
+                fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+                where
+                    D: serde::Deserializer<'de>,
+                {
+                    #[derive(serde::Deserialize)]
+                    #[serde(field_identifier, rename_all = "snake_case")]
+                    enum Field {
+                        #(#deserialize_field_variants,)*
+                    }
+
+                    struct #visitor_name;
+
+                    impl<'de> serde::de::Visitor<'de> for #visitor_name {
+                        type Value = #ident;
+
+                        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                            formatter.write_str(concat!("struct ", stringify!(#ident)))
+                        }
+
+                        fn visit_map<V>(self, mut map: V) -> Result<#ident, V::Error>
+                        where
+                            V: serde::de::MapAccess<'de>,
+                        {
+                            #(
+                                let mut #deserialize_field_idents: Option<#deserialize_field_types> = None;
+                            )*
+
+                            while let Some(key) = map.next_key()? {
+                                match key {
+                                    #(
+                                        Field::#deserialize_field_variants => {
+                                            if #deserialize_field_idents.is_some() {
+                                                return Err(serde::de::Error::duplicate_field(#deserialize_field_names));
+                                            }
+                                            #deserialize_field_idents = Some(map.next_value()?);
+                                        }
+                                    )*
+                                }
+                            }
+
+                            Ok(#ident {
+                                #meta_field_ident: crate::object::meta::Meta::default(),
+                                #(
+                                    #deserialize_field_idents: #deserialize_field_idents
+                                        .ok_or_else(|| serde::de::Error::missing_field(#deserialize_field_names))?,
+                                )*
+                            })
+                        }
+                    }
+
+                    const FIELDS: &[&str] = &[#(#deserialize_field_names),*];
+                    deserializer.deserialize_struct(stringify!(#ident), FIELDS, #visitor_name)
+                }
+            }
+        }
+    };
+
     // --- generate impl ---
     let expanded = quote! {
         impl crate::object::traits::Object for #ident {
@@ -348,62 +454,7 @@ pub fn derive_ousia_object(input: TokenStream) -> TokenStream {
             }
         }
 
-        // Custom Deserialize implementation (excludes meta field, uses default)
-        impl<'de> serde::Deserialize<'de> for #ident {
-            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-            where
-                D: serde::Deserializer<'de>,
-            {
-                #[derive(serde::Deserialize)]
-                #[serde(field_identifier, rename_all = "snake_case")]
-                enum Field {
-                    #(#deserialize_field_variants,)*
-                }
-
-                struct #visitor_name;
-
-                impl<'de> serde::de::Visitor<'de> for #visitor_name {
-                    type Value = #ident;
-
-                    fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
-                        formatter.write_str(concat!("struct ", stringify!(#ident)))
-                    }
-
-                    fn visit_map<V>(self, mut map: V) -> Result<#ident, V::Error>
-                    where
-                        V: serde::de::MapAccess<'de>,
-                    {
-                        #(
-                            let mut #deserialize_field_idents: Option<#deserialize_field_types> = None;
-                        )*
-
-                        while let Some(key) = map.next_key()? {
-                            match key {
-                                #(
-                                    Field::#deserialize_field_variants => {
-                                        if #deserialize_field_idents.is_some() {
-                                            return Err(serde::de::Error::duplicate_field(#deserialize_field_names));
-                                        }
-                                        #deserialize_field_idents = Some(map.next_value()?);
-                                    }
-                                )*
-                            }
-                        }
-
-                        Ok(#ident {
-                            #meta_field_ident: crate::object::meta::Meta::default(),
-                            #(
-                                #deserialize_field_idents: #deserialize_field_idents
-                                    .ok_or_else(|| serde::de::Error::missing_field(#deserialize_field_names))?,
-                            )*
-                        })
-                    }
-                }
-
-                const FIELDS: &[&str] = &[#(#deserialize_field_names),*];
-                deserializer.deserialize_struct(stringify!(#ident), FIELDS, #visitor_name)
-            }
-        }
+        #deserialize_impl
     };
 
     TokenStream::from(expanded)
@@ -655,6 +706,112 @@ pub fn derive_ousia_edge(input: TokenStream) -> TokenStream {
 
     let visitor_name = format_ident!("{}Visitor", ident);
 
+    // Handle the case where there are no data fields (only meta)
+    let deserialize_impl = if non_meta_fields.is_empty() {
+        // Simple case: no data fields, just create with default meta
+        quote! {
+            impl<'de> serde::Deserialize<'de> for #ident {
+                fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+                where
+                    D: serde::Deserializer<'de>,
+                {
+                    // For empty structs, we just need to consume the empty map
+                    struct #visitor_name;
+
+                    impl<'de> serde::de::Visitor<'de> for #visitor_name {
+                        type Value = #ident;
+
+                        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                            formatter.write_str(concat!("struct ", stringify!(#ident)))
+                        }
+
+                        fn visit_map<V>(self, mut map: V) -> Result<#ident, V::Error>
+                        where
+                            V: serde::de::MapAccess<'de>,
+                        {
+                            // Consume any fields in the map (ignore them)
+                            while map.next_entry::<String, serde_json::Value>()?.is_some() {}
+
+                            Ok(#ident {
+                                #meta_field_ident: crate::edge::EdgeMeta::new(ulid::Ulid::nil(), ulid::Ulid::nil()),
+                            })
+                        }
+
+                        fn visit_unit<E>(self) -> Result<#ident, E>
+                        where
+                            E: serde::de::Error,
+                        {
+                            Ok(#ident {
+                                #meta_field_ident: crate::edge::EdgeMeta::new(ulid::Ulid::nil(), ulid::Ulid::nil()),
+                            })
+                        }
+                    }
+
+                    deserializer.deserialize_struct(stringify!(#ident), &[], #visitor_name)
+                }
+            }
+        }
+    } else {
+        // Normal case: struct has data fields
+        quote! {
+            impl<'de> serde::Deserialize<'de> for #ident {
+                fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+                where
+                    D: serde::Deserializer<'de>,
+                {
+                    #[derive(serde::Deserialize)]
+                    #[serde(field_identifier, rename_all = "snake_case")]
+                    enum Field {
+                        #(#deserialize_field_variants,)*
+                    }
+
+                    struct #visitor_name;
+
+                    impl<'de> serde::de::Visitor<'de> for #visitor_name {
+                        type Value = #ident;
+
+                        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                            formatter.write_str(concat!("struct ", stringify!(#ident)))
+                        }
+
+                        fn visit_map<V>(self, mut map: V) -> Result<#ident, V::Error>
+                        where
+                            V: serde::de::MapAccess<'de>,
+                        {
+                            #(
+                                let mut #deserialize_field_idents: Option<#deserialize_field_types> = None;
+                            )*
+
+                            while let Some(key) = map.next_key()? {
+                                match key {
+                                    #(
+                                        Field::#deserialize_field_variants => {
+                                            if #deserialize_field_idents.is_some() {
+                                                return Err(serde::de::Error::duplicate_field(#deserialize_field_names));
+                                            }
+                                            #deserialize_field_idents = Some(map.next_value()?);
+                                        }
+                                    )*
+                                }
+                            }
+
+                            Ok(#ident {
+                                #meta_field_ident: crate::edge::EdgeMeta::new(ulid::Ulid::nil(), ulid::Ulid::nil()),
+                                #(
+                                    #deserialize_field_idents: #deserialize_field_idents
+                                        .ok_or_else(|| serde::de::Error::missing_field(#deserialize_field_names))?,
+                                )*
+                            })
+                        }
+                    }
+
+                    const FIELDS: &[&str] = &[#(#deserialize_field_names),*];
+                    deserializer.deserialize_struct(stringify!(#ident), FIELDS, #visitor_name)
+                }
+            }
+        }
+    };
+
     // --- generate impl ---
     let expanded = quote! {
         impl crate::edge::Edge for #ident {
@@ -704,62 +861,7 @@ pub fn derive_ousia_edge(input: TokenStream) -> TokenStream {
             }
         }
 
-        // Custom Deserialize implementation (excludes meta field, uses default)
-        impl<'de> serde::Deserialize<'de> for #ident {
-            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-            where
-                D: serde::Deserializer<'de>,
-            {
-                #[derive(serde::Deserialize)]
-                #[serde(field_identifier, rename_all = "snake_case")]
-                enum Field {
-                    #(#deserialize_field_variants,)*
-                }
-
-                struct #visitor_name;
-
-                impl<'de> serde::de::Visitor<'de> for #visitor_name {
-                    type Value = #ident;
-
-                    fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
-                        formatter.write_str(concat!("struct ", stringify!(#ident)))
-                    }
-
-                    fn visit_map<V>(self, mut map: V) -> Result<#ident, V::Error>
-                    where
-                        V: serde::de::MapAccess<'de>,
-                    {
-                        #(
-                            let mut #deserialize_field_idents: Option<#deserialize_field_types> = None;
-                        )*
-
-                        while let Some(key) = map.next_key()? {
-                            match key {
-                                #(
-                                    Field::#deserialize_field_variants => {
-                                        if #deserialize_field_idents.is_some() {
-                                            return Err(serde::de::Error::duplicate_field(#deserialize_field_names));
-                                        }
-                                        #deserialize_field_idents = Some(map.next_value()?);
-                                    }
-                                )*
-                            }
-                        }
-
-                        Ok(#ident {
-                            #meta_field_ident: crate::edge::EdgeMeta::new(ulid::Ulid::nil(), ulid::Ulid::nil()),
-                            #(
-                                #deserialize_field_idents: #deserialize_field_idents
-                                    .ok_or_else(|| serde::de::Error::missing_field(#deserialize_field_names))?,
-                            )*
-                        })
-                    }
-                }
-
-                const FIELDS: &[&str] = &[#(#deserialize_field_names),*];
-                deserializer.deserialize_struct(stringify!(#ident), FIELDS, #visitor_name)
-            }
-        }
+        #deserialize_impl
     };
 
     TokenStream::from(expanded)
@@ -795,10 +897,24 @@ pub fn derive_ousia_default(input: TokenStream) -> TokenStream {
         meta_fields[0].ident.as_ref().unwrap()
     };
 
+    // Determine if this is an edge or object based on meta field type
+    let meta_field = fields
+        .iter()
+        .find(|f| f.ident.as_ref().unwrap() == meta_field_ident)
+        .unwrap();
+
+    let meta_type = &meta_field.ty;
+    let meta_type_str = quote!(#meta_type).to_string();
+    let is_edge = meta_type_str.contains("EdgeMeta");
+
     let default_fields = fields.iter().map(|f| {
         let name = f.ident.as_ref().unwrap();
         if name == meta_field_ident {
-            quote! { #name: crate::object::meta::Meta::default() }
+            if is_edge {
+                quote! { #name: crate::edge::meta::EdgeMeta::new(ulid::Ulid::nil(), ulid::Ulid::nil()) }
+            } else {
+                quote! { #name: crate::object::meta::Meta::default() }
+            }
         } else {
             quote! { #name: Default::default() }
         }
