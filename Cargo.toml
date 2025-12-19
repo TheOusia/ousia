@@ -1,33 +1,7 @@
-[package]
-name = "ousia"
-version = "0.1.0"
-edition = "2024"
+[workspace]
+members = ["ousia","ousia_derive", "test_suit"]
+resolver = "2"
 
-[features]
-default = ["derive", "postgres"]
-derive = ["ousia_derive"]
-postgres = ["sqlx"]
-
-[dependencies]
-chrono = { version = "0.4.42", features = ["serde"] }
-once_cell = "1.21.3"
-serde = { version = "1.0.228", features = ["derive"] }
-ulid = { version = "1.2.1", features = ["serde"] }
-ousia_derive = { path = "ousia_derive", optional = true }
-async-trait = "0.1.89"
-serde_json = "1.0.145"
-sqlx = { version = "0.8", features = [
-    "postgres",
-    "runtime-tokio",
-    "derive",
-    "tls-native-tls",
-    "json",
-    "chrono",
-], optional = true}
-tokio = { version = "1", features = ["macros", "time"] }
-
-[dev-dependencies]
-testcontainers = "0.25"
-testcontainers-modules = { version = "0.13", features = ["postgres"] }
-bincode = "1.3"
-rmp-serde = "1.1"
+[patch.crates-io]
+ousia = { path = "ousia" }
+ousia_derive = { path = "ousia_derive" }

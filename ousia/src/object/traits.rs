@@ -70,6 +70,8 @@ pub trait ObjectOwnership {
     fn is_system_owned(&self) -> bool;
 
     fn is_owned_by<O: Object>(&self, owner: &O) -> bool;
+
+    fn set_owner(&mut self, owner: ulid::Ulid);
 }
 
 impl<T: Object> ObjectOwnership for T {
@@ -79,5 +81,9 @@ impl<T: Object> ObjectOwnership for T {
 
     fn is_owned_by<O: Object>(&self, object: &O) -> bool {
         self.meta().owner() == object.meta().id()
+    }
+
+    fn set_owner(&mut self, owner: ulid::Ulid) {
+        self.meta_mut().owner = owner;
     }
 }

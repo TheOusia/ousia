@@ -957,23 +957,23 @@ impl Adapter for PostgresAdapter {
 }
 
 #[cfg(test)]
-pub(crate) mod tests {
-    use crate::{Meta, Object, ObjectMeta};
-    use ousia_derive::{OusiaDefault, OusiaObject};
+mod test {
+    use crate::{
+        Meta, Object, ObjectMeta,
+        adapters::{ObjectRecord, Query, postgres::PostgresAdapter},
+        query::{IndexField, IndexKind, ToIndexValue},
+    };
     use serde::{Deserialize, Serialize};
+    use sqlx::PgPool;
     use testcontainers::ContainerAsync;
     use testcontainers_modules::postgres::Postgres;
 
-    use super::*;
+    use crate::adapters::Adapter;
 
     /// Example: Blog Post object
-    #[derive(OusiaObject, OusiaDefault, Debug, Clone)]
-    #[ousia(
-        type_name = "Post",
-        index = "title:search+sort",
-        index = "status:search"
-    )]
+    #[derive(Serialize, Deserialize, Default, Debug, Clone)]
     pub struct Post {
+        #[serde(skip_serializing)]
         _meta: Meta,
 
         pub title: String,
@@ -981,6 +981,53 @@ pub(crate) mod tests {
         pub status: PostStatus,
         pub published_at: Option<chrono::DateTime<chrono::Utc>>,
         pub tags: Vec<String>,
+    }
+
+    impl Object for Post {
+        const TYPE: &'static str = "Post";
+
+        fn meta(&self) -> &Meta {
+            &self._meta
+        }
+
+        fn meta_mut(&mut self) -> &mut Meta {
+            &mut self._meta
+        }
+
+        fn index_meta(&self) -> crate::query::IndexMeta {
+            let mut values = crate::query::IndexMeta::default();
+            values
+                .0
+                .insert("title".to_string(), self.title.to_index_value());
+            values
+                .0
+                .insert("status".to_string(), self.status.to_index_value());
+            values
+        }
+    }
+
+    struct PostFields {
+        title: &'static IndexField,
+        status: &'static IndexField,
+    }
+
+    impl Post {
+        const FIELDS: &'static PostFields = &PostFields {
+            title: &IndexField {
+                name: "title",
+                kinds: &[IndexKind::Search, IndexKind::Sort],
+            },
+            status: &IndexField {
+                name: "status",
+                kinds: &[IndexKind::Search],
+            },
+        };
+    }
+
+    impl Post {
+        pub fn set_owner(&mut self, owner: ulid::Ulid) {
+            self._meta.owner = owner;
+        }
     }
 
     #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -1009,18 +1056,60 @@ pub(crate) mod tests {
     }
 
     /// Example: User object
-    #[derive(OusiaObject, OusiaDefault, Debug, Clone)]
-    #[ousia(
-        type_name = "User",
-        index = "email:search",
-        index = "username:search+sort"
-    )]
+    #[derive(Serialize, Deserialize, Default, Debug, Clone)]
     pub struct User {
+        #[serde(skip_serializing)]
         _meta: Meta,
 
         pub username: String,
         pub email: String,
         pub display_name: String,
+    }
+
+    impl Object for User {
+        const TYPE: &'static str = "User";
+
+        fn meta(&self) -> &Meta {
+            &self._meta
+        }
+
+        fn meta_mut(&mut self) -> &mut Meta {
+            &mut self._meta
+        }
+
+        fn index_meta(&self) -> crate::query::IndexMeta {
+            let mut values = crate::query::IndexMeta::default();
+            values
+                .0
+                .insert("email".to_string(), self.email.to_index_value());
+            values
+                .0
+                .insert("username".to_string(), self.username.to_index_value());
+            values
+        }
+    }
+
+    struct UserFields {
+        email: &'static IndexField,
+        username: &'static IndexField,
+    }
+    impl User {
+        const FIELDS: &'static UserFields = &UserFields {
+            email: &IndexField {
+                name: "email",
+                kinds: &[IndexKind::Search],
+            },
+            username: &IndexField {
+                name: "username",
+                kinds: &[IndexKind::Search, IndexKind::Sort],
+            },
+        };
+    }
+
+    impl User {
+        pub fn set_owner(&mut self, owner: ulid::Ulid) {
+            self._meta.owner = owner;
+        }
     }
 
     #[cfg(test)]

@@ -1,0 +1,34 @@
+[package]
+name = "ousia"
+version = "1.0.0"
+edition = "2024"
+
+[features]
+default = ["derive"]
+full = ["derive", "postgres"]
+derive = ["dep:ousia_derive"]
+postgres = ["dep:sqlx"]
+
+[dependencies]
+chrono = { version = "0.4.42", features = ["serde"] }
+once_cell = "1.21.3"
+serde = { version = "1.0.228", features = ["derive"] }
+ulid = { version = "1.2.1", features = ["serde"] }
+async-trait = "0.1.89"
+serde_json = "1.0.145"
+sqlx = { version = "0.8", features = [
+    "postgres",
+    "runtime-tokio",
+    "derive",
+    "tls-native-tls",
+    "json",
+    "chrono",
+], optional = true}
+tokio = { version = "1", features = ["macros", "time"] }
+ousia_derive = { version = "1", path = "../ousia_derive", optional = true }
+
+[dev-dependencies]
+testcontainers = "0.25"
+testcontainers-modules = { version = "0.13", features = ["postgres"] }
+bincode = "1.3"
+rmp-serde = "1.1"

@@ -12,13 +12,12 @@ use crate::{
     error::Error,
     object::SYSTEM_OWNER,
     query::{
-        Comparison, Cursor, IndexField, Operator, QueryFilter, QueryMode, QuerySearch, QuerySort,
-        ToIndexValue,
+        Comparison, Cursor, IndexField, Operator, QueryFilter, QueryMode, QuerySearch, ToIndexValue,
     },
 };
 
 #[derive(Debug, Serialize, Deserialize)]
-pub(crate) struct ObjectRecord {
+pub struct ObjectRecord {
     pub id: Ulid,
     pub type_name: String,
     pub owner: Ulid,
@@ -29,7 +28,7 @@ pub(crate) struct ObjectRecord {
 }
 
 impl ObjectRecord {
-    pub(crate) fn to_object<T: Object>(self) -> Result<T, Error> {
+    pub fn to_object<T: Object>(self) -> Result<T, Error> {
         if self.type_name != T::TYPE {
             return Err(Error::TypeMismatch);
         }
@@ -44,7 +43,7 @@ impl ObjectRecord {
         Ok(val)
     }
 
-    pub(crate) fn from_object<'a, T: Object>(obj: &'a T) -> Self {
+    pub fn from_object<'a, T: Object>(obj: &'a T) -> Self {
         let meta = obj.meta();
         Self {
             id: meta.id,
@@ -456,7 +455,7 @@ impl<'a, E: Edge, O: Object> EdgeQueryContext<'a, E, O> {
 /// -----------------------------
 
 #[async_trait]
-pub(crate) trait Adapter: Send + Sync + 'static {
+pub trait Adapter: Send + Sync + 'static {
     /* ---------------- OBJECTS ---------------- */
     async fn insert_object(&self, record: ObjectRecord) -> Result<(), Error>;
     async fn fetch_object(&self, id: Ulid) -> Result<Option<ObjectRecord>, Error>;

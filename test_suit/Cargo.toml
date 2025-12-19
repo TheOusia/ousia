@@ -1,0 +1,26 @@
+[package]
+name = "ousia_test_suit"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+chrono = { version = "0.4.42", features = ["serde"] }
+ousia = { version = "1", path = "../ousia", features = ["full"] }
+serde = "1.0.228"
+tokio = { version = "1", features = ["macros", "time"] }
+sqlx = { version = "0.8", features = [
+    "postgres",
+    "runtime-tokio",
+    "derive",
+    "tls-native-tls",
+    "json",
+    "chrono",
+]}
+testcontainers = "0.25"
+testcontainers-modules = { version = "0.13", features = ["postgres"] }
+ulid = "1.2.1"
+
+[dev-dependencies]
+bincode = "1.3"
+rmp-serde = "1.1"

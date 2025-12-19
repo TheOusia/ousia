@@ -1,12 +1,25 @@
 use proc_macro::TokenStream;
+use proc_macro_crate::{FoundCrate, crate_name};
 use quote::{format_ident, quote};
 use std::collections::BTreeMap;
-use syn::ExprPath;
 use syn::{
-    Attribute, Data, DeriveInput, Expr, ExprLit, Field, Fields, Lit, Meta, Type, parse_macro_input,
+    Attribute, Data, DeriveInput, Expr, ExprLit, Field, Fields, Lit, Meta, parse_macro_input,
 };
 
 const RESERVED_META_FIELDS: &[&str] = &["id", "owner", "type", "created_at", "updated_at"];
+
+fn import_ousia() -> proc_macro2::TokenStream {
+    // This finds the ousia crate in the user's dependencies
+    let found_crate = crate_name("ousia").unwrap_or(FoundCrate::Itself);
+
+    match found_crate {
+        FoundCrate::Itself => quote! { ::ousia },
+        FoundCrate::Name(name) => {
+            let ident = syn::Ident::new(&name, proc_macro2::Span::call_site());
+            quote! { ::#ident }
+        }
+    }
+}
 
 /// Extract #[ousia(...)] attributes from struct
 fn get_ousia_attr(attrs: &[Attribute]) -> Option<&Attribute> {
@@ -94,12 +107,13 @@ fn parse_ousia_attr(attr: Option<&Attribute>) -> (Option<String>, Vec<(String, S
 
 /// Helper to parse kind strings into index kind tokens
 fn parse_index_kinds(kind_str: &str) -> Vec<proc_macro2::TokenStream> {
+    let ousia = import_ousia();
     kind_str
         .split('+')
         .map(|k| k.trim())
         .map(|k| match k {
-            "search" => quote!(crate::query::IndexKind::Search),
-            "sort" => quote!(crate::query::IndexKind::Sort),
+            "search" => quote!(#ousia::query::IndexKind::Search),
+            "sort" => quote!(#ousia::query::IndexKind::Sort),
             _ => panic!("Invalid index kind `{}`. Valid kinds: search, sort", k),
         })
         .collect()
@@ -107,6 +121,7 @@ fn parse_index_kinds(kind_str: &str) -> Vec<proc_macro2::TokenStream> {
 
 #[proc_macro_derive(OusiaObject, attributes(ousia))]
 pub fn derive_ousia_object(input: TokenStream) -> TokenStream {
+    let ousia = import_ousia();
     let input = parse_macro_input!(input as DeriveInput);
     let ident = &input.ident;
 
@@ -179,7 +194,7 @@ pub fn derive_ousia_object(input: TokenStream) -> TokenStream {
         let kinds = parse_index_kinds(kind);
 
         quote! {
-            crate::query::IndexField {
+            #ousia::query::IndexField {
                 name: #name,
                 kinds: &[#(#kinds),*],
             }
@@ -194,13 +209,13 @@ pub fn derive_ousia_object(input: TokenStream) -> TokenStream {
         quote! {
             values.insert(
                 #name_str.to_string(),
-                crate::query::ToIndexValue::to_index_value(&self.#field_name)
+                #ousia::query::ToIndexValue::to_index_value(&self.#field_name)
             );
         }
     });
 
     // --- generate Indexes struct ---
-    let indexes_struct_name = format_ident!("{}Indexes", ident);
+    let indexes_struct_name = format_ident!("{}Fields", ident);
 
     // Build a map of field names to their kinds (merge multiple declarations)
     let mut field_kinds_map: BTreeMap<String, Vec<String>> = BTreeMap::new();
@@ -214,7 +229,7 @@ pub fn derive_ousia_object(input: TokenStream) -> TokenStream {
     let indexes_struct_fields = field_kinds_map.keys().map(|name| {
         let field_ident = format_ident!("{}", name);
         quote! {
-            pub #field_ident: crate::query::IndexField
+            pub #field_ident: #ousia::query::IndexField
         }
     });
 
@@ -241,7 +256,7 @@ pub fn derive_ousia_object(input: TokenStream) -> TokenStream {
         };
 
         quote! {
-            #field_ident: crate::query::IndexField {
+            #field_ident: #ousia::query::IndexField {
                 name: #name_str,
                 kinds: &[#(#unique_kinds),*],
             }
@@ -320,7 +335,7 @@ pub fn derive_ousia_object(input: TokenStream) -> TokenStream {
                             while map.next_entry::<String, serde_json::Value>()?.is_some() {}
 
                             Ok(#ident {
-                                #meta_field_ident: crate::object::meta::Meta::default(),
+                                #meta_field_ident: #ousia::object::meta::Meta::default(),
                             })
                         }
 
@@ -329,7 +344,7 @@ pub fn derive_ousia_object(input: TokenStream) -> TokenStream {
                             E: serde::de::Error,
                         {
                             Ok(#ident {
-                                #meta_field_ident: crate::object::meta::Meta::default(),
+                                #meta_field_ident: #ousia::object::meta::Meta::default(),
                             })
                         }
                     }
@@ -383,7 +398,7 @@ pub fn derive_ousia_object(input: TokenStream) -> TokenStream {
                             }
 
                             Ok(#ident {
-                                #meta_field_ident: crate::object::meta::Meta::default(),
+                                #meta_field_ident: #ousia::object::meta::Meta::default(),
                                 #(
                                     #deserialize_field_idents: #deserialize_field_idents
                                         .ok_or_else(|| serde::de::Error::missing_field(#deserialize_field_names))?,
@@ -401,32 +416,31 @@ pub fn derive_ousia_object(input: TokenStream) -> TokenStream {
 
     // --- generate impl ---
     let expanded = quote! {
-        impl crate::object::traits::Object for #ident {
+        const _: () = {
+            use #ousia::object::traits::Object;
+            use #ousia::object::traits::ObjectOwnership;
+        };
+
+        impl #ousia::object::traits::Object for #ident {
             const TYPE: &'static str = #type_name;
 
-            fn meta(&self) -> &crate::object::meta::Meta {
+            fn meta(&self) -> &#ousia::object::meta::Meta {
                 &self.#meta_field_ident
             }
 
-            fn meta_mut(&mut self) -> &mut crate::object::meta::Meta {
+            fn meta_mut(&mut self) -> &mut #ousia::object::meta::Meta {
                 &mut self.#meta_field_ident
             }
 
-            fn index_meta(&self) -> crate::query::IndexMeta {
+            fn index_meta(&self) -> #ousia::query::IndexMeta {
                 let mut values = std::collections::BTreeMap::new();
                 #(#index_meta_insertions)*
-                crate::query::IndexMeta(values)
+                #ousia::query::IndexMeta(values)
             }
         }
 
-        impl #ident {
-            pub fn set_owner(&mut self, owner: ulid::Ulid) {
-                   self.#meta_field_ident.owner = owner;
-            }
-        }
-
-        impl crate::query::IndexQuery for #ident {
-            fn indexed_fields() -> &'static [crate::query::IndexField] {
+        impl #ousia::query::IndexQuery for #ident {
+            fn indexed_fields() -> &'static [#ousia::query::IndexField] {
                 &[ #(#index_fields),* ]
             }
         }
@@ -522,6 +536,7 @@ fn parse_edge_attr(
 
 #[proc_macro_derive(OusiaEdge, attributes(ousia))]
 pub fn derive_ousia_edge(input: TokenStream) -> TokenStream {
+    let ousia = import_ousia();
     let input = parse_macro_input!(input as DeriveInput);
     let ident = &input.ident;
 
@@ -593,7 +608,7 @@ pub fn derive_ousia_edge(input: TokenStream) -> TokenStream {
         let kinds = parse_index_kinds(kind);
 
         quote! {
-            crate::query::IndexField {
+            #ousia::query::IndexField {
                 name: #name,
                 kinds: &[#(#kinds),*],
             }
@@ -608,7 +623,7 @@ pub fn derive_ousia_edge(input: TokenStream) -> TokenStream {
         quote! {
             values.insert(
                 #name_str.to_string(),
-                crate::query::ToIndexValue::to_index_value(&self.#field_name)
+                #ousia::query::ToIndexValue::to_index_value(&self.#field_name)
             );
         }
     });
@@ -628,7 +643,7 @@ pub fn derive_ousia_edge(input: TokenStream) -> TokenStream {
     let indexes_struct_fields = field_kinds_map.keys().map(|name| {
         let field_ident = format_ident!("{}", name);
         quote! {
-            pub #field_ident: crate::query::IndexField
+            pub #field_ident: #ousia::query::IndexField
         }
     });
 
@@ -655,7 +670,7 @@ pub fn derive_ousia_edge(input: TokenStream) -> TokenStream {
         };
 
         quote! {
-            #field_ident: crate::query::IndexField {
+            #field_ident: #ousia::query::IndexField {
                 name: #name_str,
                 kinds: &[#(#unique_kinds),*],
             }
@@ -733,7 +748,7 @@ pub fn derive_ousia_edge(input: TokenStream) -> TokenStream {
                             while map.next_entry::<String, serde_json::Value>()?.is_some() {}
 
                             Ok(#ident {
-                                #meta_field_ident: crate::edge::EdgeMeta::new(ulid::Ulid::nil(), ulid::Ulid::nil()),
+                                #meta_field_ident: #ousia::edge::EdgeMeta::new(ulid::Ulid::nil(), ulid::Ulid::nil()),
                             })
                         }
 
@@ -742,7 +757,7 @@ pub fn derive_ousia_edge(input: TokenStream) -> TokenStream {
                             E: serde::de::Error,
                         {
                             Ok(#ident {
-                                #meta_field_ident: crate::edge::EdgeMeta::new(ulid::Ulid::nil(), ulid::Ulid::nil()),
+                                #meta_field_ident: #ousia::edge::EdgeMeta::new(ulid::Ulid::nil(), ulid::Ulid::nil()),
                             })
                         }
                     }
@@ -796,7 +811,7 @@ pub fn derive_ousia_edge(input: TokenStream) -> TokenStream {
                             }
 
                             Ok(#ident {
-                                #meta_field_ident: crate::edge::EdgeMeta::new(ulid::Ulid::nil(), ulid::Ulid::nil()),
+                                #meta_field_ident: #ousia::edge::EdgeMeta::new(ulid::Ulid::nil(), ulid::Ulid::nil()),
                                 #(
                                     #deserialize_field_idents: #deserialize_field_idents
                                         .ok_or_else(|| serde::de::Error::missing_field(#deserialize_field_names))?,
@@ -814,26 +829,26 @@ pub fn derive_ousia_edge(input: TokenStream) -> TokenStream {
 
     // --- generate impl ---
     let expanded = quote! {
-        impl crate::edge::Edge for #ident {
+        impl #ousia::edge::Edge for #ident {
             const TYPE: &'static str = #type_name;
 
-            fn meta(&self) -> &crate::edge::EdgeMeta {
+            fn meta(&self) -> &#ousia::edge::EdgeMeta {
                 &self.#meta_field_ident
             }
 
-            fn meta_mut(&mut self) -> &mut crate::edge::EdgeMeta {
+            fn meta_mut(&mut self) -> &mut #ousia::edge::EdgeMeta {
                 &mut self.#meta_field_ident
             }
 
-            fn index_meta(&self) -> crate::query::IndexMeta {
+            fn index_meta(&self) -> #ousia::query::IndexMeta {
                 let mut values = std::collections::BTreeMap::new();
                 #(#index_meta_insertions)*
-                crate::query::IndexMeta(values)
+                #ousia::query::IndexMeta(values)
             }
         }
 
-        impl crate::query::IndexQuery for #ident {
-            fn indexed_fields() -> &'static [crate::query::IndexField] {
+        impl #ousia::query::IndexQuery for #ident {
+            fn indexed_fields() -> &'static [#ousia::query::IndexField] {
                 &[ #(#index_fields),* ]
             }
         }
@@ -869,6 +884,7 @@ pub fn derive_ousia_edge(input: TokenStream) -> TokenStream {
 
 #[proc_macro_derive(OusiaDefault)]
 pub fn derive_ousia_default(input: TokenStream) -> TokenStream {
+    let ousia = import_ousia();
     let input = parse_macro_input!(input as DeriveInput);
     let ident = &input.ident;
 
@@ -911,9 +927,9 @@ pub fn derive_ousia_default(input: TokenStream) -> TokenStream {
         let name = f.ident.as_ref().unwrap();
         if name == meta_field_ident {
             if is_edge {
-                quote! { #name: crate::edge::meta::EdgeMeta::new(ulid::Ulid::nil(), ulid::Ulid::nil()) }
+                quote! { #name: #ousia::edge::meta::EdgeMeta::new(ulid::Ulid::nil(), ulid::Ulid::nil()) }
             } else {
-                quote! { #name: crate::object::meta::Meta::default() }
+                quote! { #name: #ousia::object::meta::Meta::default() }
             }
         } else {
             quote! { #name: Default::default() }

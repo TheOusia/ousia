@@ -114,9 +114,8 @@ impl ToIndexValue for chrono::DateTime<chrono::Utc> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IndexKind {
-    Search,     // equality + adapter-defined text matching
-    Sort,       // ordered comparison
-    SearchSort, // both
+    Search, // equality + adapter-defined text matching
+    Sort,   // ordered comparison
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -130,7 +129,7 @@ pub trait IndexQuery {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct QueryFilter {
+pub struct QueryFilter {
     pub field: &'static IndexField,
     pub value: IndexValue,
     pub mode: QueryMode,
