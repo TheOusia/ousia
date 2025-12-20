@@ -891,8 +891,6 @@ impl Adapter for PostgresAdapter {
             where_clause, order_clause
         );
 
-        println!("SQL: {}", sql);
-
         if let Some(limit) = plan.limit {
             sql.push_str(&format!(" LIMIT {}", limit));
         }
@@ -974,359 +972,85 @@ impl Adapter for PostgresAdapter {
     }
 }
 
-#[cfg(test)]
-mod test {
-    use crate::{
-        Meta, Object, ObjectMeta,
-        adapters::{ObjectRecord, Query, postgres::PostgresAdapter},
-        query::{IndexField, IndexKind, ToIndexValue},
-    };
-    use serde::{Deserialize, Serialize};
-    use sqlx::PgPool;
-    use testcontainers::ContainerAsync;
-    use testcontainers_modules::postgres::Postgres;
+#[cfg(feature = "profiling")]
+#[derive(Debug, Default)]
+pub struct ProfileData {
+    pub query_ms: std::time::Duration,     // Actual database time
+    pub serialize_ms: std::time::Duration, // Serde deserialization
+}
 
-    use crate::adapters::Adapter;
+#[cfg(feature = "profiling")]
+impl PostgresAdapter {
+    pub async fn query_objects_profiled<T: crate::Object>(
+        &self,
+        type_name: &'static str,
+        plan: Query,
+    ) -> Result<(Vec<T>, ProfileData), Error> {
+        use std::time::Instant;
 
-    /// Example: Blog Post object
-    #[derive(Serialize, Deserialize, Default, Debug, Clone)]
-    pub struct Post {
-        #[serde(skip_serializing)]
-        _meta: Meta,
+        let mut profile = ProfileData::default();
 
-        pub title: String,
-        pub content: String,
-        pub status: PostStatus,
-        pub published_at: Option<chrono::DateTime<chrono::Utc>>,
-        pub tags: Vec<String>,
-    }
+        // Database query time
+        let db_start = Instant::now();
+        let where_clause = Self::build_object_query_conditions(&plan.filters);
+        let order_clause = Self::build_order_clause(&plan.filters);
 
-    impl Object for Post {
-        const TYPE: &'static str = "Post";
+        let mut sql = format!(
+            r#"
+                SELECT id, type, owner, created_at, updated_at, data, index_meta
+                FROM objects
+                {}
+                {}
+                "#,
+            where_clause, order_clause
+        );
 
-        fn meta(&self) -> &Meta {
-            &self._meta
+        if let Some(limit) = plan.limit {
+            sql.push_str(&format!(" LIMIT {}", limit));
         }
 
-        fn meta_mut(&mut self) -> &mut Meta {
-            &mut self._meta
+        if let Some(offset) = plan.offset {
+            sql.push_str(&format!(" OFFSET {}", offset));
         }
 
-        fn index_meta(&self) -> crate::query::IndexMeta {
-            let mut values = crate::query::IndexMeta::default();
-            values
-                .0
-                .insert("title".to_string(), self.title.to_index_value());
-            values
-                .0
-                .insert("status".to_string(), self.status.to_index_value());
-            values
-        }
-    }
+        let mut query = sqlx::query(&sql)
+            .bind(type_name)
+            .bind(plan.owner.to_string());
 
-    struct PostFields {
-        title: &'static IndexField,
-        status: &'static IndexField,
-    }
+        query = Self::query_bind_filters(query, &plan.filters);
 
-    impl Post {
-        const FIELDS: &'static PostFields = &PostFields {
-            title: &IndexField {
-                name: "title",
-                kinds: &[IndexKind::Search, IndexKind::Sort],
-            },
-            status: &IndexField {
-                name: "status",
-                kinds: &[IndexKind::Search],
-            },
-        };
-    }
+        let pool = self.pool.clone();
+        let rows = query.fetch_all(&pool).await.unwrap();
+        profile.query_ms = db_start.elapsed();
 
-    impl Post {
-        pub fn set_owner(&mut self, owner: ulid::Ulid) {
-            self._meta.owner = owner;
-        }
-    }
+        // Row mapping time
+        let map_start = Instant::now();
+        let records: Vec<T> = rows
+            .into_iter()
+            .filter_map(|row| {
+                let data_json: serde_json::Value = row.try_get("data").unwrap();
+                // let type_name = row.try_get::<String, _>("type").unwrap();
 
-    #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
-    pub enum PostStatus {
-        Draft,
-        Published,
-        Archived,
-    }
+                let id = Ulid::from_string(&row.try_get::<String, _>("id").unwrap()).unwrap();
 
-    impl Default for PostStatus {
-        fn default() -> Self {
-            PostStatus::Draft
-        }
-    }
+                let owner = Ulid::from_string(&row.try_get::<String, _>("owner").unwrap()).unwrap();
 
-    // Implement ToIndexValue for custom enum
-    impl crate::query::ToIndexValue for PostStatus {
-        fn to_index_value(&self) -> crate::query::IndexValue {
-            let s = match self {
-                PostStatus::Draft => "draft",
-                PostStatus::Published => "published",
-                PostStatus::Archived => "archived",
-            };
-            crate::query::IndexValue::String(s.to_string())
-        }
-    }
+                let created_at = row.try_get("created_at").unwrap();
 
-    /// Example: User object
-    #[derive(Serialize, Deserialize, Default, Debug, Clone)]
-    pub struct User {
-        #[serde(skip_serializing)]
-        _meta: Meta,
+                let updated_at = row.try_get("updated_at").unwrap();
 
-        pub username: String,
-        pub email: String,
-        pub display_name: String,
-    }
+                let mut obj = serde_json::from_value::<T>(data_json).unwrap();
 
-    impl Object for User {
-        const TYPE: &'static str = "User";
+                let meta = obj.meta_mut();
+                meta.id = id;
+                meta.owner = owner;
+                meta.created_at = created_at;
+                meta.updated_at = updated_at;
+                Some(obj)
+            })
+            .collect();
+        profile.serialize_ms = map_start.elapsed();
 
-        fn meta(&self) -> &Meta {
-            &self._meta
-        }
-
-        fn meta_mut(&mut self) -> &mut Meta {
-            &mut self._meta
-        }
-
-        fn index_meta(&self) -> crate::query::IndexMeta {
-            let mut values = crate::query::IndexMeta::default();
-            values
-                .0
-                .insert("email".to_string(), self.email.to_index_value());
-            values
-                .0
-                .insert("username".to_string(), self.username.to_index_value());
-            values
-        }
-    }
-
-    struct UserFields {
-        email: &'static IndexField,
-        username: &'static IndexField,
-    }
-    impl User {
-        const FIELDS: &'static UserFields = &UserFields {
-            email: &IndexField {
-                name: "email",
-                kinds: &[IndexKind::Search],
-            },
-            username: &IndexField {
-                name: "username",
-                kinds: &[IndexKind::Search, IndexKind::Sort],
-            },
-        };
-    }
-
-    impl User {
-        pub fn set_owner(&mut self, owner: ulid::Ulid) {
-            self._meta.owner = owner;
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn setup_test_db() -> (ContainerAsync<Postgres>, PgPool) {
-        use sqlx::postgres::PgPoolOptions;
-        use testcontainers::{ImageExt, runners::AsyncRunner as _};
-
-        let postgres = match Postgres::default()
-            .with_password("postgres")
-            .with_user("postgres")
-            .with_db_name("postgres")
-            .with_tag("16-alpine")
-            .start()
-            .await
-        {
-            Ok(postgres) => postgres,
-            Err(err) => panic!("Failed to start Postgres: {}", err),
-        };
-        // Give DB time to start
-        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-
-        let port = postgres.get_host_port_ipv4(5432).await.unwrap();
-        let db_url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
-
-        let pool = match PgPoolOptions::new()
-            .max_connections(5)
-            .connect(&db_url)
-            .await
-        {
-            Ok(pool) => pool,
-            Err(err) => panic!("Failed to connect to Postgres: {}", err),
-        };
-
-        (postgres, pool)
-    }
-
-    #[tokio::test]
-    async fn test_adapter_insert() {
-        let (_resource, pool) = setup_test_db().await;
-        let adapter = PostgresAdapter::new(pool);
-
-        if let Err(err) = adapter.init_schema().await {
-            panic!("Error: {:#?}", err);
-        }
-
-        let user = User::default();
-        if let Err(err) = adapter
-            .insert_object(ObjectRecord::from_object(&user))
-            .await
-        {
-            panic!("Error: {:#?}", err);
-        };
-    }
-
-    #[tokio::test]
-    async fn test_adapter_get() {
-        let (_resource, pool) = setup_test_db().await;
-        let adapter = PostgresAdapter::new(pool);
-
-        if let Err(err) = adapter.init_schema().await {
-            panic!("Error: {:#?}", err);
-        }
-
-        let mut user = User::default();
-        user.username = "test_user".to_string();
-        if let Err(err) = adapter
-            .insert_object(ObjectRecord::from_object(&user))
-            .await
-        {
-            panic!("Error: {:#?}", err);
-        };
-
-        let user_result = adapter.fetch_object(user.id()).await.unwrap();
-        assert!(user_result.is_some());
-
-        let _user: User = user_result.unwrap().to_object().unwrap();
-        assert_eq!(_user.id(), user.id());
-        assert_eq!(_user.username, user.username);
-    }
-
-    #[tokio::test]
-    async fn test_adapter_update() {
-        let (_resource, pool) = setup_test_db().await;
-        let adapter = PostgresAdapter::new(pool);
-
-        if let Err(err) = adapter.init_schema().await {
-            panic!("Error: {:#?}", err);
-        }
-
-        let mut user = User::default();
-        user.username = "test_user".to_string();
-        if let Err(err) = adapter
-            .insert_object(ObjectRecord::from_object(&user))
-            .await
-        {
-            panic!("Error: {:#?}", err);
-        } else {
-            let user_result = adapter.fetch_object(user.id()).await.unwrap();
-            assert!(user_result.is_some());
-
-            let _user: User = user_result.unwrap().to_object().unwrap();
-            assert_eq!(_user.id(), user.id());
-            assert_eq!(_user.username, user.username);
-        }
-
-        user.username = "new_username".to_string();
-        if let Err(err) = adapter
-            .update_object(ObjectRecord::from_object(&user))
-            .await
-        {
-            panic!("Error: {:#?}", err);
-        } else {
-            let user_result = adapter.fetch_object(user.id()).await.unwrap();
-            assert!(user_result.is_some());
-
-            let _user: User = user_result.unwrap().to_object().unwrap();
-            assert_eq!(_user.id(), user.id());
-            assert_eq!(_user.username, user.username);
-        }
-    }
-
-    #[tokio::test]
-    async fn test_adapter_query() {
-        let (_resource, pool) = setup_test_db().await;
-        let adapter = PostgresAdapter::new(pool);
-
-        if let Err(err) = adapter.init_schema().await {
-            panic!("Error: {:#?}", err);
-        }
-
-        let mut user = User::default();
-        user.username = "test_user".to_string();
-        user.email = "test@gmail.com".to_string();
-        if let Err(err) = adapter
-            .insert_object(ObjectRecord::from_object(&user))
-            .await
-        {
-            panic!("Error: {:#?}", err);
-        }
-        let user_result = adapter.fetch_object(user.id()).await.unwrap();
-        assert!(user_result.is_some());
-
-        let users = adapter
-            .query_objects(
-                User::TYPE,
-                Query::default().where_eq(&User::FIELDS.email, "efedua.bell@gmail.com"),
-            )
-            .await
-            .unwrap();
-        assert_eq!(users.len(), 0);
-
-        let users = adapter
-            .query_objects(
-                User::TYPE,
-                Query::default().where_eq(&User::FIELDS.email, "test@gmail.com"),
-            )
-            .await
-            .unwrap();
-        assert_eq!(users.len(), 1);
-
-        let mut post_1 = Post::default();
-        post_1.set_owner(user.id());
-
-        adapter
-            .insert_object(ObjectRecord::from_object(&post_1))
-            .await
-            .unwrap();
-
-        post_1.status = PostStatus::Published;
-        adapter
-            .update_object(ObjectRecord::from_object(&post_1))
-            .await
-            .unwrap();
-
-        let _post: Post = adapter
-            .fetch_object(post_1.id())
-            .await
-            .unwrap()
-            .expect("Post not found")
-            .to_object()
-            .unwrap();
-        assert_eq!(_post.id(), post_1.id());
-
-        let posts = adapter
-            .query_objects(
-                Post::TYPE,
-                Query::new(user.id()).where_eq(&Post::FIELDS.status, PostStatus::Published),
-            )
-            .await
-            .unwrap();
-        assert_eq!(posts.len(), 1);
-
-        let posts = adapter
-            .query_objects(
-                Post::TYPE,
-                Query::new(user.id()).where_eq(&Post::FIELDS.status, PostStatus::Draft),
-            )
-            .await
-            .unwrap();
-        assert_eq!(posts.len(), 0);
+        Ok((records, profile))
     }
 }

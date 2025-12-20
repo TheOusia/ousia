@@ -5,9 +5,10 @@ edition = "2024"
 
 [features]
 default = ["derive"]
-full = ["derive", "postgres"]
+full = ["derive", "postgres", "profiling"]
 derive = ["dep:ousia_derive"]
 postgres = ["dep:sqlx"]
+profiling = []
 
 [dependencies]
 chrono = { version = "0.4.42", features = ["serde"] }
@@ -31,4 +32,3 @@ ousia_derive = { version = "1", path = "../ousia_derive", optional = true }
 testcontainers = "0.25"
 testcontainers-modules = { version = "0.13", features = ["postgres"] }
 bincode = "1.3"
-rmp-serde = "1.1"

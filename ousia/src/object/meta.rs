@@ -5,8 +5,6 @@ use crate::object::SYSTEM_OWNER;
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Meta {
     pub id: ulid::Ulid,
-
-    #[serde(skip_serializing)]
     pub owner: ulid::Ulid,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,

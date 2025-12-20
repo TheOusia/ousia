@@ -13,7 +13,7 @@ use ousia::adapters::Adapter;
 use ulid::Ulid;
 
 /// Example: Blog Post object
-#[derive(OusiaObject, OusiaDefault, Debug, Clone)]
+#[derive(OusiaObject, OusiaDefault, Debug)]
 #[ousia(
     type_name = "Post",
     index = "title:search+sort",
@@ -29,7 +29,7 @@ pub struct Post {
     pub tags: Vec<String>,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
 pub enum PostStatus {
     Draft,
     Published,
@@ -299,7 +299,10 @@ mod postgres_adpater_test {
 }
 
 mod engine_test {
+    use std::time::Instant;
+
     use ousia::{EdgeMetaTrait as _, EdgeQuery, Engine, Error};
+    use rand::distr::Alphanumeric;
 
     use super::*;
 
@@ -679,5 +682,73 @@ mod engine_test {
             .await;
 
         assert!(matches!(result, Err(Error::NotFound)));
+    }
+
+    #[tokio::test]
+    async fn profile_query_objects_profiled() {
+        let (_resource, pool) = setup_test_db().await;
+        let adapter = PostgresAdapter::new(pool);
+        adapter.init_schema().await.unwrap();
+
+        // Create users
+        // Randomly generate and insert 100 users
+        use rand::{Rng, rng};
+
+        for _ in 0..1_000 {
+            let mut user = User::default();
+            let rand_str: String = rng()
+                .sample_iter(&Alphanumeric)
+                .take(10)
+                .map(char::from)
+                .collect();
+            user.display_name = format!("User{}", rand_str);
+            user.username = format!("user_{}", rand_str);
+            user.email = format!("{}@example.com", rand_str);
+
+            adapter
+                .insert_object(ObjectRecord::from_object(&user))
+                .await
+                .unwrap();
+        }
+
+        let mut alice = User::default();
+        alice.display_name = "Alice".to_string();
+        alice.username = "alice".to_string();
+        alice.email = "alice@example.com".to_string();
+        adapter
+            .insert_object(ObjectRecord::from_object(&alice))
+            .await
+            .unwrap();
+
+        let mut bob = User::default();
+        bob.display_name = "Bob".to_string();
+        bob.username = "bob".to_string();
+        bob.email = "bob@example.com".to_string();
+        adapter
+            .insert_object(ObjectRecord::from_object(&bob))
+            .await
+            .unwrap();
+
+        let mut charlie = User::default();
+        charlie.display_name = "Charlie".to_string();
+        charlie.username = "charlie".to_string();
+        charlie.email = "charlie@example.com".to_string();
+        adapter
+            .insert_object(ObjectRecord::from_object(&charlie))
+            .await
+            .unwrap();
+
+        // Profiling
+        let (result, profile) = adapter
+            .query_objects_profiled::<User>(
+                User::TYPE,
+                Query::default()
+                    .where_eq(&User::FIELDS.username, "bob")
+                    .where_eq(&User::FIELDS.email, "bob@example.com"),
+            )
+            .await
+            .unwrap();
+
+        println!("Profiled: {:?} ", profile);
     }
 }
