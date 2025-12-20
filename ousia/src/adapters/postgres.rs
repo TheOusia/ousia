@@ -130,7 +130,25 @@ impl PostgresAdapter {
 
         sqlx::query(
             r#"
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_edges_key ON edges("from", "to", type);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_edges_key ON public.edges("from", "to", type);
+            "#,
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| Error::Storage(e.to_string()))?;
+
+        sqlx::query(
+            r#"
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_edges_from_key ON public.edges("from", type);
+            "#,
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| Error::Storage(e.to_string()))?;
+
+        sqlx::query(
+            r#"
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_edges_to_key ON public.edges("to", type);
             "#,
         )
         .execute(&mut *tx)
