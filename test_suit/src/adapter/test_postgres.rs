@@ -301,7 +301,7 @@ mod postgres_adpater_test {
 mod engine_test {
     use std::time::Instant;
 
-    use ousia::{EdgeMetaTrait as _, EdgeQuery, Engine, Error};
+    use ousia::{EdgeMetaTrait as _, EdgeQuery, Engine, Error, filter};
     use rand::distr::Alphanumeric;
 
     use super::*;

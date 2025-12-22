@@ -168,16 +168,17 @@ impl Query {
 
 #[macro_export]
 macro_rules! filter {
-    ($field:ident, $value:expr) => {
+    ($field:expr, $value:expr) => {{
+        use $crate::query::ToIndexValue;
         $crate::query::QueryFilter {
             field: $field,
             value: $value.to_index_value(),
-            mode: QueryMode::Search(QuerySearch {
-                comparison: Comparison::Equal,
-                operator: Operator::default(),
+            mode: $crate::query::QueryMode::Search($crate::query::QuerySearch {
+                comparison: $crate::query::Comparison::Equal,
+                operator: $crate::query::Operator::default(),
             }),
         }
-    };
+    }};
 }
 
 pub struct QueryContext<'a, T> {
