@@ -683,6 +683,39 @@ impl Adapter for PostgresAdapter {
         }
     }
 
+    async fn find_object(
+        &self,
+        type_name: &'static str,
+        owner: Ulid,
+        filters: &[QueryFilter],
+    ) -> Result<Option<ObjectRecord>, Error> {
+        let where_clause = Self::build_object_query_conditions(&filters.to_vec());
+        let order_clause = Self::build_order_clause(&filters.to_vec());
+
+        let sql = format!(
+            r#"
+            SELECT id, type, owner, created_at, updated_at, data, index_meta
+            FROM objects
+            {}
+            {}
+            "#,
+            where_clause, order_clause
+        );
+
+        let mut query = sqlx::query(&sql).bind(type_name).bind(owner.to_string());
+
+        let f = filters.to_vec();
+        query = Self::query_bind_filters(query, &f);
+
+        let pool = self.pool.clone();
+        let row = query
+            .fetch_one(&pool)
+            .await
+            .map_err(|err| Error::Storage(err.to_string()))?;
+
+        Ok(Self::map_row_to_object_record(row).ok())
+    }
+
     async fn query_objects(
         &self,
         type_name: &'static str,

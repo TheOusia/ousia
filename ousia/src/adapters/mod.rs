@@ -474,6 +474,13 @@ pub trait Adapter: Send + Sync + 'static {
 
     /* ---------------- QUERIES ---------------- */
     /// Fetch ALL objects matching `plan`. Filters by owner.
+    async fn find_object(
+        &self,
+        type_name: &'static str,
+        owner: Ulid,
+        filters: &[QueryFilter],
+    ) -> Result<Option<ObjectRecord>, Error>;
+
     async fn query_objects(
         &self,
         type_name: &'static str,
