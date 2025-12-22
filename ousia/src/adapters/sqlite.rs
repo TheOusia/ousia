@@ -1,8 +1,8 @@
 use chrono::Utc;
 use sqlx::{
-    PgPool, Postgres, Row,
-    postgres::{PgArguments, PgRow},
-    query::{Query as PgQuery, QueryScalar},
+    Row, Sqlite,
+    query::{Query as SqlxQuery, QueryScalar},
+    sqlite::{SqliteArguments, SqlitePool, SqlitePoolOptions, SqliteRow},
 };
 use ulid::Ulid;
 
@@ -11,35 +11,54 @@ use crate::{
     query::{IndexValue, QueryFilter},
 };
 
-/// PostgreSQL adapter using a unified JSON storage model
+/// SQLite adapter using a unified JSON storage model
 ///
 /// Schema:
 /// ```sql
-/// CREATE TABLE public.objects (
+/// CREATE TABLE objects (
 ///     id TEXT PRIMARY KEY,
 ///     type TEXT NOT NULL,
 ///     owner TEXT NOT NULL,
-///     created_at TIMESTAMPTZ NOT NULL,
-///     updated_at TIMESTAMPTZ NOT NULL,
-///     data JSONB NOT NULL,
-///     index_meta JSONB NOT NULL,
-///     CONSTRAINT fk_owner FOREIGN KEY (owner) REFERENCES objects(id) ON DELETE CASCADE
+///     created_at TEXT NOT NULL,
+///     updated_at TEXT NOT NULL,
+///     data TEXT NOT NULL,
+///     index_meta TEXT NOT NULL
 /// );
 ///
 /// CREATE INDEX idx_objects_type_owner ON objects(type, owner);
 /// CREATE INDEX idx_objects_owner ON objects(owner);
 /// CREATE INDEX idx_objects_created_at ON objects(created_at);
 /// CREATE INDEX idx_objects_updated_at ON objects(updated_at);
-///
-/// -- GIN index for flexible JSONB querying
-/// CREATE INDEX idx_objects_index_meta ON public.objects USING GIN (index_meta);
 /// ```
-pub struct PostgresAdapter {
-    pub(crate) pool: PgPool,
+pub struct SqliteAdapter {
+    pub(crate) pool: SqlitePool,
 }
 
-impl PostgresAdapter {
-    pub fn from_pool(pool: PgPool) -> Self {
+impl SqliteAdapter {
+    /// Create a new SQLite adapter with a file-based database
+    pub async fn new_file(path: &str) -> Result<Self, Error> {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(5)
+            .connect(&format!("sqlite:{}", path))
+            .await
+            .map_err(|e| Error::Storage(e.to_string()))?;
+
+        Ok(Self { pool })
+    }
+
+    /// Create a new SQLite adapter with an in-memory database
+    pub async fn new_memory() -> Result<Self, Error> {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .map_err(|e| Error::Storage(e.to_string()))?;
+
+        Ok(Self { pool })
+    }
+
+    /// Create from an existing pool
+    pub fn from_pool(pool: SqlitePool) -> Self {
         Self { pool }
     }
 
@@ -53,15 +72,15 @@ impl PostgresAdapter {
 
         sqlx::query(
             r#"
-            CREATE TABLE IF NOT EXISTS public.objects (
+            CREATE TABLE IF NOT EXISTS objects (
                 id TEXT PRIMARY KEY,
                 type TEXT NOT NULL,
                 owner TEXT NOT NULL,
-                created_at TIMESTAMPTZ NOT NULL,
-                updated_at TIMESTAMPTZ NOT NULL,
-                data JSONB NOT NULL,
-                index_meta JSONB NOT NULL
-            );
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                data TEXT NOT NULL,
+                index_meta TEXT NOT NULL
+            )
             "#,
         )
         .execute(&mut *tx)
@@ -70,7 +89,7 @@ impl PostgresAdapter {
 
         sqlx::query(
             r#"
-            CREATE INDEX IF NOT EXISTS idx_objects_type_owner ON objects(type, owner);
+            CREATE INDEX IF NOT EXISTS idx_objects_type_owner ON objects(type, owner)
             "#,
         )
         .execute(&mut *tx)
@@ -79,7 +98,7 @@ impl PostgresAdapter {
 
         sqlx::query(
             r#"
-            CREATE INDEX IF NOT EXISTS idx_objects_owner ON objects(owner);
+            CREATE INDEX IF NOT EXISTS idx_objects_owner ON objects(owner)
             "#,
         )
         .execute(&mut *tx)
@@ -88,7 +107,7 @@ impl PostgresAdapter {
 
         sqlx::query(
             r#"
-            CREATE INDEX IF NOT EXISTS idx_objects_created_at ON objects(created_at);
+            CREATE INDEX IF NOT EXISTS idx_objects_created_at ON objects(created_at)
             "#,
         )
         .execute(&mut *tx)
@@ -97,7 +116,7 @@ impl PostgresAdapter {
 
         sqlx::query(
             r#"
-            CREATE INDEX IF NOT EXISTS idx_objects_updated_at ON objects(updated_at);
+            CREATE INDEX IF NOT EXISTS idx_objects_updated_at ON objects(updated_at)
             "#,
         )
         .execute(&mut *tx)
@@ -106,22 +125,14 @@ impl PostgresAdapter {
 
         sqlx::query(
             r#"
-            CREATE INDEX IF NOT EXISTS idx_objects_index_meta ON public.objects USING GIN (index_meta);
-            "#,
-        )
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| Error::Storage(e.to_string()))?;
-
-        sqlx::query(
-            r#"
-            CREATE TABLE IF NOT EXISTS public.edges (
+            CREATE TABLE IF NOT EXISTS edges (
                 "from" TEXT NOT NULL,
                 "to" TEXT NOT NULL,
                 type TEXT NOT NULL,
-                data JSONB NOT NULL,
-                index_meta JSONB NOT NULL
-            );
+                data TEXT NOT NULL,
+                index_meta TEXT NOT NULL,
+                PRIMARY KEY ("from", "to", type)
+            )
             "#,
         )
         .execute(&mut *tx)
@@ -130,7 +141,7 @@ impl PostgresAdapter {
 
         sqlx::query(
             r#"
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_edges_key ON public.edges("from", "to", type);
+            CREATE INDEX IF NOT EXISTS idx_edges_from ON edges("from", type)
             "#,
         )
         .execute(&mut *tx)
@@ -139,25 +150,7 @@ impl PostgresAdapter {
 
         sqlx::query(
             r#"
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_edges_from_key ON public.edges("from", type);
-            "#,
-        )
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| Error::Storage(e.to_string()))?;
-
-        sqlx::query(
-            r#"
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_edges_to_key ON public.edges("to", type);
-            "#,
-        )
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| Error::Storage(e.to_string()))?;
-
-        sqlx::query(
-            r#"
-            CREATE INDEX IF NOT EXISTS idx_edges_index_meta ON public.edges USING GIN (index_meta);
+            CREATE INDEX IF NOT EXISTS idx_edges_to ON edges("to", type)
             "#,
         )
         .execute(&mut *tx)
@@ -171,16 +164,20 @@ impl PostgresAdapter {
         Ok(())
     }
 
-    fn map_row_to_object_record(row: PgRow) -> Result<ObjectRecord, Error> {
-        let data_json: serde_json::Value = row
+    fn map_row_to_object_record(row: SqliteRow) -> Result<ObjectRecord, Error> {
+        let data_str: String = row
             .try_get("data")
             .map_err(|e| Error::Deserialize(e.to_string()))?;
 
-        let index_meta_json: serde_json::Value = row
+        let index_meta_str: String = row
             .try_get("index_meta")
             .map_err(|e| Error::Deserialize(e.to_string()))?;
 
-        // Reconstruct meta from separate columns
+        let data_json: serde_json::Value =
+            serde_json::from_str(&data_str).map_err(|e| Error::Deserialize(e.to_string()))?;
+
+        let index_meta_json: serde_json::Value =
+            serde_json::from_str(&index_meta_str).map_err(|e| Error::Deserialize(e.to_string()))?;
 
         let type_name = row
             .try_get::<String, _>("type")
@@ -198,13 +195,21 @@ impl PostgresAdapter {
         )
         .map_err(|e| Error::Deserialize(e.to_string()))?;
 
-        let created_at = row
+        let created_at_str: String = row
             .try_get("created_at")
             .map_err(|e| Error::Deserialize(e.to_string()))?;
 
-        let updated_at = row
+        let updated_at_str: String = row
             .try_get("updated_at")
             .map_err(|e| Error::Deserialize(e.to_string()))?;
+
+        let created_at = chrono::DateTime::parse_from_rfc3339(&created_at_str)
+            .map_err(|e| Error::Deserialize(e.to_string()))?
+            .with_timezone(&chrono::Utc);
+
+        let updated_at = chrono::DateTime::parse_from_rfc3339(&updated_at_str)
+            .map_err(|e| Error::Deserialize(e.to_string()))?
+            .with_timezone(&chrono::Utc);
 
         Ok(ObjectRecord {
             id,
@@ -217,14 +222,20 @@ impl PostgresAdapter {
         })
     }
 
-    fn map_row_to_edge_record(row: PgRow) -> Result<EdgeRecord, Error> {
-        let data_json: serde_json::Value = row
+    fn map_row_to_edge_record(row: SqliteRow) -> Result<EdgeRecord, Error> {
+        let data_str: String = row
             .try_get("data")
             .map_err(|e| Error::Deserialize(e.to_string()))?;
 
-        let index_meta_json: serde_json::Value = row
+        let index_meta_str: String = row
             .try_get("index_meta")
             .map_err(|e| Error::Deserialize(e.to_string()))?;
+
+        let data_json: serde_json::Value =
+            serde_json::from_str(&data_str).map_err(|e| Error::Deserialize(e.to_string()))?;
+
+        let index_meta_json: serde_json::Value =
+            serde_json::from_str(&index_meta_str).map_err(|e| Error::Deserialize(e.to_string()))?;
 
         let type_name = row
             .try_get::<String, _>("type")
@@ -253,35 +264,27 @@ impl PostgresAdapter {
 
     fn build_object_query_conditions(filters: &Vec<QueryFilter>) -> String {
         let mut conditions = vec![
-            ("type = $1".to_string(), "AND"),
-            ("owner = $2".to_string(), "AND"),
+            ("type = ?".to_string(), "AND"),
+            ("owner = ?".to_string(), "AND"),
         ];
-        let mut param_idx = 3;
 
         for filter in filters {
-            let index_type = match &filter.value {
-                IndexValue::String(_) => "text",
-                IndexValue::Int(_) => "bigint",
-                IndexValue::Float(_) => "double",
-                IndexValue::Bool(_) => "boolean",
-                IndexValue::Timestamp(_) => "timestamptz",
-            };
-
             match &filter.mode {
                 crate::query::QueryMode::Search(query_search) => {
                     let comparison = match query_search.comparison {
                         crate::query::Comparison::Equal => "=",
-                        crate::query::Comparison::BeginsWith => "ILIKE",
-                        crate::query::Comparison::Contains => "ILIKE",
+                        crate::query::Comparison::BeginsWith => "LIKE",
+                        crate::query::Comparison::Contains => "LIKE",
                         crate::query::Comparison::GreaterThan => ">",
                         crate::query::Comparison::LessThan => "<",
                         crate::query::Comparison::GreaterThanOrEqual => ">=",
                         crate::query::Comparison::LessThanOrEqual => "<=",
-                        crate::query::Comparison::NotEqual => "<>",
+                        crate::query::Comparison::NotEqual => "!=",
                     };
+
                     let condition = format!(
-                        "index_meta->>'{}'::{} {} ${}",
-                        filter.field.name, index_type, comparison, param_idx
+                        "json_extract(index_meta, '$.{}') {} ?",
+                        filter.field.name, comparison
                     );
 
                     let operator = match query_search.operator {
@@ -289,7 +292,6 @@ impl PostgresAdapter {
                         _ => "OR",
                     };
                     conditions.push((condition, operator));
-                    param_idx += 1;
                 }
                 crate::query::QueryMode::Sort(_) => continue,
             }
@@ -298,7 +300,6 @@ impl PostgresAdapter {
         let mut query = String::new();
         for (i, (cond, joiner)) in conditions.iter().enumerate() {
             query.push_str(cond);
-            // Only add the joiner if not the last element and joiner isn't empty
             if i < conditions.len() - 1 && !joiner.is_empty() {
                 query.push(' ');
                 query.push_str(joiner);
@@ -306,41 +307,32 @@ impl PostgresAdapter {
             }
         }
 
-        let where_clause = format!("WHERE {}", query);
-
-        where_clause
+        format!("WHERE {}", query)
     }
 
     fn build_edge_query_conditions(filters: &Vec<QueryFilter>) -> String {
         let mut conditions = vec![
-            ("type = $1".to_string(), "AND"),
-            (r#""from" = $2"#.to_string(), "AND"),
+            ("type = ?".to_string(), "AND"),
+            (r#""from" = ?"#.to_string(), "AND"),
         ];
-        let mut param_idx = 3;
-        for filter in filters {
-            let index_type = match &filter.value {
-                IndexValue::String(_) => "text",
-                IndexValue::Int(_) => "bigint",
-                IndexValue::Float(_) => "double",
-                IndexValue::Bool(_) => "boolean",
-                IndexValue::Timestamp(_) => "timestamptz",
-            };
 
+        for filter in filters {
             match &filter.mode {
                 crate::query::QueryMode::Search(query_search) => {
                     let comparison = match query_search.comparison {
                         crate::query::Comparison::Equal => "=",
-                        crate::query::Comparison::BeginsWith => "ILIKE",
-                        crate::query::Comparison::Contains => "ILIKE",
+                        crate::query::Comparison::BeginsWith => "LIKE",
+                        crate::query::Comparison::Contains => "LIKE",
                         crate::query::Comparison::GreaterThan => ">",
                         crate::query::Comparison::LessThan => "<",
                         crate::query::Comparison::GreaterThanOrEqual => ">=",
                         crate::query::Comparison::LessThanOrEqual => "<=",
-                        crate::query::Comparison::NotEqual => "<>",
+                        crate::query::Comparison::NotEqual => "!=",
                     };
+
                     let condition = format!(
-                        "index_meta->>'{}'::{} {} ${}",
-                        filter.field.name, index_type, comparison, param_idx
+                        "json_extract(index_meta, '$.{}') {} ?",
+                        filter.field.name, comparison
                     );
 
                     let operator = match query_search.operator {
@@ -348,7 +340,6 @@ impl PostgresAdapter {
                         _ => "OR",
                     };
                     conditions.push((condition, operator));
-                    param_idx += 1;
                 }
                 crate::query::QueryMode::Sort(_) => continue,
             }
@@ -357,7 +348,6 @@ impl PostgresAdapter {
         let mut query = String::new();
         for (i, (cond, joiner)) in conditions.iter().enumerate() {
             query.push_str(cond);
-            // Only add the joiner if not the last element and joiner isn't empty
             if i < conditions.len() - 1 && !joiner.is_empty() {
                 query.push(' ');
                 query.push_str(joiner);
@@ -365,68 +355,7 @@ impl PostgresAdapter {
             }
         }
 
-        let where_clause = format!("WHERE {}", query);
-
-        where_clause
-    }
-
-    fn build_edge_reverse_query_conditions(filters: &Vec<QueryFilter>) -> String {
-        let mut conditions = vec![
-            ("type = $1".to_string(), "AND"),
-            (r#""to" = $2"#.to_string(), "AND"),
-        ];
-        let mut param_idx = 3;
-        for filter in filters {
-            let index_type = match &filter.value {
-                IndexValue::String(_) => "text",
-                IndexValue::Int(_) => "bigint",
-                IndexValue::Float(_) => "double",
-                IndexValue::Bool(_) => "boolean",
-                IndexValue::Timestamp(_) => "timestamptz",
-            };
-
-            match &filter.mode {
-                crate::query::QueryMode::Search(query_search) => {
-                    let comparison = match query_search.comparison {
-                        crate::query::Comparison::Equal => "=",
-                        crate::query::Comparison::BeginsWith => "ILIKE",
-                        crate::query::Comparison::Contains => "ILIKE",
-                        crate::query::Comparison::GreaterThan => ">",
-                        crate::query::Comparison::LessThan => "<",
-                        crate::query::Comparison::GreaterThanOrEqual => ">=",
-                        crate::query::Comparison::LessThanOrEqual => "<=",
-                        crate::query::Comparison::NotEqual => "<>",
-                    };
-                    let condition = format!(
-                        "index_meta->>'{}'::{} {} ${}",
-                        filter.field.name, index_type, comparison, param_idx
-                    );
-
-                    let operator = match query_search.operator {
-                        crate::query::Operator::And => "AND",
-                        _ => "OR",
-                    };
-                    conditions.push((condition, operator));
-                    param_idx += 1;
-                }
-                crate::query::QueryMode::Sort(_) => continue,
-            }
-        }
-
-        let mut query = String::new();
-        for (i, (cond, joiner)) in conditions.iter().enumerate() {
-            query.push_str(cond);
-            // Only add the joiner if not the last element and joiner isn't empty
-            if i < conditions.len() - 1 && !joiner.is_empty() {
-                query.push(' ');
-                query.push_str(joiner);
-                query.push(' ');
-            }
-        }
-
-        let where_clause = format!("WHERE {}", query);
-
-        where_clause
+        format!("WHERE {}", query)
     }
 
     fn build_order_clause(filters: &Vec<QueryFilter>) -> String {
@@ -448,16 +377,9 @@ impl PostgresAdapter {
                     "DESC"
                 };
 
-                let index_type = match &s.value {
-                    IndexValue::String(_) => "text",
-                    IndexValue::Int(_) => "bigint",
-                    IndexValue::Float(_) => "double",
-                    IndexValue::Bool(_) => "boolean",
-                    IndexValue::Timestamp(_) => "timestamptz",
-                };
                 format!(
-                    "index_meta->>'{}'::{} {}",
-                    s.field.name, index_type, direction
+                    "json_extract(index_meta, '$.{}') {}",
+                    s.field.name, direction
                 )
             })
             .collect();
@@ -484,16 +406,9 @@ impl PostgresAdapter {
                     "DESC"
                 };
 
-                let index_type = match &s.value {
-                    IndexValue::String(_) => "text",
-                    IndexValue::Int(_) => "bigint",
-                    IndexValue::Float(_) => "double",
-                    IndexValue::Bool(_) => "boolean",
-                    IndexValue::Timestamp(_) => "timestamptz",
-                };
                 format!(
-                    "index_meta->>'{}'::{} {}",
-                    s.field.name, index_type, direction
+                    "json_extract(index_meta, '$.{}') {}",
+                    s.field.name, direction
                 )
             })
             .collect();
@@ -502,9 +417,9 @@ impl PostgresAdapter {
     }
 
     fn query_bind_filters<'a>(
-        mut query: PgQuery<'a, Postgres, PgArguments>,
+        mut query: SqlxQuery<'a, Sqlite, SqliteArguments<'a>>,
         filters: &'a Vec<QueryFilter>,
-    ) -> PgQuery<'a, Postgres, PgArguments> {
+    ) -> SqlxQuery<'a, Sqlite, SqliteArguments<'a>> {
         for filter in filters.iter().filter(|f| f.mode.as_search().is_some()) {
             query = match &filter.value {
                 IndexValue::String(s) => {
@@ -518,16 +433,16 @@ impl PostgresAdapter {
                 IndexValue::Int(i) => query.bind(i),
                 IndexValue::Float(f) => query.bind(f),
                 IndexValue::Bool(b) => query.bind(b),
-                IndexValue::Timestamp(t) => query.bind(t),
+                IndexValue::Timestamp(t) => query.bind(t.to_rfc3339()),
             };
         }
         query
     }
 
     fn query_scalar_bind_filters<'a, O>(
-        mut query: QueryScalar<'a, Postgres, O, PgArguments>,
+        mut query: QueryScalar<'a, Sqlite, O, SqliteArguments<'a>>,
         filters: &'a Vec<QueryFilter>,
-    ) -> QueryScalar<'a, Postgres, O, PgArguments> {
+    ) -> QueryScalar<'a, Sqlite, O, SqliteArguments<'a>> {
         for filter in filters.iter().filter(|f| f.mode.as_search().is_some()) {
             query = match &filter.value {
                 IndexValue::String(s) => {
@@ -541,7 +456,7 @@ impl PostgresAdapter {
                 IndexValue::Int(i) => query.bind(i),
                 IndexValue::Float(f) => query.bind(f),
                 IndexValue::Bool(b) => query.bind(b),
-                IndexValue::Timestamp(t) => query.bind(t),
+                IndexValue::Timestamp(t) => query.bind(t.to_rfc3339()),
             };
         }
         query
@@ -549,23 +464,26 @@ impl PostgresAdapter {
 }
 
 #[async_trait::async_trait]
-impl Adapter for PostgresAdapter {
+impl Adapter for SqliteAdapter {
     async fn insert_object(&self, record: ObjectRecord) -> Result<(), Error> {
         let pool = self.pool.clone();
         let _ = sqlx::query(
             r#"
-            INSERT INTO public.objects (id, type, owner, created_at, updated_at, data, index_meta)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            INSERT INTO objects (id, type, owner, created_at, updated_at, data, index_meta)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             "#,
         )
         .bind(record.id.to_string())
         .bind(record.type_name)
         .bind(record.owner.to_string())
-        .bind(record.created_at)
-        .bind(record.updated_at)
-        .bind(record.data)
-        .bind(record.index_meta)
-        .fetch_optional(&pool)
+        .bind(record.created_at.to_rfc3339())
+        .bind(record.updated_at.to_rfc3339())
+        .bind(serde_json::to_string(&record.data).map_err(|e| Error::Serialize(e.to_string()))?)
+        .bind(
+            serde_json::to_string(&record.index_meta)
+                .map_err(|e| Error::Serialize(e.to_string()))?,
+        )
+        .execute(&pool)
         .await
         .map_err(|err| Error::Storage(err.to_string()))?;
         Ok(())
@@ -577,7 +495,7 @@ impl Adapter for PostgresAdapter {
             r#"
             SELECT id, type, owner, created_at, updated_at, data, index_meta
             FROM objects
-            WHERE id = $1
+            WHERE id = ?
             "#,
         )
         .bind(id.to_string())
@@ -586,24 +504,28 @@ impl Adapter for PostgresAdapter {
         .map_err(|err| Error::Storage(err.to_string()))?;
 
         match row {
-            Some(r) => Self::map_row_to_object_record(r).map(|o| Some(o)),
+            Some(r) => Self::map_row_to_object_record(r).map(Some),
             None => Ok(None),
         }
     }
 
     async fn fetch_bulk_objects(&self, ids: Vec<Ulid>) -> Result<Vec<ObjectRecord>, Error> {
         let pool = self.pool.clone();
-        let rows = sqlx::query(
-            r#"
-            SELECT id, type, owner, created_at, updated_at, data, index_meta
-            FROM objects
-            WHERE id = ANY($1)
-            "#,
-        )
-        .bind(ids.iter().map(|id| id.to_string()).collect::<Vec<String>>())
-        .fetch_all(&pool)
-        .await
-        .map_err(|err| Error::Storage(err.to_string()))?;
+        let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let sql = format!(
+            "SELECT id, type, owner, created_at, updated_at, data, index_meta FROM objects WHERE id IN ({})",
+            placeholders
+        );
+
+        let mut query = sqlx::query(&sql);
+        for id in ids {
+            query = query.bind(id.to_string());
+        }
+
+        let rows = query
+            .fetch_all(&pool)
+            .await
+            .map_err(|err| Error::Storage(err.to_string()))?;
 
         rows.into_iter()
             .map(Self::map_row_to_object_record)
@@ -615,14 +537,17 @@ impl Adapter for PostgresAdapter {
         sqlx::query(
             r#"
             UPDATE objects
-            SET updated_at = $2, data = $3, index_meta = $4
-            WHERE id = $1
+            SET updated_at = ?, data = ?, index_meta = ?
+            WHERE id = ?
             "#,
         )
+        .bind(record.updated_at.to_rfc3339())
+        .bind(serde_json::to_string(&record.data).map_err(|e| Error::Serialize(e.to_string()))?)
+        .bind(
+            serde_json::to_string(&record.index_meta)
+                .map_err(|e| Error::Serialize(e.to_string()))?,
+        )
         .bind(record.id.to_string())
-        .bind(record.updated_at)
-        .bind(record.data)
-        .bind(record.index_meta)
         .execute(&pool)
         .await
         .map_err(|err| Error::Storage(err.to_string()))?;
@@ -637,50 +562,55 @@ impl Adapter for PostgresAdapter {
         to_owner: Ulid,
     ) -> Result<ObjectRecord, Error> {
         let pool = self.pool.clone();
-        let row = sqlx::query(
+
+        // SQLite doesn't support RETURNING, so we need to update then fetch
+        let result = sqlx::query(
             r#"
             UPDATE objects
-            SET updated_at = $3, owner = $4
-            WHERE id = $1 AND owner = $2
-            RETURNING *
+            SET updated_at = ?, owner = ?
+            WHERE id = ? AND owner = ?
             "#,
         )
+        .bind(Utc::now().to_rfc3339())
+        .bind(to_owner.to_string())
         .bind(id.to_string())
         .bind(from_owner.to_string())
-        .bind(Utc::now())
-        .bind(to_owner.to_string())
-        .fetch_one(&pool)
+        .execute(&pool)
         .await
-        .map_err(|err| match err {
-            sqlx::Error::RowNotFound => Error::NotFound,
-            _ => Error::Storage(err.to_string()),
-        })?;
+        .map_err(|err| Error::Storage(err.to_string()))?;
 
-        Self::map_row_to_object_record(row)
+        if result.rows_affected() == 0 {
+            return Err(Error::NotFound);
+        }
+
+        self.fetch_object(id).await?.ok_or(Error::NotFound)
     }
 
     async fn delete_object(&self, id: Ulid, owner: Ulid) -> Result<Option<ObjectRecord>, Error> {
         let pool = self.pool.clone();
-        let row = sqlx::query(
-            r#"
-            DELETE FROM objects
-            WHERE id = $1 AND owner = $2
-            RETURNING *
-            "#,
-        )
-        .bind(id.to_string())
-        .bind(owner.to_string())
-        .fetch_optional(&pool)
-        .await
-        .map_err(|err| match err {
-            sqlx::Error::RowNotFound => Error::NotFound,
-            _ => Error::Storage(err.to_string()),
-        })?;
 
-        match row {
-            Some(r) => Self::map_row_to_object_record(r).map(|o| Some(o)),
-            None => Ok(None),
+        // Fetch first, then delete (SQLite doesn't have RETURNING)
+        let record = self.fetch_object(id).await?;
+
+        if let Some(ref rec) = record {
+            if rec.owner != owner {
+                return Ok(None);
+            }
+
+            sqlx::query(
+                r#"
+                DELETE FROM objects
+                WHERE id = ? AND owner = ?
+                "#,
+            )
+            .bind(id.to_string())
+            .bind(owner.to_string())
+            .execute(&pool)
+            .await
+            .map_err(|err| Error::Storage(err.to_string()))?;
         }
+
+        Ok(record)
     }
 
     async fn find_object(
@@ -698,6 +628,7 @@ impl Adapter for PostgresAdapter {
             FROM objects
             {}
             {}
+            LIMIT 1
             "#,
             where_clause, order_clause
         );
@@ -709,11 +640,14 @@ impl Adapter for PostgresAdapter {
 
         let pool = self.pool.clone();
         let row = query
-            .fetch_one(&pool)
+            .fetch_optional(&pool)
             .await
             .map_err(|err| Error::Storage(err.to_string()))?;
 
-        Ok(Self::map_row_to_object_record(row).ok())
+        match row {
+            Some(r) => Self::map_row_to_object_record(r).map(Some),
+            None => Ok(None),
+        }
     }
 
     async fn query_objects(
@@ -726,11 +660,11 @@ impl Adapter for PostgresAdapter {
 
         let mut sql = format!(
             r#"
-                SELECT id, type, owner, created_at, updated_at, data, index_meta
-                FROM objects
-                {}
-                {}
-                "#,
+            SELECT id, type, owner, created_at, updated_at, data, index_meta
+            FROM objects
+            {}
+            {}
+            "#,
             where_clause, order_clause
         );
 
@@ -754,10 +688,9 @@ impl Adapter for PostgresAdapter {
             .await
             .map_err(|err| Error::Storage(err.to_string()))?;
 
-        Ok(rows
-            .into_iter()
-            .filter_map(|row| Self::map_row_to_object_record(row).ok())
-            .collect())
+        rows.into_iter()
+            .map(Self::map_row_to_object_record)
+            .collect()
     }
 
     async fn count_objects(
@@ -801,7 +734,7 @@ impl Adapter for PostgresAdapter {
                 Ok(count as u64)
             }
             None => {
-                let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM objects WHERE type = $1")
+                let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM objects WHERE type = ?")
                     .bind(type_name)
                     .fetch_one(&pool)
                     .await
@@ -822,7 +755,7 @@ impl Adapter for PostgresAdapter {
             r#"
             SELECT id, type, owner, created_at, updated_at, data, index_meta
             FROM objects
-            WHERE owner = $1 AND type = $2
+            WHERE owner = ? AND type = ?
             "#,
         )
         .bind(owner.to_string())
@@ -846,7 +779,8 @@ impl Adapter for PostgresAdapter {
             r#"
             SELECT id, type, owner, created_at, updated_at, data, index_meta
             FROM objects
-            WHERE owner = $1 AND type = $2
+            WHERE owner = ? AND type = ?
+            LIMIT 1
             "#,
         )
         .bind(owner.to_string())
@@ -856,7 +790,7 @@ impl Adapter for PostgresAdapter {
         .map_err(|err| Error::Storage(err.to_string()))?;
 
         match row {
-            Some(r) => Self::map_row_to_object_record(r).map(|o| Some(o)),
+            Some(r) => Self::map_row_to_object_record(r).map(Some),
             None => Ok(None),
         }
     }
@@ -867,14 +801,17 @@ impl Adapter for PostgresAdapter {
         let _ = sqlx::query(
             r#"
             INSERT INTO edges ("from", "to", type, data, index_meta)
-            VALUES ($1, $2, $3, $4, $5)
+            VALUES (?, ?, ?, ?, ?)
             "#,
         )
         .bind(record.from.to_string())
         .bind(record.to.to_string())
         .bind(record.type_name)
-        .bind(record.data)
-        .bind(record.index_meta)
+        .bind(serde_json::to_string(&record.data).map_err(|e| Error::Serialize(e.to_string()))?)
+        .bind(
+            serde_json::to_string(&record.index_meta)
+                .map_err(|e| Error::Serialize(e.to_string()))?,
+        )
         .execute(&pool)
         .await
         .map_err(|err| Error::Storage(err.to_string()))?;
@@ -892,7 +829,7 @@ impl Adapter for PostgresAdapter {
         let _ = sqlx::query(
             r#"
             DELETE FROM edges
-            WHERE type = $1 AND "from" = $2 AND "to" = $3
+            WHERE type = ? AND "from" = ? AND "to" = ?
             "#,
         )
         .bind(type_name)
@@ -942,10 +879,7 @@ impl Adapter for PostgresAdapter {
             .await
             .map_err(|err| Error::Storage(err.to_string()))?;
 
-        Ok(rows
-            .into_iter()
-            .filter_map(|row| Self::map_row_to_edge_record(row).ok())
-            .collect())
+        rows.into_iter().map(Self::map_row_to_edge_record).collect()
     }
 
     async fn count_edges(
@@ -962,9 +896,9 @@ impl Adapter for PostgresAdapter {
 
                 let mut sql = format!(
                     r#"
-                SELECT COUNT(*) FROM edges
-                {}
-                "#,
+                    SELECT COUNT(*) FROM edges
+                    {}
+                    "#,
                     where_clause
                 );
 
@@ -982,7 +916,6 @@ impl Adapter for PostgresAdapter {
 
                 query = Self::query_scalar_bind_filters(query, &plan.filters);
 
-                let pool = self.pool.clone();
                 let count = query
                     .fetch_one(&pool)
                     .await
@@ -991,99 +924,17 @@ impl Adapter for PostgresAdapter {
                 Ok(count as u64)
             }
             None => {
-                let count: i64 =
-                    sqlx::query_scalar("SELECT COUNT(*) FROM edges WHERE type = $1 AND from = $2")
-                        .bind(type_name)
-                        .bind(owner.to_string())
-                        .fetch_one(&pool)
-                        .await
-                        .map_err(|err| Error::Storage(err.to_string()))?;
+                let count: i64 = sqlx::query_scalar(
+                    r#"SELECT COUNT(*) FROM edges WHERE type = ? AND "from" = ?"#,
+                )
+                .bind(type_name)
+                .bind(owner.to_string())
+                .fetch_one(&pool)
+                .await
+                .map_err(|err| Error::Storage(err.to_string()))?;
 
                 Ok(count as u64)
             }
         }
-    }
-}
-
-#[cfg(feature = "profiling")]
-#[derive(Debug, Default)]
-pub struct ProfileData {
-    pub query_ms: std::time::Duration,     // Actual database time
-    pub serialize_ms: std::time::Duration, // Serde deserialization
-}
-
-#[cfg(feature = "profiling")]
-impl PostgresAdapter {
-    pub async fn query_objects_profiled<T: crate::Object>(
-        &self,
-        type_name: &'static str,
-        plan: Query,
-    ) -> Result<(Vec<T>, ProfileData), Error> {
-        use std::time::Instant;
-
-        let mut profile = ProfileData::default();
-
-        // Database query time
-        let db_start = Instant::now();
-        let where_clause = Self::build_object_query_conditions(&plan.filters);
-        let order_clause = Self::build_order_clause(&plan.filters);
-
-        let mut sql = format!(
-            r#"
-                SELECT id, type, owner, created_at, updated_at, data, index_meta
-                FROM objects
-                {}
-                {}
-                "#,
-            where_clause, order_clause
-        );
-
-        if let Some(limit) = plan.limit {
-            sql.push_str(&format!(" LIMIT {}", limit));
-        }
-
-        if let Some(offset) = plan.offset {
-            sql.push_str(&format!(" OFFSET {}", offset));
-        }
-
-        let mut query = sqlx::query(&sql)
-            .bind(type_name)
-            .bind(plan.owner.to_string());
-
-        query = Self::query_bind_filters(query, &plan.filters);
-
-        let pool = self.pool.clone();
-        let rows = query.fetch_all(&pool).await.unwrap();
-        profile.query_ms = db_start.elapsed();
-
-        // Row mapping time
-        let map_start = Instant::now();
-        let records: Vec<T> = rows
-            .into_iter()
-            .filter_map(|row| {
-                let data_json: serde_json::Value = row.try_get("data").unwrap();
-                // let type_name = row.try_get::<String, _>("type").unwrap();
-
-                let id = Ulid::from_string(&row.try_get::<String, _>("id").unwrap()).unwrap();
-
-                let owner = Ulid::from_string(&row.try_get::<String, _>("owner").unwrap()).unwrap();
-
-                let created_at = row.try_get("created_at").unwrap();
-
-                let updated_at = row.try_get("updated_at").unwrap();
-
-                let mut obj = serde_json::from_value::<T>(data_json).unwrap();
-
-                let meta = obj.meta_mut();
-                meta.id = id;
-                meta.owner = owner;
-                meta.created_at = created_at;
-                meta.updated_at = updated_at;
-                Some(obj)
-            })
-            .collect();
-        profile.serialize_ms = map_start.elapsed();
-
-        Ok((records, profile))
     }
 }

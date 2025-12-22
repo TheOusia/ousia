@@ -11,6 +11,7 @@ serde = "1.0.228"
 tokio = { version = "1", features = ["macros", "time"] }
 sqlx = { version = "0.8", features = [
     "postgres",
+    "sqlite",
     "runtime-tokio",
     "derive",
     "tls-native-tls",
@@ -21,6 +22,7 @@ testcontainers = "0.25"
 testcontainers-modules = { version = "0.13", features = ["postgres"] }
 ulid = "1.2.1"
 rand = "0.9.2"
+tempfile = "3"
 
 [dev-dependencies]
 bincode = "1.3"

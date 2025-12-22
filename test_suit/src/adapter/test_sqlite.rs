@@ -1,10 +1,10 @@
 use ousia::{
     EdgeMeta, Meta, Object, ObjectMeta, ObjectOwnership, OusiaDefault, OusiaEdge, OusiaObject,
     Query,
-    adapters::{ObjectRecord, postgres::PostgresAdapter},
+    adapters::{ObjectRecord, postgres::PostgresAdapter, sqlite::SqliteAdapter},
 };
 use serde::{Deserialize, Serialize};
-use sqlx::PgPool;
+use sqlx::{PgPool, SqlitePool};
 use testcontainers::ContainerAsync;
 use testcontainers_modules::postgres::Postgres;
 
@@ -85,56 +85,13 @@ impl Default for Follow {
     }
 }
 
-pub(crate) async fn postgres_test_client() -> (ContainerAsync<Postgres>, PostgresAdapter) {
-    let (_resource, pool) = setup_test_db().await;
-    let adapter = PostgresAdapter::from_pool(pool);
-    if let Err(err) = adapter.init_schema().await {
-        panic!("Error: {:#?}", err);
-    }
+mod sqlite_adpater_test {
 
-    (_resource, adapter)
-}
-
-pub(crate) async fn setup_test_db() -> (ContainerAsync<Postgres>, PgPool) {
-    use sqlx::postgres::PgPoolOptions;
-    use testcontainers::{ImageExt, runners::AsyncRunner as _};
-
-    let postgres = match Postgres::default()
-        .with_password("postgres")
-        .with_user("postgres")
-        .with_db_name("postgres")
-        .with_tag("16-alpine")
-        .start()
-        .await
-    {
-        Ok(postgres) => postgres,
-        Err(err) => panic!("Failed to start Postgres: {}", err),
-    };
-    // Give DB time to start
-    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-
-    let port = postgres.get_host_port_ipv4(5432).await.unwrap();
-    let db_url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
-
-    let pool = match PgPoolOptions::new()
-        .max_connections(5)
-        .connect(&db_url)
-        .await
-    {
-        Ok(pool) => pool,
-        Err(err) => panic!("Failed to connect to Postgres: {}", err),
-    };
-
-    (postgres, pool)
-}
-
-mod postgres_adpater_test {
     use super::*;
 
     #[tokio::test]
     async fn test_adapter_insert() {
-        let (_resource, pool) = setup_test_db().await;
-        let adapter = PostgresAdapter::from_pool(pool);
+        let adapter = SqliteAdapter::new_memory().await.unwrap();
 
         if let Err(err) = adapter.init_schema().await {
             panic!("Error: {:#?}", err);
@@ -151,8 +108,7 @@ mod postgres_adpater_test {
 
     #[tokio::test]
     async fn test_adapter_get() {
-        let (_resource, pool) = setup_test_db().await;
-        let adapter = PostgresAdapter::from_pool(pool);
+        let adapter = SqliteAdapter::new_memory().await.unwrap();
 
         if let Err(err) = adapter.init_schema().await {
             panic!("Error: {:#?}", err);
@@ -177,8 +133,7 @@ mod postgres_adpater_test {
 
     #[tokio::test]
     async fn test_adapter_update() {
-        let (_resource, pool) = setup_test_db().await;
-        let adapter = PostgresAdapter::from_pool(pool);
+        let adapter = SqliteAdapter::new_memory().await.unwrap();
 
         if let Err(err) = adapter.init_schema().await {
             panic!("Error: {:#?}", err);
@@ -218,8 +173,7 @@ mod postgres_adpater_test {
 
     #[tokio::test]
     async fn test_adapter_query() {
-        let (_resource, pool) = setup_test_db().await;
-        let adapter = PostgresAdapter::from_pool(pool);
+        let adapter = SqliteAdapter::new_memory().await.unwrap();
 
         if let Err(err) = adapter.init_schema().await {
             panic!("Error: {:#?}", err);
@@ -298,7 +252,7 @@ mod postgres_adpater_test {
     }
 }
 
-mod engine_test {
+mod sqlite_engine_test {
     use std::time::Instant;
 
     use ousia::{EdgeMetaTrait as _, EdgeQuery, Engine, Error, filter};
@@ -345,7 +299,7 @@ mod engine_test {
 
     #[tokio::test]
     async fn test_engine_create_and_fetch() {
-        let (_resource, adapter) = postgres_test_client().await;
+        let adapter = SqliteAdapter::new_memory().await.unwrap();
         adapter.init_schema().await.unwrap();
 
         let engine = Engine::new(Box::new(adapter));
@@ -367,8 +321,7 @@ mod engine_test {
 
     #[tokio::test]
     async fn test_engine_update() {
-        let (_resource, pool) = setup_test_db().await;
-        let adapter = PostgresAdapter::from_pool(pool);
+        let adapter = SqliteAdapter::new_memory().await.unwrap();
         adapter.init_schema().await.unwrap();
 
         let engine = Engine::new(Box::new(adapter));
@@ -390,8 +343,7 @@ mod engine_test {
 
     #[tokio::test]
     async fn test_engine_delete() {
-        let (_resource, pool) = setup_test_db().await;
-        let adapter = PostgresAdapter::from_pool(pool);
+        let adapter = SqliteAdapter::new_memory().await.unwrap();
         adapter.init_schema().await.unwrap();
 
         let engine = Engine::new(Box::new(adapter));
@@ -413,8 +365,7 @@ mod engine_test {
 
     #[tokio::test]
     async fn test_engine_query() {
-        let (_resource, pool) = setup_test_db().await;
-        let adapter = PostgresAdapter::from_pool(pool);
+        let adapter = SqliteAdapter::new_memory().await.unwrap();
         adapter.init_schema().await.unwrap();
 
         let engine = Engine::new(Box::new(adapter));
@@ -444,8 +395,7 @@ mod engine_test {
 
     #[tokio::test]
     async fn test_engine_ownership() {
-        let (_resource, pool) = setup_test_db().await;
-        let adapter = PostgresAdapter::from_pool(pool);
+        let adapter = SqliteAdapter::new_memory().await.unwrap();
         adapter.init_schema().await.unwrap();
 
         let engine = Engine::new(Box::new(adapter));
@@ -474,8 +424,7 @@ mod engine_test {
 
     #[tokio::test]
     async fn test_engine_transfer_ownership() {
-        let (_resource, pool) = setup_test_db().await;
-        let adapter = PostgresAdapter::from_pool(pool);
+        let adapter = SqliteAdapter::new_memory().await.unwrap();
         adapter.init_schema().await.unwrap();
 
         let engine = Engine::new(Box::new(adapter));
@@ -509,8 +458,7 @@ mod engine_test {
 
     #[tokio::test]
     async fn test_engine_edges() {
-        let (_resource, pool) = setup_test_db().await;
-        let adapter = PostgresAdapter::from_pool(pool);
+        let adapter = SqliteAdapter::new_memory().await.unwrap();
         adapter.init_schema().await.unwrap();
 
         let engine = Engine::new(Box::new(adapter));
@@ -560,8 +508,7 @@ mod engine_test {
 
     #[tokio::test]
     async fn test_engine_count_objects() {
-        let (_resource, pool) = setup_test_db().await;
-        let adapter = PostgresAdapter::from_pool(pool);
+        let adapter = SqliteAdapter::new_memory().await.unwrap();
         adapter.init_schema().await.unwrap();
 
         let engine = Engine::new(Box::new(adapter));
@@ -590,8 +537,7 @@ mod engine_test {
 
     #[tokio::test]
     async fn test_engine_bulk_fetch() {
-        let (_resource, pool) = setup_test_db().await;
-        let adapter = PostgresAdapter::from_pool(pool);
+        let adapter = SqliteAdapter::new_memory().await.unwrap();
         adapter.init_schema().await.unwrap();
 
         let engine = Engine::new(Box::new(adapter));
@@ -613,8 +559,7 @@ mod engine_test {
 
     #[tokio::test]
     async fn test_engine_complex_query() {
-        let (_resource, pool) = setup_test_db().await;
-        let adapter = PostgresAdapter::from_pool(pool);
+        let adapter = SqliteAdapter::new_memory().await.unwrap();
         adapter.init_schema().await.unwrap();
 
         let engine = Engine::new(Box::new(adapter));
@@ -651,8 +596,7 @@ mod engine_test {
 
     #[tokio::test]
     async fn test_transfer_wrong_owner_fails() {
-        let (_resource, pool) = setup_test_db().await;
-        let adapter = PostgresAdapter::from_pool(pool);
+        let adapter = SqliteAdapter::new_memory().await.unwrap();
         adapter.init_schema().await.unwrap();
 
         let engine = Engine::new(Box::new(adapter));
@@ -682,73 +626,5 @@ mod engine_test {
             .await;
 
         assert!(matches!(result, Err(Error::NotFound)));
-    }
-
-    #[tokio::test]
-    async fn profile_query_objects_profiled() {
-        let (_resource, pool) = setup_test_db().await;
-        let adapter = PostgresAdapter::from_pool(pool);
-        adapter.init_schema().await.unwrap();
-
-        // Create users
-        // Randomly generate and insert 100 users
-        use rand::{Rng, rng};
-
-        for _ in 0..1_000 {
-            let mut user = User::default();
-            let rand_str: String = rng()
-                .sample_iter(&Alphanumeric)
-                .take(10)
-                .map(char::from)
-                .collect();
-            user.display_name = format!("User{}", rand_str);
-            user.username = format!("user_{}", rand_str);
-            user.email = format!("{}@example.com", rand_str);
-
-            adapter
-                .insert_object(ObjectRecord::from_object(&user))
-                .await
-                .unwrap();
-        }
-
-        let mut alice = User::default();
-        alice.display_name = "Alice".to_string();
-        alice.username = "alice".to_string();
-        alice.email = "alice@example.com".to_string();
-        adapter
-            .insert_object(ObjectRecord::from_object(&alice))
-            .await
-            .unwrap();
-
-        let mut bob = User::default();
-        bob.display_name = "Bob".to_string();
-        bob.username = "bob".to_string();
-        bob.email = "bob@example.com".to_string();
-        adapter
-            .insert_object(ObjectRecord::from_object(&bob))
-            .await
-            .unwrap();
-
-        let mut charlie = User::default();
-        charlie.display_name = "Charlie".to_string();
-        charlie.username = "charlie".to_string();
-        charlie.email = "charlie@example.com".to_string();
-        adapter
-            .insert_object(ObjectRecord::from_object(&charlie))
-            .await
-            .unwrap();
-
-        // Profiling
-        let (result, profile) = adapter
-            .query_objects_profiled::<User>(
-                User::TYPE,
-                Query::default()
-                    .where_eq(&User::FIELDS.username, "bob")
-                    .where_eq(&User::FIELDS.email, "bob@example.com"),
-            )
-            .await
-            .unwrap();
-
-        println!("Profiled: {:?} ", profile);
     }
 }

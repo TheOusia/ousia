@@ -4,10 +4,11 @@ version = "1.0.0"
 edition = "2024"
 
 [features]
-default = ["derive"]
-full = ["derive", "postgres", "profiling"]
+default = ["derive", "postgres"]
+full = ["derive", "postgres", "sqlite", "profiling"]
 derive = ["dep:ousia_derive"]
 postgres = ["dep:sqlx"]
+sqlite = ["dep:sqlx"]
 profiling = []
 
 [dependencies]
@@ -19,6 +20,7 @@ async-trait = "0.1.89"
 serde_json = "1.0.145"
 sqlx = { version = "0.8", features = [
     "postgres",
+    "sqlite",
     "runtime-tokio",
     "derive",
     "tls-native-tls",
