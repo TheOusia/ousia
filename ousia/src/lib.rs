@@ -10,6 +10,7 @@ pub use crate::edge::query::EdgeQuery;
 pub use crate::edge::traits::*;
 pub use crate::error::Error;
 pub use crate::object::*;
+use crate::query::QueryFilter;
 use chrono::Utc;
 pub use query::IndexQuery;
 use ulid::Ulid;
@@ -92,6 +93,32 @@ impl Engine {
     // ==================== Object Queries ====================
 
     /// Query objects with filters
+    pub async fn find_object<T: Object>(
+        &self,
+        filters: &[QueryFilter],
+    ) -> Result<Option<T>, Error> {
+        let record = self
+            .adapter
+            .find_object(T::TYPE, *SYSTEM_OWNER, filters)
+            .await?;
+        match record {
+            Some(r) => r.to_object().map(Some),
+            None => Ok(None),
+        }
+    }
+
+    pub async fn find_object_with_owner<T: Object>(
+        &self,
+        owner: Ulid,
+        filters: &[QueryFilter],
+    ) -> Result<Option<T>, Error> {
+        let record = self.adapter.find_object(T::TYPE, owner, filters).await?;
+        match record {
+            Some(r) => r.to_object().map(Some),
+            None => Ok(None),
+        }
+    }
+
     pub async fn query_objects<T: Object>(&self, query: Query) -> Result<Vec<T>, Error> {
         let records = self.adapter.query_objects(T::TYPE, query).await?;
         records.into_iter().map(|r| r.to_object()).collect()

@@ -166,6 +166,20 @@ impl Query {
     }
 }
 
+#[macro_export]
+macro_rules! filter {
+    ($field:ident, $value:expr) => {
+        $crate::query::QueryFilter {
+            field: $field,
+            value: $value.to_index_value(),
+            mode: QueryMode::Search(QuerySearch {
+                comparison: Comparison::Equal,
+                operator: Operator::default(),
+            }),
+        }
+    };
+}
+
 pub struct QueryContext<'a, T> {
     root: Ulid,
     adapter: &'a dyn Adapter,
