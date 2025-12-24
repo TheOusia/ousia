@@ -15,3 +15,7 @@ pub static SYSTEM_OWNER: Lazy<ulid::Ulid> = Lazy::new(|| {
         Err(err) => panic!("{:?}", err),
     }
 });
+
+pub fn system_owner() -> ulid::Ulid {
+    *SYSTEM_OWNER
+}
