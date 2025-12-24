@@ -546,7 +546,7 @@ pub trait Adapter: Send + Sync + 'static {
 }
 
 impl dyn Adapter {
-    pub async fn preload_object<'a, T: Object>(&'a self, id: Ulid) -> QueryContext<'a, T> {
+    pub fn preload_object<'a, T: Object>(&'a self, id: Ulid) -> QueryContext<'a, T> {
         QueryContext::new(self, id)
     }
 }

@@ -206,7 +206,7 @@ impl Engine {
     // ==================== Advanced Query API ====================
 
     /// Start a query context for complex traversals
-    pub async fn preload_object<'a, T: Object>(&'a self, id: Ulid) -> QueryContext<'a, T> {
-        self.inner.adapter.preload_object(id).await
+    pub fn preload_object<'a, T: Object>(&'a self, id: Ulid) -> QueryContext<'a, T> {
+        self.inner.adapter.preload_object(id)
     }
 }
