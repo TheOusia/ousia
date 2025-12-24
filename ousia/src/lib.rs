@@ -184,6 +184,11 @@ impl Engine {
         self.inner.adapter.delete_edge(E::TYPE, from, to).await
     }
 
+    /// Delete all edge of an object
+    pub async fn delete_object_edge<E: Edge>(&self, from: Ulid) -> Result<(), Error> {
+        self.inner.adapter.delete_object_edge(E::TYPE, from).await
+    }
+
     /// Query edges
     pub async fn query_edges<E: Edge>(
         &self,
