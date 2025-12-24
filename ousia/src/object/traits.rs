@@ -2,11 +2,24 @@ use serde::{Deserialize, Serialize};
 
 use crate::{object::Meta, query::IndexMeta};
 
+/// Internal trait for engine operations
+/// This trait is NOT part of the public API and should only be used
+/// by the Ousia engine for persistence operations.
+#[doc(hidden)]
+pub trait ObjectInternal {
+    /// Serialize ALL fields including private ones for database persistence.
+    /// This bypasses the view system and includes data that should not be
+    /// exposed through normal serialization.
+    fn __serialize_internal(&self) -> serde_json::Value;
+}
+
 ///
 /// Derive macro is expected to produce
 /// const FIELDS: &'static TypeNameIndexes {field_name: crate::query::IndexField,...}
 ///
-pub trait Object: Serialize + for<'de> Deserialize<'de> + Sized + Send + Sync + 'static {
+pub trait Object:
+    ObjectInternal + Serialize + for<'de> Deserialize<'de> + Sized + Send + Sync + 'static
+{
     /// Object type name
     const TYPE: &'static str;
 

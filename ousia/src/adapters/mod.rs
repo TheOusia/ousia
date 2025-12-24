@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use ulid::Ulid;
 
 use crate::{
-    Object,
+    Object, ObjectInternal,
     edge::{Edge, query::EdgeQuery},
     error::Error,
     object::SYSTEM_OWNER,
@@ -54,7 +54,7 @@ impl ObjectRecord {
             owner: meta.owner,
             index_meta: serde_json::to_value(obj.index_meta())
                 .expect("Failed to serialize index_meta"),
-            data: serde_json::to_value(obj).expect("Failed to serialize object"),
+            data: obj.__serialize_internal(),
             created_at: meta.created_at,
             updated_at: meta.updated_at,
         }

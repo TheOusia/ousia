@@ -1,9 +1,9 @@
 use proc_macro::TokenStream;
 use proc_macro_crate::{FoundCrate, crate_name};
 use quote::{format_ident, quote};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use syn::{
-    Attribute, Data, DeriveInput, Expr, ExprLit, Field, Fields, Lit, Meta, parse_macro_input,
+    Attribute, Data, DeriveInput, Expr, ExprLit, Field, Fields, Lit, Meta, Type, parse_macro_input,
 };
 
 const RESERVED_META_FIELDS: &[&str] = &["id", "owner", "type", "created_at", "updated_at"];
@@ -105,6 +105,225 @@ fn parse_ousia_attr(attr: Option<&Attribute>) -> (Option<String>, Vec<(String, S
     (type_name, indexes)
 }
 
+/// Check if a field has #[ousia(private)] attribute
+fn is_private_field(field: &Field) -> bool {
+    field.attrs.iter().any(|attr| {
+        if !attr.path().is_ident("ousia") {
+            return false;
+        }
+
+        if let Meta::List(meta_list) = &attr.meta {
+            let result = meta_list.parse_args_with(
+                syn::punctuated::Punctuated::<Meta, syn::Token![,]>::parse_terminated,
+            );
+
+            if let Ok(nested) = result {
+                return nested.iter().any(|meta| {
+                    if let Meta::Path(path) = meta {
+                        path.is_ident("private")
+                    } else {
+                        false
+                    }
+                });
+            }
+        }
+        false
+    })
+}
+
+/// Extract view names from #[ousia(view(name1), view(name2))] attributes
+fn extract_field_views(field: &Field) -> Vec<String> {
+    let mut views = Vec::new();
+
+    for attr in &field.attrs {
+        if !attr.path().is_ident("ousia") {
+            continue;
+        }
+
+        if let Meta::List(meta_list) = &attr.meta {
+            let result = meta_list.parse_args_with(
+                syn::punctuated::Punctuated::<Meta, syn::Token![,]>::parse_terminated,
+            );
+
+            if let Ok(nested) = result {
+                for meta in nested {
+                    if let Meta::List(list) = meta {
+                        if list.path.is_ident("view") {
+                            // Parse view(name)
+                            let tokens = list.tokens.to_string();
+                            views.push(tokens);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    views
+}
+
+/// Parse #[ousia_meta(view(name="field1, field2"))] attributes
+fn parse_meta_views(field: &Field) -> BTreeMap<String, Vec<String>> {
+    let mut meta_views = BTreeMap::new();
+
+    for attr in &field.attrs {
+        if !attr.path().is_ident("ousia_meta") {
+            continue;
+        }
+
+        if let Meta::List(meta_list) = &attr.meta {
+            let result = meta_list.parse_args_with(
+                syn::punctuated::Punctuated::<Meta, syn::Token![,]>::parse_terminated,
+            );
+
+            if let Ok(nested) = result {
+                for meta in nested {
+                    if let Meta::List(list) = meta {
+                        if list.path.is_ident("view") {
+                            // Parse view(name="field1, field2")
+                            if let Ok(nv) = syn::parse2::<syn::MetaNameValue>(list.tokens.clone()) {
+                                if let Expr::Lit(ExprLit {
+                                    lit: Lit::Str(s), ..
+                                }) = &nv.value
+                                {
+                                    let view_name = nv.path.get_ident().unwrap().to_string();
+                                    let fields: Vec<String> = s
+                                        .value()
+                                        .split(',')
+                                        .map(|f| f.trim().to_string())
+                                        .filter(|f| !f.is_empty())
+                                        .collect();
+                                    meta_views.insert(view_name, fields);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    meta_views
+}
+
+/// Validate that a view name is a valid Rust identifier
+fn is_valid_rust_identifier(name: &str) -> bool {
+    const RUST_KEYWORDS: &[&str] = &[
+        "as", "break", "const", "continue", "crate", "else", "enum", "extern", "false", "fn",
+        "for", "if", "impl", "in", "let", "loop", "match", "mod", "move", "mut", "pub", "ref",
+        "return", "self", "Self", "static", "struct", "super", "trait", "true", "type", "unsafe",
+        "use", "where", "while", "async", "await", "dyn", "abstract", "become", "box", "do",
+        "final", "macro", "override", "priv", "typeof", "unsized", "virtual", "yield", "try",
+    ];
+
+    if name.is_empty() || RUST_KEYWORDS.contains(&name) {
+        return false;
+    }
+
+    let mut chars = name.chars();
+    let first = chars.next().unwrap();
+
+    if !first.is_alphabetic() && first != '_' {
+        return false;
+    }
+
+    chars.all(|c| c.is_alphanumeric() || c == '_')
+}
+
+/// Default meta fields when no explicit view(default="...") is specified
+const DEFAULT_META_FIELDS: &[&str] = &["id", "created_at", "updated_at"];
+
+/// Generate view struct and conversion method
+fn generate_view_code(
+    struct_name: &syn::Ident,
+    view_name: &str,
+    meta_fields: &[String],
+    data_fields: &[(syn::Ident, Type)],
+) -> (proc_macro2::TokenStream, proc_macro2::TokenStream) {
+    // Create PascalCase view name
+    let view_pascal = view_name
+        .split('_')
+        .map(|word| {
+            let mut chars = word.chars();
+            match chars.next() {
+                None => String::new(),
+                Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+            }
+        })
+        .collect::<String>();
+
+    let view_struct_name = format_ident!("{}{}View", struct_name, view_pascal);
+    let method_name = format_ident!("_{}", view_name);
+
+    // Generate struct fields
+    let mut struct_fields = Vec::new();
+    let mut field_assignments = Vec::new();
+
+    // Add meta fields
+    for meta_field in meta_fields {
+        match meta_field.as_str() {
+            "id" => {
+                struct_fields.push(quote! { pub id: ulid::Ulid });
+                field_assignments.push(quote! { id: self._meta.id });
+            }
+            "owner" => {
+                struct_fields.push(quote! { pub owner: ulid::Ulid });
+                field_assignments.push(quote! { owner: self._meta.owner });
+            }
+            "created_at" => {
+                struct_fields.push(quote! { pub created_at: chrono::DateTime<chrono::Utc> });
+                field_assignments.push(quote! { created_at: self._meta.created_at });
+            }
+            "updated_at" => {
+                struct_fields.push(quote! { pub updated_at: chrono::DateTime<chrono::Utc> });
+                field_assignments.push(quote! { updated_at: self._meta.updated_at });
+            }
+            _ => panic!(
+                "Invalid meta field: {}. Valid fields are: id, owner, created_at, updated_at",
+                meta_field
+            ),
+        }
+    }
+
+    // Add data fields
+    for (field_name, field_type) in data_fields {
+        struct_fields.push(quote! { pub #field_name: #field_type });
+        field_assignments.push(quote! { #field_name: self.#field_name.clone() });
+    }
+
+    let view_struct = quote! {
+        #[derive(serde::Serialize, Clone, Debug)]
+        pub struct #view_struct_name {
+            #(#struct_fields),*
+        }
+    };
+
+    let view_method = quote! {
+        pub fn #method_name(&self) -> #view_struct_name {
+            #view_struct_name {
+                #(#field_assignments),*
+            }
+        }
+    };
+
+    (view_struct, view_method)
+}
+
+/// Generate the internal serialization implementation
+fn generate_internal_serialize(non_meta_fields: &[&Field]) -> proc_macro2::TokenStream {
+    let field_serializations = non_meta_fields.iter().map(|f| {
+        let field_name = f.ident.as_ref().unwrap();
+        let field_name_str = field_name.to_string();
+        quote! { #field_name_str: self.#field_name }
+    });
+
+    quote! {
+        serde_json::json!({
+            #(#field_serializations),*
+        })
+    }
+}
+
 /// Helper to parse kind strings into index kind tokens
 fn parse_index_kinds(kind_str: &str) -> Vec<proc_macro2::TokenStream> {
     let ousia = import_ousia();
@@ -119,7 +338,7 @@ fn parse_index_kinds(kind_str: &str) -> Vec<proc_macro2::TokenStream> {
         .collect()
 }
 
-#[proc_macro_derive(OusiaObject, attributes(ousia))]
+#[proc_macro_derive(OusiaObject, attributes(ousia, ousia_meta))]
 pub fn derive_ousia_object(input: TokenStream) -> TokenStream {
     let ousia = import_ousia();
     let input = parse_macro_input!(input as DeriveInput);
@@ -174,6 +393,74 @@ pub fn derive_ousia_object(input: TokenStream) -> TokenStream {
                 f_str, ident
             );
         }
+    }
+
+    // --- Collect view information ---
+    let mut all_view_names = HashSet::new();
+    let mut field_view_map: BTreeMap<String, Vec<String>> = BTreeMap::new();
+
+    // Get meta field views
+    let meta_field = fields
+        .iter()
+        .find(|f| f.ident.as_ref().unwrap() == meta_field_ident)
+        .unwrap();
+    let meta_views = parse_meta_views(meta_field);
+
+    // Collect all view names from meta
+    for view_name in meta_views.keys() {
+        if view_name != "default" {
+            all_view_names.insert(view_name.clone());
+        }
+    }
+
+    // Collect view names from fields
+    for field in &non_meta_fields {
+        let field_name = field.ident.as_ref().unwrap().to_string();
+        let views = extract_field_views(field);
+
+        for view in views {
+            if !is_valid_rust_identifier(&view) {
+                panic!(
+                    "Invalid view name '{}' on field '{}'. View names must be valid Rust identifiers.",
+                    view, field_name
+                );
+            }
+            if view != "default" {
+                all_view_names.insert(view.clone());
+            }
+            field_view_map
+                .entry(field_name.clone())
+                .or_insert_with(Vec::new)
+                .push(view);
+        }
+    }
+
+    // --- Generate view structs and methods ---
+    let mut view_structs = Vec::new();
+    let mut view_methods = Vec::new();
+
+    for view_name in &all_view_names {
+        // Get meta fields for this view
+        let meta_fields = meta_views.get(view_name).cloned().unwrap_or_else(Vec::new);
+
+        // Get data fields for this view
+        let data_fields: Vec<_> = non_meta_fields
+            .iter()
+            .filter(|f| {
+                let fname = f.ident.as_ref().unwrap().to_string();
+                field_view_map
+                    .get(&fname)
+                    .map(|views| views.contains(view_name))
+                    .unwrap_or(false)
+                    && !is_private_field(f)
+            })
+            .map(|f| (f.ident.as_ref().unwrap().clone(), f.ty.clone()))
+            .collect();
+
+        let (view_struct, view_method) =
+            generate_view_code(ident, view_name, &meta_fields, &data_fields);
+        view_structs.push(view_struct);
+        view_methods.push(view_method);
     }
 
     // --- generate IndexField list ---
@@ -263,16 +550,42 @@ pub fn derive_ousia_object(input: TokenStream) -> TokenStream {
         }
     });
 
-    // --- generate Serialize implementation (skip meta field) ---
-    let serialize_fields = non_meta_fields.iter().map(|f| {
-        let field_name = f.ident.as_ref().unwrap();
-        let field_name_str = field_name.to_string();
+    // --- generate Serialize implementation (default view) ---
+    // Get default meta fields
+    let default_meta_fields = meta_views
+        .get("default")
+        .cloned()
+        .unwrap_or_else(|| DEFAULT_META_FIELDS.iter().map(|s| s.to_string()).collect());
+
+    let serialize_meta_fields = default_meta_fields.iter().map(|field_name| {
+        let meta_field = format_ident!("{}", field_name);
         quote! {
-            state.serialize_field(#field_name_str, &self.#field_name)?;
+            state.serialize_field(#field_name, &self._meta.#meta_field)?;
         }
     });
 
-    let field_count = non_meta_fields.len();
+    let serialize_fields = non_meta_fields.iter().filter_map(|f| {
+        let field_name = f.ident.as_ref().unwrap();
+        let field_name_str = field_name.to_string();
+
+        // Skip private fields in default view
+        if is_private_field(f) {
+            return None;
+        }
+
+        Some(quote! {
+            state.serialize_field(#field_name_str, &self.#field_name)?;
+        })
+    });
+
+    let non_private_count = non_meta_fields
+        .iter()
+        .filter(|f| !is_private_field(f))
+        .count();
+    let field_count = non_private_count + default_meta_fields.len();
+
+    // --- generate internal serialization ---
+    let internal_serialize_body = generate_internal_serialize(&non_meta_fields);
 
     // --- generate Deserialize implementation ---
     let deserialize_field_names: Vec<_> = non_meta_fields
@@ -439,6 +752,16 @@ pub fn derive_ousia_object(input: TokenStream) -> TokenStream {
             }
         }
 
+        impl #ousia::object::ObjectInternal for #ident {
+            fn __serialize_internal(&self) -> serde_json::Value {
+                #internal_serialize_body
+            }
+        }
+
+        impl #ident {
+            #(#view_methods)*
+        }
+
         impl #ousia::query::IndexQuery for #ident {
             fn indexed_fields() -> &'static [#ousia::query::IndexField] {
                 &[ #(#index_fields),* ]
@@ -455,7 +778,9 @@ pub fn derive_ousia_object(input: TokenStream) -> TokenStream {
             };
         }
 
-        // Custom Serialize implementation (excludes meta field)
+        #(#view_structs)*
+
+        // Custom Serialize implementation (default view)
         impl serde::Serialize for #ident {
             fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
             where
@@ -463,6 +788,7 @@ pub fn derive_ousia_object(input: TokenStream) -> TokenStream {
             {
                 use serde::ser::SerializeStruct;
                 let mut state = serializer.serialize_struct(stringify!(#ident), #field_count)?;
+                #(#serialize_meta_fields)*
                 #(#serialize_fields)*
                 state.end()
             }
