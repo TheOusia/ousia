@@ -842,6 +842,23 @@ impl Adapter for SqliteAdapter {
         Ok(())
     }
 
+    async fn delete_object_edge(&self, type_name: &'static str, from: Ulid) -> Result<(), Error> {
+        let pool = self.pool.clone();
+        let _ = sqlx::query(
+            r#"
+            DELETE FROM edges
+            WHERE type = $1 AND "from" = $2
+            "#,
+        )
+        .bind(type_name)
+        .bind(from.to_string())
+        .execute(&pool)
+        .await
+        .map_err(|err| Error::Storage(err.to_string()))?;
+
+        Ok(())
+    }
+
     async fn query_edges(
         &self,
         type_name: &'static str,

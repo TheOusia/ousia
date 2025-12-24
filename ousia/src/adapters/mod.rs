@@ -530,6 +530,8 @@ pub trait Adapter: Send + Sync + 'static {
     async fn delete_edge(&self, type_name: &'static str, from: Ulid, to: Ulid)
     -> Result<(), Error>;
 
+    async fn delete_object_edge(&self, type_name: &'static str, from: Ulid) -> Result<(), Error>;
+
     async fn query_edges(
         &self,
         type_name: &'static str,
