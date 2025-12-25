@@ -8,7 +8,7 @@ use ulid::Ulid;
 
 use crate::{
     adapters::{Adapter, EdgeQuery, EdgeRecord, Error, ObjectRecord, Query},
-    query::{IndexValue, QueryFilter},
+    query::{Cursor, IndexValue, QueryFilter},
 };
 
 /// PostgreSQL adapter using a unified JSON storage model
@@ -251,13 +251,18 @@ impl PostgresAdapter {
         })
     }
 
-    fn build_object_query_conditions(filters: &Vec<QueryFilter>) -> String {
+    fn build_object_query_conditions(filters: &Vec<QueryFilter>, cursor: Option<Cursor>) -> String {
         let mut conditions = vec![
             ("type = $1".to_string(), "AND"),
             ("owner = $2".to_string(), "AND"),
         ];
         let mut param_idx = 3;
 
+        if let Some(_) = cursor {
+            conditions.push(("id < $3".to_string(), "AND"));
+            param_idx += 1;
+        }
+
         for filter in filters {
             let index_type = match &filter.value {
                 IndexValue::String(_) => "text",
@@ -311,12 +316,18 @@ impl PostgresAdapter {
         where_clause
     }
 
-    fn build_edge_query_conditions(filters: &Vec<QueryFilter>) -> String {
+    fn build_edge_query_conditions(filters: &Vec<QueryFilter>, cursor: Option<Cursor>) -> String {
         let mut conditions = vec![
             ("type = $1".to_string(), "AND"),
             (r#""from" = $2"#.to_string(), "AND"),
         ];
         let mut param_idx = 3;
+
+        if cursor.is_some() {
+            conditions.push((r#""to" < $3"#.to_string(), "AND"));
+            param_idx += 1;
+        }
+
         for filter in filters {
             let index_type = match &filter.value {
                 IndexValue::String(_) => "text",
@@ -370,12 +381,21 @@ impl PostgresAdapter {
         where_clause
     }
 
-    fn build_edge_reverse_query_conditions(filters: &Vec<QueryFilter>) -> String {
+    fn build_edge_reverse_query_conditions(
+        filters: &Vec<QueryFilter>,
+        cursor: Option<Cursor>,
+    ) -> String {
         let mut conditions = vec![
             ("type = $1".to_string(), "AND"),
             (r#""to" = $2"#.to_string(), "AND"),
         ];
         let mut param_idx = 3;
+
+        if let Some(_) = cursor {
+            conditions.push((r#""from" < $3"#.to_string(), "AND"));
+            param_idx += 1;
+        }
+
         for filter in filters {
             let index_type = match &filter.value {
                 IndexValue::String(_) => "text",
@@ -436,7 +456,7 @@ impl PostgresAdapter {
             .collect();
 
         if sort.is_empty() {
-            return "ORDER BY created_at DESC".to_string();
+            return "ORDER BY id DESC".to_string();
         }
 
         let order_terms: Vec<String> = sort
@@ -689,7 +709,7 @@ impl Adapter for PostgresAdapter {
         owner: Ulid,
         filters: &[QueryFilter],
     ) -> Result<Option<ObjectRecord>, Error> {
-        let where_clause = Self::build_object_query_conditions(&filters.to_vec());
+        let where_clause = Self::build_object_query_conditions(&filters.to_vec(), None);
         let order_clause = Self::build_order_clause(&filters.to_vec());
 
         let sql = format!(
@@ -721,7 +741,7 @@ impl Adapter for PostgresAdapter {
         type_name: &'static str,
         plan: Query,
     ) -> Result<Vec<ObjectRecord>, Error> {
-        let where_clause = Self::build_object_query_conditions(&plan.filters);
+        let where_clause = Self::build_object_query_conditions(&plan.filters, plan.cursor);
         let order_clause = Self::build_order_clause(&plan.filters);
 
         let mut sql = format!(
@@ -738,13 +758,13 @@ impl Adapter for PostgresAdapter {
             sql.push_str(&format!(" LIMIT {}", limit));
         }
 
-        if let Some(offset) = plan.offset {
-            sql.push_str(&format!(" OFFSET {}", offset));
-        }
-
         let mut query = sqlx::query(&sql)
             .bind(type_name)
             .bind(plan.owner.to_string());
+
+        if let Some(cursor) = plan.cursor {
+            query = query.bind(cursor.last_id.to_string());
+        }
 
         query = Self::query_bind_filters(query, &plan.filters);
 
@@ -769,7 +789,7 @@ impl Adapter for PostgresAdapter {
 
         match plan {
             Some(plan) => {
-                let where_clause = Self::build_object_query_conditions(&plan.filters);
+                let where_clause = Self::build_object_query_conditions(&plan.filters, None);
 
                 let mut sql = format!(
                     r#"
@@ -781,10 +801,6 @@ impl Adapter for PostgresAdapter {
 
                 if let Some(limit) = plan.limit {
                     sql.push_str(&format!(" LIMIT {}", limit));
-                }
-
-                if let Some(offset) = plan.offset {
-                    sql.push_str(&format!(" OFFSET {}", offset));
                 }
 
                 let mut query = sqlx::query_scalar::<_, i64>(&sql)
@@ -928,7 +944,7 @@ impl Adapter for PostgresAdapter {
         owner: Ulid,
         plan: EdgeQuery,
     ) -> Result<Vec<EdgeRecord>, Error> {
-        let where_clause = Self::build_edge_query_conditions(&plan.filters);
+        let where_clause = Self::build_edge_query_conditions(&plan.filters, plan.cursor);
         let order_clause = Self::build_edge_order_clause(&plan.filters);
 
         let mut sql = format!(
@@ -945,11 +961,10 @@ impl Adapter for PostgresAdapter {
             sql.push_str(&format!(" LIMIT {}", limit));
         }
 
-        if let Some(offset) = plan.offset {
-            sql.push_str(&format!(" OFFSET {}", offset));
-        }
-
         let mut query = sqlx::query(&sql).bind(type_name).bind(owner.to_string());
+        if let Some(cursor) = plan.cursor {
+            query = query.bind(cursor.last_id.to_string());
+        }
 
         query = Self::query_bind_filters(query, &plan.filters);
 
@@ -975,7 +990,7 @@ impl Adapter for PostgresAdapter {
 
         match plan {
             Some(plan) => {
-                let where_clause = Self::build_edge_query_conditions(&plan.filters);
+                let where_clause = Self::build_edge_query_conditions(&plan.filters, None);
 
                 let mut sql = format!(
                     r#"
@@ -987,10 +1002,6 @@ impl Adapter for PostgresAdapter {
 
                 if let Some(limit) = plan.limit {
                     sql.push_str(&format!(" LIMIT {}", limit));
-                }
-
-                if let Some(offset) = plan.offset {
-                    sql.push_str(&format!(" OFFSET {}", offset));
                 }
 
                 let mut query = sqlx::query_scalar::<_, i64>(&sql)
@@ -1042,7 +1053,7 @@ impl PostgresAdapter {
 
         // Database query time
         let db_start = Instant::now();
-        let where_clause = Self::build_object_query_conditions(&plan.filters);
+        let where_clause = Self::build_object_query_conditions(&plan.filters, None);
         let order_clause = Self::build_order_clause(&plan.filters);
 
         let mut sql = format!(
@@ -1057,10 +1068,6 @@ impl PostgresAdapter {
 
         if let Some(limit) = plan.limit {
             sql.push_str(&format!(" LIMIT {}", limit));
-        }
-
-        if let Some(offset) = plan.offset {
-            sql.push_str(&format!(" OFFSET {}", offset));
         }
 
         let mut query = sqlx::query(&sql)

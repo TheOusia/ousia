@@ -1,4 +1,6 @@
-use crate::query::{IndexField, QueryFilter, QueryMode, ToIndexValue};
+use ulid::Ulid;
+
+use crate::query::{Cursor, IndexField, QueryFilter, QueryMode, ToIndexValue};
 
 /// -----------------------------
 /// Edge Query Plan (storage contract)
@@ -8,7 +10,7 @@ use crate::query::{IndexField, QueryFilter, QueryMode, ToIndexValue};
 pub struct EdgeQuery {
     pub filters: Vec<QueryFilter>,
     pub limit: Option<u32>,
-    pub offset: Option<u32>,
+    pub cursor: Option<Cursor>,
 }
 
 impl Default for EdgeQuery {
@@ -18,7 +20,7 @@ impl Default for EdgeQuery {
             // sort: Vec::new(),
             // search: Vec::new(),
             limit: None,
-            offset: None,
+            cursor: None,
         }
     }
 }
@@ -44,8 +46,8 @@ impl EdgeQuery {
         self
     }
 
-    pub fn with_offset(mut self, offset: u32) -> Self {
-        self.offset = Some(offset);
+    pub fn with_cursor(mut self, cursor: Ulid) -> Self {
+        self.cursor = Some(Cursor { last_id: cursor });
         self
     }
 }

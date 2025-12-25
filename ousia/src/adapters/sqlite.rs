@@ -8,7 +8,7 @@ use ulid::Ulid;
 
 use crate::{
     adapters::{Adapter, EdgeQuery, EdgeRecord, Error, ObjectRecord, Query},
-    query::{IndexValue, QueryFilter},
+    query::{Cursor, IndexValue, QueryFilter},
 };
 
 /// SQLite adapter using a unified JSON storage model
@@ -262,11 +262,15 @@ impl SqliteAdapter {
         })
     }
 
-    fn build_object_query_conditions(filters: &Vec<QueryFilter>) -> String {
+    fn build_object_query_conditions(filters: &Vec<QueryFilter>, cursor: Option<Cursor>) -> String {
         let mut conditions = vec![
             ("type = ?".to_string(), "AND"),
             ("owner = ?".to_string(), "AND"),
         ];
+
+        if cursor.is_some() {
+            conditions.push(("id < ?".to_string(), "AND"));
+        }
 
         for filter in filters {
             match &filter.mode {
@@ -310,11 +314,70 @@ impl SqliteAdapter {
         format!("WHERE {}", query)
     }
 
-    fn build_edge_query_conditions(filters: &Vec<QueryFilter>) -> String {
+    fn build_edge_query_conditions(filters: &Vec<QueryFilter>, cursor: Option<Cursor>) -> String {
         let mut conditions = vec![
             ("type = ?".to_string(), "AND"),
             (r#""from" = ?"#.to_string(), "AND"),
         ];
+
+        if cursor.is_some() {
+            conditions.push((r#""to" > ?"#.to_string(), "AND"));
+        }
+
+        for filter in filters {
+            match &filter.mode {
+                crate::query::QueryMode::Search(query_search) => {
+                    let comparison = match query_search.comparison {
+                        crate::query::Comparison::Equal => "=",
+                        crate::query::Comparison::BeginsWith => "LIKE",
+                        crate::query::Comparison::Contains => "LIKE",
+                        crate::query::Comparison::GreaterThan => ">",
+                        crate::query::Comparison::LessThan => "<",
+                        crate::query::Comparison::GreaterThanOrEqual => ">=",
+                        crate::query::Comparison::LessThanOrEqual => "<=",
+                        crate::query::Comparison::NotEqual => "!=",
+                    };
+
+                    let condition = format!(
+                        "json_extract(index_meta, '$.{}') {} ?",
+                        filter.field.name, comparison
+                    );
+
+                    let operator = match query_search.operator {
+                        crate::query::Operator::And => "AND",
+                        _ => "OR",
+                    };
+                    conditions.push((condition, operator));
+                }
+                crate::query::QueryMode::Sort(_) => continue,
+            }
+        }
+
+        let mut query = String::new();
+        for (i, (cond, joiner)) in conditions.iter().enumerate() {
+            query.push_str(cond);
+            if i < conditions.len() - 1 && !joiner.is_empty() {
+                query.push(' ');
+                query.push_str(joiner);
+                query.push(' ');
+            }
+        }
+
+        format!("WHERE {}", query)
+    }
+
+    fn build_edge_reverse_query_conditions(
+        filters: &Vec<QueryFilter>,
+        cursor: Option<Cursor>,
+    ) -> String {
+        let mut conditions = vec![
+            ("type = ?".to_string(), "AND"),
+            (r#""to" = ?"#.to_string(), "AND"),
+        ];
+
+        if cursor.is_some() {
+            conditions.push((r#""from" > ?"#.to_string(), "AND"));
+        }
 
         for filter in filters {
             match &filter.mode {
@@ -365,7 +428,7 @@ impl SqliteAdapter {
             .collect();
 
         if sort.is_empty() {
-            return "ORDER BY created_at DESC".to_string();
+            return "ORDER BY id DESC".to_string();
         }
 
         let order_terms: Vec<String> = sort
@@ -619,7 +682,7 @@ impl Adapter for SqliteAdapter {
         owner: Ulid,
         filters: &[QueryFilter],
     ) -> Result<Option<ObjectRecord>, Error> {
-        let where_clause = Self::build_object_query_conditions(&filters.to_vec());
+        let where_clause = Self::build_object_query_conditions(&filters.to_vec(), None);
         let order_clause = Self::build_order_clause(&filters.to_vec());
 
         let sql = format!(
@@ -655,7 +718,7 @@ impl Adapter for SqliteAdapter {
         type_name: &'static str,
         plan: Query,
     ) -> Result<Vec<ObjectRecord>, Error> {
-        let where_clause = Self::build_object_query_conditions(&plan.filters);
+        let where_clause = Self::build_object_query_conditions(&plan.filters, plan.cursor);
         let order_clause = Self::build_order_clause(&plan.filters);
 
         let mut sql = format!(
@@ -672,13 +735,13 @@ impl Adapter for SqliteAdapter {
             sql.push_str(&format!(" LIMIT {}", limit));
         }
 
-        if let Some(offset) = plan.offset {
-            sql.push_str(&format!(" OFFSET {}", offset));
-        }
-
         let mut query = sqlx::query(&sql)
             .bind(type_name)
             .bind(plan.owner.to_string());
+
+        if let Some(cursor) = plan.cursor {
+            query = query.bind(cursor.last_id.to_string());
+        }
 
         query = Self::query_bind_filters(query, &plan.filters);
 
@@ -702,7 +765,7 @@ impl Adapter for SqliteAdapter {
 
         match plan {
             Some(plan) => {
-                let where_clause = Self::build_object_query_conditions(&plan.filters);
+                let where_clause = Self::build_object_query_conditions(&plan.filters, None);
 
                 let mut sql = format!(
                     r#"
@@ -714,10 +777,6 @@ impl Adapter for SqliteAdapter {
 
                 if let Some(limit) = plan.limit {
                     sql.push_str(&format!(" LIMIT {}", limit));
-                }
-
-                if let Some(offset) = plan.offset {
-                    sql.push_str(&format!(" OFFSET {}", offset));
                 }
 
                 let mut query = sqlx::query_scalar::<_, i64>(&sql)
@@ -865,7 +924,7 @@ impl Adapter for SqliteAdapter {
         owner: Ulid,
         plan: EdgeQuery,
     ) -> Result<Vec<EdgeRecord>, Error> {
-        let where_clause = Self::build_edge_query_conditions(&plan.filters);
+        let where_clause = Self::build_edge_query_conditions(&plan.filters, plan.cursor);
         let order_clause = Self::build_edge_order_clause(&plan.filters);
 
         let mut sql = format!(
@@ -882,12 +941,11 @@ impl Adapter for SqliteAdapter {
             sql.push_str(&format!(" LIMIT {}", limit));
         }
 
-        if let Some(offset) = plan.offset {
-            sql.push_str(&format!(" OFFSET {}", offset));
-        }
-
         let mut query = sqlx::query(&sql).bind(type_name).bind(owner.to_string());
 
+        if let Some(cursor) = plan.cursor {
+            query = query.bind(cursor.last_id.to_string());
+        }
         query = Self::query_bind_filters(query, &plan.filters);
 
         let pool = self.pool.clone();
@@ -909,7 +967,7 @@ impl Adapter for SqliteAdapter {
 
         match plan {
             Some(plan) => {
-                let where_clause = Self::build_edge_query_conditions(&plan.filters);
+                let where_clause = Self::build_edge_query_conditions(&plan.filters, None);
 
                 let mut sql = format!(
                     r#"
@@ -921,10 +979,6 @@ impl Adapter for SqliteAdapter {
 
                 if let Some(limit) = plan.limit {
                     sql.push_str(&format!(" LIMIT {}", limit));
-                }
-
-                if let Some(offset) = plan.offset {
-                    sql.push_str(&format!(" OFFSET {}", offset));
                 }
 
                 let mut query = sqlx::query_scalar::<_, i64>(&sql)

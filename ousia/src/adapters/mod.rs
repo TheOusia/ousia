@@ -106,7 +106,7 @@ pub struct Query {
     pub owner: Ulid, // enforced, never optional
     pub filters: Vec<QueryFilter>,
     pub limit: Option<u32>,
-    pub offset: Option<u32>,
+    pub cursor: Option<Cursor>,
 }
 
 impl Default for Query {
@@ -115,7 +115,7 @@ impl Default for Query {
             owner: *SYSTEM_OWNER,
             filters: Vec::new(),
             limit: None,
-            offset: None,
+            cursor: None,
         }
     }
 }
@@ -126,7 +126,7 @@ impl Query {
             owner,
             filters: Vec::new(),
             limit: None,
-            offset: None,
+            cursor: None,
         }
     }
 
@@ -163,8 +163,8 @@ impl Query {
         self
     }
 
-    pub fn with_offset(mut self, offset: u32) -> Self {
-        self.offset = Some(offset);
+    pub fn with_cursor(mut self, cursor: Ulid) -> Self {
+        self.cursor = Some(Cursor { last_id: cursor });
         self
     }
 }
@@ -220,7 +220,7 @@ pub struct EdgeQueryContext<'a, E: Edge, O: crate::Object> {
     filters: Vec<QueryFilter>,
     edge_filters: Vec<QueryFilter>,
     limit: Option<u32>,
-    offset: Option<u32>,
+    cursor: Option<Cursor>,
     adapter: &'a dyn Adapter,
     _marker: std::marker::PhantomData<(E, O)>,
 }
@@ -233,7 +233,7 @@ impl<'a, E: Edge, O: Object> EdgeQueryContext<'a, E, O> {
             filters: vec![],
             edge_filters: vec![],
             limit: None,
-            offset: None,
+            cursor: None,
             _marker: std::marker::PhantomData,
         }
     }
@@ -287,9 +287,9 @@ impl<'a, E: Edge, O: Object> EdgeQueryContext<'a, E, O> {
         self
     }
 
-    /// Set offset for pagination
-    pub fn with_offset(mut self, offset: u32) -> Self {
-        self.offset = Some(offset);
+    /// Set cursor for pagination
+    pub fn with_cursor(mut self, cursor: Ulid) -> Self {
+        self.cursor = Some(Cursor { last_id: cursor });
         self
     }
 
@@ -301,8 +301,8 @@ impl<'a, E: Edge, O: Object> EdgeQueryContext<'a, E, O> {
         if let Some(limit) = self.limit {
             edge_query.limit = Some(limit);
         }
-        if let Some(offset) = self.offset {
-            edge_query.offset = Some(offset);
+        if let Some(cusor) = self.cursor {
+            edge_query.cursor = Some(cusor);
         }
 
         let edge_records = self
@@ -342,8 +342,8 @@ impl<'a, E: Edge, O: Object> EdgeQueryContext<'a, E, O> {
         if let Some(limit) = self.limit {
             edge_query.limit = Some(limit);
         }
-        if let Some(offset) = self.offset {
-            edge_query.offset = Some(offset);
+        if let Some(offset) = self.cursor {
+            edge_query.cursor = Some(offset);
         }
 
         let edge_records = self

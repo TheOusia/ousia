@@ -253,7 +253,7 @@ mod sqlite_adpater_test {
 }
 
 mod sqlite_engine_test {
-    use std::time::Instant;
+    use std::time::{Duration, Instant};
 
     use ousia::{EdgeMetaTrait as _, EdgeQuery, Engine, Error, filter};
     use rand::distr::Alphanumeric;
@@ -375,13 +375,22 @@ mod sqlite_engine_test {
         alice.display_name = "Alice".to_string();
         alice.username = "alice".to_string();
         alice.email = "alice@example.com".to_string();
+        tokio::time::sleep(Duration::from_millis(100)).await;
 
         let mut bob = User::default();
         bob.display_name = "Bob".to_string();
+        bob.username = "bob".to_string();
         bob.email = "bob@example.com".to_string();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        let mut charlie = User::default();
+        charlie.display_name = "Charlie".to_string();
+        charlie.username = "charlie".to_string();
+        charlie.email = "charlie@example.com".to_string();
 
         engine.create_object(&alice).await.unwrap();
         engine.create_object(&bob).await.unwrap();
+        engine.create_object(&charlie).await.unwrap();
 
         // Query by name
         let users: Vec<User> = engine
@@ -391,6 +400,15 @@ mod sqlite_engine_test {
 
         assert_eq!(users.len(), 1);
         assert_eq!(users[0].username, "alice");
+
+        // Query with cursor
+        let users: Vec<User> = engine
+            .query_objects(Query::default().with_cursor(charlie.id()))
+            .await
+            .unwrap();
+
+        assert_eq!(users.len(), 2);
+        assert_eq!(users.get(0).unwrap().username, "bob");
     }
 
     #[tokio::test]
@@ -570,6 +588,7 @@ mod sqlite_engine_test {
         owner.email = "owner@example.com".to_string();
         engine.create_object(&owner).await.unwrap();
 
+        let mut created_posts: Vec<Post> = vec![];
         // Create multiple posts
         for i in 0..10 {
             let mut post = Post::default();
@@ -577,6 +596,8 @@ mod sqlite_engine_test {
             post.title = format!("Post {}", i);
             post.content = format!("Content {}", i);
             engine.create_object(&post).await.unwrap();
+            created_posts.push(post);
+            tokio::time::sleep(Duration::from_millis(100)).await;
         }
 
         // Query with limit
@@ -588,10 +609,14 @@ mod sqlite_engine_test {
 
         // Query with offset
         let posts: Vec<Post> = engine
-            .query_objects(Query::new(owner.id()).with_offset(5).with_limit(3))
+            .query_objects(
+                Query::new(owner.id())
+                    .with_cursor(created_posts[4].id())
+                    .with_limit(3),
+            )
             .await
             .unwrap();
-        assert_eq!(posts.len(), 3);
+        assert_eq!(posts.len(), 3, "Expected 3 posts but got {}", posts.len());
     }
 
     #[tokio::test]

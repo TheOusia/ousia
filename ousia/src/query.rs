@@ -212,8 +212,9 @@ pub enum Operator {
 }
 
 /// Pagination cursor
+#[derive(Debug, Clone, Copy)]
 pub struct Cursor {
-    last_id: Ulid,
+    pub last_id: Ulid,
 }
 
 impl Into<Cursor> for Ulid {
