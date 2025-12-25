@@ -321,7 +321,7 @@ mod postgres_adpater_test {
 mod engine_test {
     use std::time::{Duration, Instant};
 
-    use ousia::{EdgeMetaTrait as _, EdgeQuery, Engine, Error, filter};
+    use ousia::{EdgeMetaTrait as _, EdgeQuery, Engine, Error, Union, filter, system_owner};
     use rand::distr::Alphanumeric;
 
     use super::*;
@@ -751,6 +751,133 @@ mod engine_test {
             .await;
 
         assert!(matches!(result, Err(Error::NotFound)));
+    }
+
+    #[tokio::test]
+    async fn test_fetch_union_object() {
+        let (_resource, pool) = setup_test_db().await;
+        let adapter = PostgresAdapter::from_pool(pool);
+        adapter.init_schema().await.unwrap();
+
+        let mut alice = User::default();
+        alice.display_name = "Alice".to_string();
+        alice.username = "alice".to_string();
+        alice.email = "alice@example.com".to_string();
+        adapter
+            .insert_object(ObjectRecord::from_object(&alice))
+            .await
+            .unwrap();
+
+        let result = adapter
+            .fetch_union_object(User::TYPE, Post::TYPE, alice.id())
+            .await;
+        let Ok(result) = result else {
+            panic!("Failed to fetch union object {:?}", result.unwrap_err());
+        };
+
+        let union: Union<User, Post> = result.unwrap().into();
+        assert!(union.is_first());
+    }
+
+    #[tokio::test]
+    async fn test_fetch_union_objects() {
+        let (_resource, pool) = setup_test_db().await;
+        let adapter = PostgresAdapter::from_pool(pool);
+        adapter.init_schema().await.unwrap();
+
+        let mut alice = User::default();
+        alice.username = "alice".into();
+        alice.email = "alice@example.com".into();
+        alice.display_name = "Alice".into();
+
+        let mut post = Post::default();
+        post.title = "Hello".into();
+        post.content = "World".into();
+
+        adapter
+            .insert_object(ObjectRecord::from_object(&alice))
+            .await
+            .unwrap();
+        adapter
+            .insert_object(ObjectRecord::from_object(&post))
+            .await
+            .unwrap();
+
+        let result = adapter
+            .fetch_union_objects(User::TYPE, Post::TYPE, vec![alice.id(), post.id()])
+            .await
+            .unwrap();
+
+        assert_eq!(result.len(), 2);
+
+        let unions: Vec<Union<User, Post>> = result.into_iter().map(Into::into).collect();
+
+        assert!(unions.iter().any(|u| u.is_first()));
+        assert!(unions.iter().any(|u| u.is_second()));
+    }
+
+    #[tokio::test]
+    async fn test_fetch_owned_union_object() {
+        let (_resource, pool) = setup_test_db().await;
+        let adapter = PostgresAdapter::from_pool(pool);
+        adapter.init_schema().await.unwrap();
+
+        let mut alice = User::default();
+        alice.username = "alice".into();
+        alice.email = "alice@example.com".into();
+        alice.display_name = "Alice".into();
+
+        adapter
+            .insert_object(ObjectRecord::from_object(&alice))
+            .await
+            .unwrap();
+
+        let result = adapter
+            .fetch_owned_union_object(User::TYPE, Post::TYPE, system_owner())
+            .await
+            .unwrap()
+            .unwrap();
+
+        let union: Union<User, Post> = result.into();
+
+        assert!(union.is_first());
+    }
+
+    #[tokio::test]
+    async fn test_fetch_owned_union_objects() {
+        let (_resource, pool) = setup_test_db().await;
+        let adapter = PostgresAdapter::from_pool(pool);
+        adapter.init_schema().await.unwrap();
+
+        let mut alice = User::default();
+        alice.username = "alice".into();
+        alice.email = "alice@example.com".into();
+        alice.display_name = "Alice".into();
+
+        let mut post = Post::default();
+        post.title = "Owned Post".into();
+        post.content = "Content".into();
+
+        adapter
+            .insert_object(ObjectRecord::from_object(&alice))
+            .await
+            .unwrap();
+        adapter
+            .insert_object(ObjectRecord::from_object(&post))
+            .await
+            .unwrap();
+
+        let result = adapter
+            .fetch_owned_union_objects(User::TYPE, Post::TYPE, system_owner())
+            .await
+            .unwrap();
+
+        assert!(!result.is_empty());
+
+        let unions: Vec<Union<User, Post>> = result.into_iter().map(Into::into).collect();
+
+        // At least one User must exist
+        assert!(unions.iter().any(|u| u.is_first()));
     }
 
     #[tokio::test]

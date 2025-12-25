@@ -854,6 +854,121 @@ impl Adapter for SqliteAdapter {
         }
     }
 
+    async fn fetch_union_object(
+        &self,
+        a_type_name: &'static str,
+        b_type_name: &'static str,
+        id: Ulid,
+    ) -> Result<Option<ObjectRecord>, Error> {
+        let pool = self.pool.clone();
+        let row = sqlx::query(
+            r#"
+            SELECT id, type, owner, created_at, updated_at, data, index_meta
+            FROM objects
+            WHERE owner = ? AND (type = ? OR type = ?)
+            "#,
+        )
+        .bind(id.to_string())
+        .bind(a_type_name)
+        .bind(b_type_name)
+        .fetch_optional(&pool)
+        .await
+        .map_err(|err| Error::Storage(err.to_string()))?;
+
+        match row {
+            Some(r) => Self::map_row_to_object_record(r).map(|o| Some(o)),
+            None => Ok(None),
+        }
+    }
+
+    async fn fetch_union_objects(
+        &self,
+        a_type_name: &'static str,
+        b_type_name: &'static str,
+        ids: Vec<Ulid>,
+    ) -> Result<Vec<ObjectRecord>, Error> {
+        let pool = self.pool.clone();
+
+        let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+
+        let sql = format!(
+            r#"
+            SELECT id, type, owner, created_at, updated_at, data, index_meta
+            FROM objects
+            WHERE id IN ({}) AND (type = ? OR type = ?)
+            "#,
+            placeholders
+        );
+        let mut query = sqlx::query(&sql);
+
+        for id in ids {
+            query = query.bind(id.to_string());
+        }
+        let rows = query
+            .bind(a_type_name)
+            .bind(b_type_name)
+            .fetch_all(&pool)
+            .await
+            .map_err(|err| Error::Storage(err.to_string()))?;
+
+        rows.into_iter()
+            .map(Self::map_row_to_object_record)
+            .collect()
+    }
+
+    async fn fetch_owned_union_object(
+        &self,
+        a_type_name: &'static str,
+        b_type_name: &'static str,
+        owner: Ulid,
+    ) -> Result<Option<ObjectRecord>, Error> {
+        let pool = self.pool.clone();
+        let row = sqlx::query(
+            r#"
+            SELECT id, type, owner, created_at, updated_at, data, index_meta
+            FROM objects
+            WHERE owner = ? AND (type = ? OR type = ?)
+            "#,
+        )
+        .bind(owner.to_string())
+        .bind(a_type_name)
+        .bind(b_type_name)
+        .fetch_optional(&pool)
+        .await
+        .map_err(|err| Error::Storage(err.to_string()))?;
+
+        match row {
+            Some(r) => Self::map_row_to_object_record(r).map(|o| Some(o)),
+            None => Ok(None),
+        }
+    }
+
+    async fn fetch_owned_union_objects(
+        &self,
+        a_type_name: &'static str,
+        b_type_name: &'static str,
+        owner: Ulid,
+    ) -> Result<Vec<ObjectRecord>, Error> {
+        let pool = self.pool.clone();
+        let rows = sqlx::query(
+            r#"
+            SELECT id, type, owner, created_at, updated_at, data, index_meta
+            FROM objects
+            WHERE owner = ? AND (type = ? OR type = ?)
+            "#,
+        )
+        .bind(owner.to_string())
+        .bind(a_type_name)
+        .bind(b_type_name)
+        .fetch_all(&pool)
+        .await
+        .map_err(|err| Error::Storage(err.to_string()))?;
+
+        rows.into_iter()
+            .map(Self::map_row_to_object_record)
+            .collect()
+    }
+
     /* ---------------- EDGES ---------------- */
     async fn insert_edge(&self, record: EdgeRecord) -> Result<(), Error> {
         let pool = self.pool.clone();

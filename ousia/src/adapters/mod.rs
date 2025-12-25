@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use ulid::Ulid;
 
 use crate::{
-    Object, ObjectInternal,
+    Object, Union,
     edge::{Edge, query::EdgeQuery},
     error::Error,
     object::SYSTEM_OWNER,
@@ -57,6 +57,24 @@ impl ObjectRecord {
             data: obj.__serialize_internal(),
             created_at: meta.created_at,
             updated_at: meta.updated_at,
+        }
+    }
+}
+
+impl<A: Object, B: Object> Into<Union<A, B>> for ObjectRecord {
+    fn into(self) -> Union<A, B> {
+        match self.type_name.as_str() {
+            _ if self.type_name == A::TYPE => ObjectRecord::to_object::<A>(self)
+                .map(Union::First)
+                .unwrap_or_else(|err| {
+                    panic!("Error: {:?}", err);
+                }),
+            _ if self.type_name == B::TYPE => ObjectRecord::to_object::<B>(self)
+                .map(Union::Second)
+                .unwrap_or_else(|err| {
+                    panic!("Error: {:?}", err);
+                }),
+            _ => panic!("Invalid type name"),
         }
     }
 }
@@ -361,8 +379,7 @@ impl<'a, E: Edge, O: Object> EdgeQueryContext<'a, E, O> {
     pub fn paginate(mut self, cursor: Option<impl Into<Cursor>>) -> Self {
         if let Some(cursor) = cursor {
             let _cursor: Cursor = cursor.into();
-            // TODO: Implement cursor-based pagination
-            // This would typically involve adding a filter like "id > cursor.last_id"
+            self.cursor = Some(_cursor);
         }
         self
     }
@@ -524,6 +541,35 @@ pub trait Adapter: Send + Sync + 'static {
         type_name: &'static str,
         owner: Ulid,
     ) -> Result<Option<ObjectRecord>, Error>;
+
+    // ==================== Union Operations ====================
+    async fn fetch_union_object(
+        &self,
+        a_type_name: &'static str,
+        b_type_name: &'static str,
+        id: Ulid,
+    ) -> Result<Option<ObjectRecord>, Error>;
+
+    async fn fetch_union_objects(
+        &self,
+        a_type_name: &'static str,
+        b_type_name: &'static str,
+        id: Vec<Ulid>,
+    ) -> Result<Vec<ObjectRecord>, Error>;
+
+    async fn fetch_owned_union_object(
+        &self,
+        a_type_name: &'static str,
+        b_type_name: &'static str,
+        owner: Ulid,
+    ) -> Result<Option<ObjectRecord>, Error>;
+
+    async fn fetch_owned_union_objects(
+        &self,
+        a_type_name: &'static str,
+        b_type_name: &'static str,
+        owner: Ulid,
+    ) -> Result<Vec<ObjectRecord>, Error>;
 
     /* ---------------- EDGES ---------------- */
     async fn insert_edge(&self, record: EdgeRecord) -> Result<(), Error>;

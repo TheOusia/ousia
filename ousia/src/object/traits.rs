@@ -100,3 +100,38 @@ impl<T: Object> ObjectOwnership for T {
         self.meta_mut().owner = owner;
     }
 }
+
+pub enum Union<A: Object, B: Object> {
+    First(A),
+    Second(B),
+}
+
+impl<A: Object, B: Object> Union<A, B> {
+    pub fn is_first(&self) -> bool {
+        match self {
+            Self::First(_) => true,
+            Self::Second(_) => false,
+        }
+    }
+
+    pub fn is_second(&self) -> bool {
+        match self {
+            Self::First(_) => false,
+            Self::Second(_) => true,
+        }
+    }
+
+    pub fn as_first(self) -> Option<A> {
+        match self {
+            Self::First(a) => Some(a),
+            Self::Second(_) => None,
+        }
+    }
+
+    pub fn as_second(self) -> Option<B> {
+        match self {
+            Self::First(_) => None,
+            Self::Second(b) => Some(b),
+        }
+    }
+}

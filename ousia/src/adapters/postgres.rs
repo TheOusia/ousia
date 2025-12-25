@@ -877,6 +877,112 @@ impl Adapter for PostgresAdapter {
         }
     }
 
+    async fn fetch_union_object(
+        &self,
+        a_type_name: &'static str,
+        b_type_name: &'static str,
+        id: Ulid,
+    ) -> Result<Option<ObjectRecord>, Error> {
+        let pool = self.pool.clone();
+        let row = sqlx::query(
+            r#"
+            SELECT id, type, owner, created_at, updated_at, data, index_meta
+            FROM objects
+            WHERE id = $1 AND (type = $2 OR type = $3)
+            "#,
+        )
+        .bind(id.to_string())
+        .bind(a_type_name)
+        .bind(b_type_name)
+        .fetch_optional(&pool)
+        .await
+        .map_err(|err| Error::Storage(err.to_string()))?;
+
+        match row {
+            Some(r) => Self::map_row_to_object_record(r).map(|o| Some(o)),
+            None => Ok(None),
+        }
+    }
+
+    async fn fetch_union_objects(
+        &self,
+        a_type_name: &'static str,
+        b_type_name: &'static str,
+        ids: Vec<Ulid>,
+    ) -> Result<Vec<ObjectRecord>, Error> {
+        let pool = self.pool.clone();
+        let rows = sqlx::query(
+            r#"
+            SELECT id, type, owner, created_at, updated_at, data, index_meta
+            FROM objects
+            WHERE id = ANY($1) AND (type = $2 OR type = $3)
+            "#,
+        )
+        .bind(ids.iter().map(|id| id.to_string()).collect::<Vec<String>>())
+        .bind(a_type_name)
+        .bind(b_type_name)
+        .fetch_all(&pool)
+        .await
+        .map_err(|err| Error::Storage(err.to_string()))?;
+
+        rows.into_iter()
+            .map(Self::map_row_to_object_record)
+            .collect()
+    }
+
+    async fn fetch_owned_union_object(
+        &self,
+        a_type_name: &'static str,
+        b_type_name: &'static str,
+        owner: Ulid,
+    ) -> Result<Option<ObjectRecord>, Error> {
+        let pool = self.pool.clone();
+        let row = sqlx::query(
+            r#"
+            SELECT id, type, owner, created_at, updated_at, data, index_meta
+            FROM objects
+            WHERE owner = $1 AND (type = $2 OR type = $3)
+            "#,
+        )
+        .bind(owner.to_string())
+        .bind(a_type_name)
+        .bind(b_type_name)
+        .fetch_optional(&pool)
+        .await
+        .map_err(|err| Error::Storage(err.to_string()))?;
+
+        match row {
+            Some(r) => Self::map_row_to_object_record(r).map(|o| Some(o)),
+            None => Ok(None),
+        }
+    }
+
+    async fn fetch_owned_union_objects(
+        &self,
+        a_type_name: &'static str,
+        b_type_name: &'static str,
+        owner: Ulid,
+    ) -> Result<Vec<ObjectRecord>, Error> {
+        let pool = self.pool.clone();
+        let rows = sqlx::query(
+            r#"
+            SELECT id, type, owner, created_at, updated_at, data, index_meta
+            FROM objects
+            WHERE owner = $1 AND (type = $2 OR type = $3)
+            "#,
+        )
+        .bind(owner.to_string())
+        .bind(a_type_name)
+        .bind(b_type_name)
+        .fetch_all(&pool)
+        .await
+        .map_err(|err| Error::Storage(err.to_string()))?;
+
+        rows.into_iter()
+            .map(Self::map_row_to_object_record)
+            .collect()
+    }
+
     /* ---------------- EDGES ---------------- */
     async fn insert_edge(&self, record: EdgeRecord) -> Result<(), Error> {
         let pool = self.pool.clone();

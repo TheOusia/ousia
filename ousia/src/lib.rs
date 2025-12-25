@@ -169,6 +169,62 @@ impl Engine {
         }
     }
 
+    // ==================== Union Operations ====================
+    /// Fetch an union by ID
+    async fn fetch_union_object<A: Object, B: Object>(
+        &self,
+        id: Ulid,
+    ) -> Result<Option<Union<A, B>>, Error> {
+        let record = self
+            .inner
+            .adapter
+            .fetch_union_object(A::TYPE, B::TYPE, id)
+            .await?;
+        match record {
+            Some(r) => Ok(Some(r.into())),
+            None => Ok(None),
+        }
+    }
+
+    async fn fetch_union_objects<A: Object, B: Object>(
+        &self,
+        id: Vec<Ulid>,
+    ) -> Result<Vec<Union<A, B>>, Error> {
+        let records = self
+            .inner
+            .adapter
+            .fetch_union_objects(A::TYPE, B::TYPE, id)
+            .await?;
+        records.into_iter().map(|r| Ok(r.into())).collect()
+    }
+
+    async fn fetch_owned_union_object<A: Object, B: Object>(
+        &self,
+        owner: Ulid,
+    ) -> Result<Option<Union<A, B>>, Error> {
+        let record = self
+            .inner
+            .adapter
+            .fetch_owned_union_object(A::TYPE, B::TYPE, owner)
+            .await?;
+        match record {
+            Some(r) => Ok(Some(r.into())),
+            None => Ok(None),
+        }
+    }
+
+    async fn fetch_owned_union_objects<A: Object, B: Object>(
+        &self,
+        owner: Ulid,
+    ) -> Result<Vec<Union<A, B>>, Error> {
+        let records = self
+            .inner
+            .adapter
+            .fetch_owned_union_objects(A::TYPE, B::TYPE, owner)
+            .await?;
+        records.into_iter().map(|r| Ok(r.into())).collect()
+    }
+
     // ==================== Edge Operations ====================
 
     /// Create a new edge
