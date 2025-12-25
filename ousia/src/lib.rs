@@ -171,7 +171,7 @@ impl Engine {
 
     // ==================== Union Operations ====================
     /// Fetch an union by ID
-    async fn fetch_union_object<A: Object, B: Object>(
+    pub async fn fetch_union_object<A: Object, B: Object>(
         &self,
         id: Ulid,
     ) -> Result<Option<Union<A, B>>, Error> {
@@ -186,7 +186,7 @@ impl Engine {
         }
     }
 
-    async fn fetch_union_objects<A: Object, B: Object>(
+    pub async fn fetch_union_objects<A: Object, B: Object>(
         &self,
         id: Vec<Ulid>,
     ) -> Result<Vec<Union<A, B>>, Error> {
@@ -198,7 +198,7 @@ impl Engine {
         records.into_iter().map(|r| Ok(r.into())).collect()
     }
 
-    async fn fetch_owned_union_object<A: Object, B: Object>(
+    pub async fn fetch_owned_union_object<A: Object, B: Object>(
         &self,
         owner: Ulid,
     ) -> Result<Option<Union<A, B>>, Error> {
@@ -213,7 +213,7 @@ impl Engine {
         }
     }
 
-    async fn fetch_owned_union_objects<A: Object, B: Object>(
+    pub async fn fetch_owned_union_objects<A: Object, B: Object>(
         &self,
         owner: Ulid,
     ) -> Result<Vec<Union<A, B>>, Error> {
