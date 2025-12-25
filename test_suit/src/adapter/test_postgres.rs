@@ -2,6 +2,7 @@ use ousia::{
     EdgeMeta, Meta, Object, ObjectMeta, ObjectOwnership, OusiaDefault, OusiaEdge, OusiaObject,
     Query,
     adapters::{ObjectRecord, postgres::PostgresAdapter},
+    query::ToIndexValue,
 };
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
@@ -55,11 +56,29 @@ impl ousia::query::ToIndexValue for PostStatus {
 }
 
 /// Example: User object
-#[derive(OusiaObject, OusiaDefault, Debug, Clone)]
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Money {
+    inner: i64,
+}
+
+impl Default for Money {
+    fn default() -> Self {
+        Self { inner: 0 }
+    }
+}
+
+impl ToIndexValue for Money {
+    fn to_index_value(&self) -> ousia::query::IndexValue {
+        ousia::query::IndexValue::Int(self.inner)
+    }
+}
+
+#[derive(OusiaObject, OusiaDefault, Debug)]
 #[ousia(
     type_name = "User",
     index = "email:search",
-    index = "username:search+sort"
+    index = "username:search+sort",
+    index = "balance:search"
 )]
 pub struct User {
     _meta: Meta,
@@ -67,6 +86,7 @@ pub struct User {
     pub username: String,
     pub email: String,
     pub display_name: String,
+    pub balance: Money,
 }
 
 #[derive(Debug, OusiaEdge)]
@@ -319,6 +339,7 @@ mod engine_test {
             username: "johndoe".to_string(),
             email: "john.doe@example.com".to_string(),
             display_name: "John Doe".to_string(),
+            balance: Money::default(),
         };
         assert!(!user.is_system_owned());
     }
@@ -647,6 +668,29 @@ mod engine_test {
             .await
             .unwrap();
         assert_eq!(posts.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_engine_query_custom_field() {
+        let (_resource, pool) = setup_test_db().await;
+        let adapter = PostgresAdapter::from_pool(pool);
+        adapter.init_schema().await.unwrap();
+
+        let engine = Engine::new(Box::new(adapter));
+
+        // Create owner
+        let mut owner = User::default();
+        owner.username = "Owner".to_string();
+        owner.email = "owner@example.com".to_string();
+        owner.balance = Money { inner: 200 };
+        engine.create_object(&owner).await.unwrap();
+
+        let obj = engine
+            .find_object::<User>(&[filter!(&User::FIELDS.balance, 200)])
+            .await
+            .unwrap();
+
+        assert!(obj.is_some())
     }
 
     #[tokio::test]

@@ -280,7 +280,7 @@ impl PostgresAdapter {
                         crate::query::Comparison::NotEqual => "<>",
                     };
                     let condition = format!(
-                        "index_meta->>'{}'::{} {} ${}",
+                        "(index_meta->>'{}')::{} {} ${}",
                         filter.field.name, index_type, comparison, param_idx
                     );
 
@@ -339,7 +339,7 @@ impl PostgresAdapter {
                         crate::query::Comparison::NotEqual => "<>",
                     };
                     let condition = format!(
-                        "index_meta->>'{}'::{} {} ${}",
+                        "(index_meta->>'{}')::{} {} ${}",
                         filter.field.name, index_type, comparison, param_idx
                     );
 
@@ -398,7 +398,7 @@ impl PostgresAdapter {
                         crate::query::Comparison::NotEqual => "<>",
                     };
                     let condition = format!(
-                        "index_meta->>'{}'::{} {} ${}",
+                        "(index_meta->>'{}')::{} {} ${}",
                         filter.field.name, index_type, comparison, param_idx
                     );
 
@@ -456,7 +456,7 @@ impl PostgresAdapter {
                     IndexValue::Timestamp(_) => "timestamptz",
                 };
                 format!(
-                    "index_meta->>'{}'::{} {}",
+                    "(index_meta->>'{}')::{} {}",
                     s.field.name, index_type, direction
                 )
             })
@@ -492,7 +492,7 @@ impl PostgresAdapter {
                     IndexValue::Timestamp(_) => "timestamptz",
                 };
                 format!(
-                    "index_meta->>'{}'::{} {}",
+                    "(index_meta->>'{}')::{} {}",
                     s.field.name, index_type, direction
                 )
             })
