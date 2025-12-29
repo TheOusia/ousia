@@ -1,6 +1,7 @@
 pub mod adapters;
 pub mod edge;
 pub mod error;
+pub mod ledger;
 pub mod object;
 pub mod query;
 

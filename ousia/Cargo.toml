@@ -4,12 +4,13 @@ version = "1.0.0"
 edition = "2024"
 
 [features]
-default = ["derive", "postgres", "sqlite"]
-full = ["derive", "postgres", "sqlite", "profiling"]
+default = ["derive", "postgres", "ledger"]
+full = ["derive", "postgres", "sqlite", "ledger", "profiling"]
 derive = ["dep:ousia_derive"]
 postgres = ["dep:sqlx"]
 sqlite = ["dep:sqlx"]
 profiling = []
+ledger = []
 
 [dependencies]
 chrono = { version = "0.4.42", features = ["serde"] }
