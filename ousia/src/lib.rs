@@ -1,9 +1,12 @@
 pub mod adapters;
 pub mod edge;
 pub mod error;
-pub mod ledger;
 pub mod object;
 pub mod query;
+
+#[cfg(feature = "ledger")]
+pub use ledger;
+use redis::AsyncTypedCommands;
 
 use std::sync::Arc;
 
@@ -21,11 +24,16 @@ use ulid::Ulid;
 #[cfg(feature = "derive")]
 pub use ousia_derive::*;
 
+pub struct ReplicaConfig {
+    pub url: String,
+}
+
 /// The Engine is the primary interface for interacting with domain objects and edges.
 /// It abstracts away storage details and provides a type-safe API.
 #[derive(Clone)]
 pub struct Engine {
     inner: Arc<Ousia>,
+    replica: Option<redis::Client>,
 }
 
 pub struct Ousia {
@@ -36,6 +44,14 @@ impl Engine {
     pub fn new(adapter: Box<dyn Adapter>) -> Self {
         Self {
             inner: Arc::new(Ousia { adapter: adapter }),
+            replica: None,
+        }
+    }
+
+    pub fn new_with_replica(adapter: Box<dyn Adapter>, replica: redis::Client) -> Self {
+        Self {
+            inner: Arc::new(Ousia { adapter: adapter }),
+            replica: Some(replica),
         }
     }
 
@@ -46,11 +62,44 @@ impl Engine {
         self.inner
             .adapter
             .insert_object(ObjectRecord::from_object(obj))
-            .await
+            .await?;
+
+        if let Some(replica) = &self.replica {
+            if let Ok(mut conn) = replica.get_multiplexed_async_connection().await {
+                if let Some(err) = conn
+                    .hset(
+                        T::TYPE,
+                        obj.id().to_string(),
+                        serde_json::to_string(obj).unwrap(),
+                    )
+                    .await
+                    .err()
+                {
+                    eprintln!("Failed to replicate object: {} err: {}", T::TYPE, err);
+                }
+            }
+        }
+
+        Ok(())
     }
 
     /// Fetch an object by ID
     pub async fn fetch_object<T: Object>(&self, id: Ulid) -> Result<Option<T>, Error> {
+        if let Some(replica) = &self.replica {
+            if let Ok(mut conn) = replica.get_multiplexed_async_connection().await {
+                if let Some(val) = conn
+                    .hget(T::TYPE, id.to_string())
+                    .await
+                    .ok()
+                    .unwrap_or_default()
+                {
+                    if let Ok(obj) = serde_json::from_str::<T>(&val) {
+                        return Ok(Some(obj));
+                    }
+                }
+            }
+        }
+
         let val = self.inner.adapter.fetch_object(id).await?;
         match val {
             Some(record) => record.to_object().map(Some),
@@ -60,6 +109,30 @@ impl Engine {
 
     /// Fetch multiple objects by IDs
     pub async fn fetch_objects<T: Object>(&self, ids: Vec<Ulid>) -> Result<Vec<T>, Error> {
+        if let Some(replica) = &self.replica {
+            if let Ok(mut conn) = replica.get_multiplexed_async_connection().await {
+                if let Some(vals) = conn
+                    .hmget(
+                        T::TYPE,
+                        &ids.iter().map(|id| id.to_string()).collect::<Vec<String>>(),
+                    )
+                    .await
+                    .ok()
+                {
+                    let mut objects = Vec::new();
+                    for val in vals {
+                        if let Ok(obj) = serde_json::from_str::<T>(&val) {
+                            objects.push(obj);
+                        }
+                    }
+
+                    if objects.len() == ids.len() {
+                        return Ok(objects);
+                    }
+                }
+            }
+        }
+
         let records = self.inner.adapter.fetch_bulk_objects(ids).await?;
         records.into_iter().map(|r| r.to_object()).collect()
     }
@@ -69,10 +142,33 @@ impl Engine {
         let meta = obj.meta_mut();
         meta.updated_at = Utc::now();
 
-        self.inner
+        let _ = self
+            .inner
             .adapter
             .update_object(ObjectRecord::from_object(obj))
-            .await
+            .await?;
+
+        if let Some(replica) = &self.replica {
+            if let Ok(mut conn) = replica.get_multiplexed_async_connection().await {
+                if let Some(err) = conn
+                    .hset(
+                        T::TYPE,
+                        obj.id().to_string(),
+                        serde_json::to_string(obj).unwrap(),
+                    )
+                    .await
+                    .err()
+                {
+                    eprintln!(
+                        "Failed to update replicate object: {} err: {}",
+                        T::TYPE,
+                        err
+                    );
+                }
+            }
+        }
+
+        Ok(())
     }
 
     /// Delete an object
@@ -82,6 +178,19 @@ impl Engine {
         owner: Ulid,
     ) -> Result<Option<T>, Error> {
         let record = self.inner.adapter.delete_object(id, owner).await?;
+
+        if let Some(replica) = &self.replica {
+            if let Ok(mut conn) = replica.get_multiplexed_async_connection().await {
+                if let Some(err) = conn.hdel(T::TYPE, id.to_string()).await.err() {
+                    eprintln!(
+                        "Failed to delete replicate object: {} err: {}",
+                        T::TYPE,
+                        err
+                    );
+                }
+            }
+        }
+
         match record {
             Some(r) => r.to_object().map(Some),
             None => Ok(None),
@@ -100,6 +209,19 @@ impl Engine {
             .adapter
             .transfer_object(id, from_owner, to_owner)
             .await?;
+
+        if let Some(replica) = &self.replica {
+            if let Ok(mut conn) = replica.get_multiplexed_async_connection().await {
+                if let Some(err) = conn.hdel(T::TYPE, id.to_string()).await.err() {
+                    eprintln!(
+                        "Failed to delete replicate object: {} err: {}",
+                        T::TYPE,
+                        err
+                    );
+                }
+            }
+        }
+
         record.to_object()
     }
 
