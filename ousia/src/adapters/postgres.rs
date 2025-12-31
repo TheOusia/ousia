@@ -1150,6 +1150,8 @@ impl Adapter for PostgresAdapter {
 use ledger::{
     Asset, Balance, LedgerAdapter, MoneyError, Transaction, ValueObject, ValueObjectState,
 };
+#[cfg(feature = "ledger")]
+const MAX_FRAGMENTS: i64 = 1000;
 
 #[cfg(feature = "ledger")]
 impl PostgresAdapter {
@@ -1474,16 +1476,19 @@ impl LedgerAdapter for PostgresAdapter {
         // Get asset to determine unit size
         let asset = self.get_asset_by_id(asset).await?;
 
-        if amount > asset.unit * 1000 {
-            return Err(MoneyError::InvalidFragmentation);
-        }
+        let effective_chunk_size = if amount > asset.unit * MAX_FRAGMENTS {
+            // Calculate minimum chunk size to stay within MAX_FRAGMENTS
+            (amount + MAX_FRAGMENTS - 1) / MAX_FRAGMENTS // Ceiling division
+        } else {
+            asset.unit
+        };
 
         // Fragment the amount
         let mut value_objects = Vec::new();
         let mut remaining = amount;
 
         while remaining > 0 {
-            let chunk = remaining.min(asset.unit);
+            let chunk = remaining.min(effective_chunk_size);
 
             // Determine if this is a reserved mint
             let vo = if metadata.starts_with("reserve:") {
@@ -1671,7 +1676,7 @@ impl LedgerAdapter for PostgresAdapter {
             let current = Self::string_to_state(&state_str)?;
 
             if !current.can_transition_to(new_state) {
-                return Err(MoneyError::InvalidFragmentation);
+                return Err(MoneyError::InvalidAuthority);
             }
         }
 

@@ -6,7 +6,6 @@ pub enum MoneyError {
     InsufficientFunds,
     AssetNotFound(String),
     InvalidAmount,
-    InvalidFragmentation,
     UnconsumedSlice,
     ReservationNotFound,
     InvalidAuthority,
@@ -22,9 +21,6 @@ impl fmt::Display for MoneyError {
             Self::InsufficientFunds => write!(f, "Insufficient funds"),
             Self::AssetNotFound(code) => write!(f, "Asset not found: {}", code),
             Self::InvalidAmount => write!(f, "Invalid amount"),
-            Self::InvalidFragmentation => {
-                write!(f, "Amount exceeds maximum unit per ValueObject")
-            }
             Self::UnconsumedSlice => write!(f, "Not all slices were consumed"),
             Self::ReservationNotFound => write!(f, "Reservation not found"),
             Self::InvalidAuthority => write!(f, "Invalid authority"),
