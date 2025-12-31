@@ -1,11 +1,16 @@
+#[allow(unused_imports)]
 use ousia::{
     EdgeMeta, Meta, Object, ObjectMeta, ObjectOwnership, OusiaDefault, OusiaEdge, OusiaObject,
     Query,
     adapters::{ObjectRecord, postgres::PostgresAdapter, sqlite::SqliteAdapter},
 };
 use serde::{Deserialize, Serialize};
+
+#[allow(unused_imports)]
 use sqlx::{PgPool, SqlitePool};
+#[allow(unused_imports)]
 use testcontainers::ContainerAsync;
+#[allow(unused_imports)]
 use testcontainers_modules::postgres::Postgres;
 
 #[cfg(test)]

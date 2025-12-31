@@ -66,7 +66,7 @@ pub struct ValueObject {
     pub id: Ulid,
 
     /// Which asset this value belongs to (USD, NGN, etc.)
-    pub asset_id: Ulid,
+    pub asset: Ulid,
 
     /// Who owns this value
     pub owner: Ulid,
@@ -91,7 +91,7 @@ impl ValueObject {
     pub fn new_alive(asset_id: Ulid, owner: Ulid, amount: i64) -> Self {
         Self {
             id: Ulid::new(),
-            asset_id,
+            asset: asset_id,
             owner,
             amount,
             state: ValueObjectState::Alive,
@@ -105,7 +105,7 @@ impl ValueObject {
     pub fn new_reserved(asset_id: Ulid, owner: Ulid, amount: i64, reserved_for: Ulid) -> Self {
         Self {
             id: Ulid::new(),
-            asset_id,
+            asset: asset_id,
             owner,
             amount,
             state: ValueObjectState::Reserved,
@@ -167,7 +167,7 @@ mod tests {
         let owner = Ulid::new();
         let vo = ValueObject::new_alive(asset_id, owner, 1000);
 
-        assert_eq!(vo.asset_id, asset_id);
+        assert_eq!(vo.asset, asset_id);
         assert_eq!(vo.owner, owner);
         assert_eq!(vo.amount, 1000);
         assert!(vo.is_alive());
@@ -184,7 +184,7 @@ mod tests {
         let authority = Ulid::new();
         let vo = ValueObject::new_reserved(asset_id, owner, 1000, authority);
 
-        assert_eq!(vo.asset_id, asset_id);
+        assert_eq!(vo.asset, asset_id);
         assert_eq!(vo.owner, owner);
         assert_eq!(vo.amount, 1000);
         assert!(!vo.is_alive());

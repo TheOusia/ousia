@@ -2,10 +2,7 @@
 use std::sync::Arc;
 use ulid::Ulid;
 
-use super::{
-    Asset, Balance, LedgerAdapter, LedgerSystem, MoneyError, Transaction, TransactionHandle,
-    ValueObject, ValueObjectState,
-};
+use super::{Balance, LedgerSystem, MoneyError, Transaction, TransactionHandle, ValueObject};
 
 /// Money is a capability handle for (asset, owner)
 /// It does not hold state or balance
@@ -18,7 +15,7 @@ pub struct Money {
 
 impl Money {
     /// Create a new Money capability handle
-    pub fn new(asset_code: impl Into<String>, owner: Ulid, system: Arc<LedgerSystem>) -> Self {
+    pub fn new(system: Arc<LedgerSystem>, asset_code: impl Into<String>, owner: Ulid) -> Self {
         Self {
             asset_code: asset_code.into(),
             owner,
@@ -75,7 +72,7 @@ impl Money {
         amount: i64,
         metadata: String,
         system: Arc<LedgerSystem>,
-        _idempotency_key: Option<String>,
+        idempotency_key: Option<String>,
     ) -> Result<TransactionHandle, MoneyError> {
         if amount <= 0 {
             return Err(MoneyError::InvalidAmount);
@@ -83,9 +80,6 @@ impl Money {
 
         let adapter = system.adapter();
         let asset = adapter.get_asset(&asset_code).await?;
-
-        // Fragment according to asset.unit
-        let value_objects = Self::fragment_amount(amount, asset.unit, asset.id, owner, None)?;
 
         // Mint ValueObjects
         adapter
@@ -128,10 +122,6 @@ impl Money {
             .burn_value_objects(burn_ids, format!("reserve:{}", metadata))
             .await?;
 
-        // Mint reserved ValueObjects
-        let reserved_objects =
-            Self::fragment_amount(amount, asset.unit, asset.id, for_authority, Some(from))?;
-
         adapter
             .mint_value_objects(
                 asset.id,
@@ -169,32 +159,32 @@ impl Money {
         })
     }
 
-    /// Fragment amount into ValueObjects
-    fn fragment_amount(
-        amount: i64,
-        unit: i64,
-        asset_id: Ulid,
-        owner: Ulid,
-        reserved_for: Option<Ulid>,
-    ) -> Result<Vec<ValueObject>, MoneyError> {
-        let mut fragments = Vec::new();
-        let mut remaining = amount;
+    // /// Fragment amount into ValueObjects
+    // fn fragment_amount(
+    //     amount: i64,
+    //     unit: i64,
+    //     asset_id: Ulid,
+    //     owner: Ulid,
+    //     reserved_for: Option<Ulid>,
+    // ) -> Result<Vec<ValueObject>, MoneyError> {
+    //     let mut fragments = Vec::new();
+    //     let mut remaining = amount;
 
-        while remaining > 0 {
-            let chunk = remaining.min(unit);
+    //     while remaining > 0 {
+    //         let chunk = remaining.min(unit);
 
-            let vo = if let Some(authority) = reserved_for {
-                ValueObject::new_reserved(asset_id, owner, chunk, authority)
-            } else {
-                ValueObject::new_alive(asset_id, owner, chunk)
-            };
+    //         let vo = if let Some(authority) = reserved_for {
+    //             ValueObject::new_reserved(asset_id, owner, chunk, authority)
+    //         } else {
+    //             ValueObject::new_alive(asset_id, owner, chunk)
+    //         };
 
-            fragments.push(vo);
-            remaining -= chunk;
-        }
+    //         fragments.push(vo);
+    //         remaining -= chunk;
+    //     }
 
-        Ok(fragments)
-    }
+    //     Ok(fragments)
+    // }
 }
 
 /// MoneySlice - ephemeral planning construct
@@ -367,13 +357,15 @@ impl Balance {
 
 #[cfg(test)]
 mod tests {
+    use crate::{Asset, LedgerAdapter, ValueObjectState};
+
     use super::*;
 
     #[test]
     fn test_money_slice_amount_validation() {
         // Test that invalid amounts are rejected
         let system = Arc::new(LedgerSystem::new(Box::new(MockAdapter)));
-        let money = Money::new("USD", Ulid::new(), system);
+        let money = Money::new(system, "USD", Ulid::new());
 
         assert!(money.slice(0).is_err());
         assert!(money.slice(-100).is_err());
@@ -442,7 +434,7 @@ mod tests {
         }
 
         async fn get_asset(&self, _code: &str) -> Result<Asset, MoneyError> {
-            Ok(Asset::new("USD".to_string(), 10_000))
+            Ok(Asset::new("USD", 10_000))
         }
 
         async fn create_asset(&self, _asset: Asset) -> Result<(), MoneyError> {

@@ -10,10 +10,10 @@ pub struct Asset {
 }
 
 impl Asset {
-    pub fn new(code: String, unit: i64) -> Self {
+    pub fn new(code: &str, unit: i64) -> Self {
         Self {
             id: Ulid::new(),
-            code,
+            code: code.to_string(),
             unit,
         }
     }

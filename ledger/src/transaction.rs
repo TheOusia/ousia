@@ -6,7 +6,7 @@ use ulid::Ulid;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Transaction {
     pub id: Ulid,
-    pub asset_id: Ulid,
+    pub asset: Ulid,
     pub sender: Option<Ulid>,
     pub receiver: Option<Ulid>,
     pub burned_amount: i64,
@@ -26,7 +26,7 @@ impl Transaction {
     ) -> Self {
         Self {
             id: Ulid::new(),
-            asset_id,
+            asset: asset_id,
             sender,
             receiver,
             burned_amount,
@@ -51,7 +51,7 @@ impl TransactionHandle {
     pub(crate) fn new(transaction: &Transaction) -> Self {
         Self {
             transaction_id: transaction.id,
-            asset_id: transaction.asset_id,
+            asset_id: transaction.asset,
             sender: transaction.sender,
             receiver: transaction.receiver,
             amount: transaction.minted_amount,

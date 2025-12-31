@@ -57,17 +57,17 @@ impl ousia::query::ToIndexValue for PostStatus {
 
 /// Example: User object
 #[derive(Debug, Serialize, Deserialize)]
-pub struct Money {
+pub struct Wallet {
     inner: i64,
 }
 
-impl Default for Money {
+impl Default for Wallet {
     fn default() -> Self {
         Self { inner: 0 }
     }
 }
 
-impl ToIndexValue for Money {
+impl ToIndexValue for Wallet {
     fn to_index_value(&self) -> ousia::query::IndexValue {
         ousia::query::IndexValue::Int(self.inner)
     }
@@ -86,7 +86,7 @@ pub struct User {
     pub username: String,
     pub email: String,
     pub display_name: String,
-    pub balance: Money,
+    pub balance: Wallet,
 }
 
 #[derive(Debug, OusiaEdge)]
@@ -321,7 +321,9 @@ mod postgres_adpater_test {
 mod engine_test {
     use std::time::{Duration, Instant};
 
-    use ousia::{EdgeMetaTrait as _, EdgeQuery, Engine, Error, Union, filter, system_owner};
+    use ousia::{
+        EdgeMetaTrait as _, EdgeQuery, Engine, Error, Union, filter, ledger::Asset, system_owner,
+    };
     use rand::distr::Alphanumeric;
 
     use super::*;
@@ -339,7 +341,7 @@ mod engine_test {
             username: "johndoe".to_string(),
             email: "john.doe@example.com".to_string(),
             display_name: "John Doe".to_string(),
-            balance: Money::default(),
+            balance: Wallet::default(),
         };
         assert!(!user.is_system_owned());
     }
@@ -707,7 +709,7 @@ mod engine_test {
         let mut owner = User::default();
         owner.username = "Owner".to_string();
         owner.email = "owner@example.com".to_string();
-        owner.balance = Money { inner: 200 };
+        owner.balance = Wallet { inner: 200 };
         engine.create_object(&owner).await.unwrap();
 
         let obj = engine
@@ -879,72 +881,629 @@ mod engine_test {
         // At least one User must exist
         assert!(unions.iter().any(|u| u.is_first()));
     }
+}
+
+mod ledger_tests {
+    use super::*;
+    use ousia::adapters::postgres::PostgresAdapter;
+    use ousia::ledger::{
+        Asset, Balance, LedgerAdapter, LedgerSystem, Money, MoneyError, Transaction,
+    };
+    use sqlx::postgres::PgPoolOptions;
+    use std::sync::Arc;
+    use testcontainers::ContainerAsync;
+    use testcontainers_modules::postgres::Postgres;
+    use ulid::Ulid;
 
     #[tokio::test]
-    async fn profile_query_objects_profiled() {
-        let (_resource, pool) = setup_test_db().await;
+    async fn test_full_transaction_flow() {
+        let (_container, pool) = setup_test_db().await;
         let adapter = PostgresAdapter::from_pool(pool);
         adapter.init_schema().await.unwrap();
 
-        // Create users
-        // Randomly generate and insert 100 users
-        use rand::{Rng, rng};
+        // Create asset
+        let asset = Asset::new("USD", 10_000);
+        adapter.create_asset(asset.clone()).await.unwrap();
 
-        for _ in 0..1_000 {
-            let mut user = User::default();
-            let rand_str: String = rng()
-                .sample_iter(&Alphanumeric)
-                .take(10)
-                .map(char::from)
-                .collect();
-            user.display_name = format!("User{}", rand_str);
-            user.username = format!("user_{}", rand_str);
-            user.email = format!("{}@example.com", rand_str);
+        // Create two users
+        let alice = Ulid::new();
+        let bob = Ulid::new();
 
-            adapter
-                .insert_object(ObjectRecord::from_object(&user))
-                .await
-                .unwrap();
-        }
-
-        let mut alice = User::default();
-        alice.display_name = "Alice".to_string();
-        alice.username = "alice".to_string();
-        alice.email = "alice@example.com".to_string();
+        // Mint money to Alice
         adapter
-            .insert_object(ObjectRecord::from_object(&alice))
+            .mint_value_objects(asset.id, alice, 50_000, "initial".to_string())
             .await
             .unwrap();
 
-        let mut bob = User::default();
-        bob.display_name = "Bob".to_string();
-        bob.username = "bob".to_string();
-        bob.email = "bob@example.com".to_string();
+        // Check Alice's balance
+        let balance = adapter.get_balance(asset.id, alice).await.unwrap();
+        assert_eq!(balance.available, 50_000);
+        assert_eq!(balance.reserved, 0);
+
+        // Transfer to Bob
+        let to_burn = adapter
+            .select_for_burn(asset.id, alice, 20_000)
+            .await
+            .unwrap();
+        let burn_ids: Vec<Ulid> = to_burn.iter().map(|vo| vo.id).collect();
         adapter
-            .insert_object(ObjectRecord::from_object(&bob))
+            .burn_value_objects(burn_ids, "transfer".to_string())
             .await
             .unwrap();
 
-        let mut charlie = User::default();
-        charlie.display_name = "Charlie".to_string();
-        charlie.username = "charlie".to_string();
-        charlie.email = "charlie@example.com".to_string();
         adapter
-            .insert_object(ObjectRecord::from_object(&charlie))
+            .mint_value_objects(asset.id, bob, 20_000, "transfer".to_string())
             .await
             .unwrap();
 
-        // Profiling
-        let (result, profile) = adapter
-            .query_objects_profiled::<User>(
-                User::TYPE,
-                Query::default()
-                    .where_eq(&User::FIELDS.username, "bob")
-                    .where_eq(&User::FIELDS.email, "bob@example.com"),
-            )
+        // Check final balances
+        let alice_balance = adapter.get_balance(asset.id, alice).await.unwrap();
+        let bob_balance = adapter.get_balance(asset.id, bob).await.unwrap();
+
+        assert_eq!(alice_balance.available, 30_000);
+        assert_eq!(bob_balance.available, 20_000);
+    }
+
+    #[tokio::test]
+    async fn test_idempotency() {
+        let (_container, pool) = setup_test_db().await;
+        let adapter = PostgresAdapter::from_pool(pool);
+        adapter.init_schema().await.unwrap();
+
+        let asset = Asset::new("EUR", 10_000);
+        adapter.create_asset(asset.clone()).await.unwrap();
+
+        let user = Ulid::new();
+        let key = "unique-key-123";
+
+        // First mint
+        let tx_id1 = adapter
+            .mint_idempotent(key, asset.id, user, 10_000, "deposit".to_string())
             .await
             .unwrap();
 
-        println!("Profiled: {:?} ", profile);
+        // Second mint with same key - should return same transaction
+        let tx_id2 = adapter
+            .mint_idempotent(key, asset.id, user, 10_000, "deposit".to_string())
+            .await
+            .unwrap();
+
+        assert_eq!(tx_id1, tx_id2);
+
+        // Balance should only reflect one mint
+        let balance = adapter.get_balance(asset.id, user).await.unwrap();
+        assert_eq!(balance.available, 10_000);
+    }
+
+    #[tokio::test]
+    async fn test_transaction_reversion() {
+        let (_container, pool) = setup_test_db().await;
+        let adapter = PostgresAdapter::from_pool(pool);
+        adapter.init_schema().await.unwrap();
+
+        let asset = Asset::new("GBP", 10_000);
+        adapter.create_asset(asset.clone()).await.unwrap();
+
+        let alice = Ulid::new();
+        let bob = Ulid::new();
+
+        // Mint to Alice
+        adapter
+            .mint_value_objects(asset.id, alice, 30_000, "initial".to_string())
+            .await
+            .unwrap();
+
+        // Transfer to Bob
+        let to_burn = adapter
+            .select_for_burn(asset.id, alice, 15_000)
+            .await
+            .unwrap();
+        let burn_ids: Vec<Ulid> = to_burn.iter().map(|vo| vo.id).collect();
+        adapter
+            .burn_value_objects(burn_ids, "transfer".to_string())
+            .await
+            .unwrap();
+
+        adapter
+            .mint_value_objects(asset.id, bob, 15_000, "transfer".to_string())
+            .await
+            .unwrap();
+
+        // Record the transaction
+        let tx = Transaction::new(
+            asset.id,
+            Some(alice),
+            Some(bob),
+            15_000,
+            15_000,
+            "transfer".to_string(),
+        );
+        let tx_id = adapter.record_transaction(tx).await.unwrap();
+
+        // Revert it
+        let _revert_tx_id = adapter
+            .revert_transaction(tx_id, "mistake".to_string())
+            .await
+            .unwrap();
+
+        // Check balances are back to original
+        let alice_balance = adapter.get_balance(asset.id, alice).await.unwrap();
+        let bob_balance = adapter.get_balance(asset.id, bob).await.unwrap();
+
+        assert_eq!(alice_balance.available, 30_000);
+        assert_eq!(bob_balance.available, 0);
+    }
+
+    #[tokio::test]
+    async fn test_create_assets() {
+        let (_container, pool) = setup_test_db().await;
+        let adapter = PostgresAdapter::from_pool(pool);
+        adapter.init_schema().await.unwrap();
+
+        let system = Arc::new(LedgerSystem::new(Box::new(adapter)));
+
+        // Create assets
+        let usd = Asset::new("USD", 100_00);
+        let ngn = Asset::new("NGN", 1_000_00);
+
+        system.adapter().create_asset(usd.clone()).await.unwrap();
+        system.adapter().create_asset(ngn.clone()).await.unwrap();
+
+        // Verify assets can be retrieved
+        let retrieved_usd = system.adapter().get_asset("USD").await.unwrap();
+        let retrieved_ngn = system.adapter().get_asset("NGN").await.unwrap();
+
+        assert_eq!(retrieved_usd.code, "USD");
+        assert_eq!(retrieved_usd.unit, 100_00);
+        assert_eq!(retrieved_ngn.code, "NGN");
+        assert_eq!(retrieved_ngn.unit, 1_000_00);
+    }
+
+    #[tokio::test]
+    async fn test_mint_money() {
+        let (_container, pool) = setup_test_db().await;
+        let adapter = PostgresAdapter::from_pool(pool);
+        adapter.init_schema().await.unwrap();
+
+        let system = Arc::new(LedgerSystem::new(Box::new(adapter)));
+
+        // Create asset
+        let usd = Asset::new("USD", 100_00);
+        system.adapter().create_asset(usd.clone()).await.unwrap();
+
+        let alice = Ulid::new();
+
+        // Mint $500 to Alice
+        let mint_tx = Money::mint(
+            "USD",
+            alice,
+            500_00,
+            "Initial deposit".to_string(),
+            system.clone(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(mint_tx.amount, 500_00);
+
+        // Check Alice's balance
+        let alice_balance = Balance::get("USD", alice, system.clone()).await.unwrap();
+        assert_eq!(alice_balance.available, 500_00);
+        assert_eq!(alice_balance.reserved, 0);
+        assert_eq!(alice_balance.total, 500_00);
+    }
+
+    #[tokio::test]
+    async fn test_transfer_money() {
+        let (_container, pool) = setup_test_db().await;
+        let adapter = PostgresAdapter::from_pool(pool);
+        adapter.init_schema().await.unwrap();
+
+        let system = Arc::new(LedgerSystem::new(Box::new(adapter)));
+
+        // Setup
+        let usd = Asset::new("USD", 100_00);
+        system.adapter().create_asset(usd.clone()).await.unwrap();
+
+        let alice = Ulid::new();
+        let bob = Ulid::new();
+
+        // Mint to Alice
+        Money::mint(
+            "USD",
+            alice,
+            500_00,
+            "Initial deposit".to_string(),
+            system.clone(),
+        )
+        .await
+        .unwrap();
+
+        // Transfer from Alice to Bob
+        let alice_money = Money::new(system.clone(), "USD", alice);
+        let slice = alice_money.slice(200_00).unwrap();
+
+        slice
+            .transfer_to(bob, "Payment for services".to_string())
+            .await
+            .unwrap();
+
+        // Check balances
+        let alice_balance = Balance::get("USD", alice, system.clone()).await.unwrap();
+        let bob_balance = Balance::get("USD", bob, system.clone()).await.unwrap();
+
+        assert_eq!(alice_balance.available, 300_00);
+        assert_eq!(bob_balance.available, 200_00);
+    }
+
+    #[tokio::test]
+    async fn test_transfer_insufficient_funds() {
+        let (_container, pool) = setup_test_db().await;
+        let adapter = PostgresAdapter::from_pool(pool);
+        adapter.init_schema().await.unwrap();
+
+        let system = Arc::new(LedgerSystem::new(Box::new(adapter)));
+
+        // Setup
+        let usd = Asset::new("USD", 100_00);
+        system.adapter().create_asset(usd.clone()).await.unwrap();
+
+        let alice = Ulid::new();
+        let bob = Ulid::new();
+
+        // Mint small amount to Alice
+        Money::mint("USD", alice, 50_00, "deposit".to_string(), system.clone())
+            .await
+            .unwrap();
+
+        // Try to transfer more than Alice has
+        let alice_money = Money::new(system.clone(), "USD", alice);
+        let slice = alice_money.slice(100_00).unwrap();
+
+        let result = slice.transfer_to(bob, "payment".to_string()).await;
+
+        assert!(matches!(result, Err(MoneyError::InsufficientFunds)));
+    }
+
+    #[tokio::test]
+    async fn test_reserve_money() {
+        let (_container, pool) = setup_test_db().await;
+        let adapter = PostgresAdapter::from_pool(pool);
+        adapter.init_schema().await.unwrap();
+
+        let system = Arc::new(LedgerSystem::new(Box::new(adapter)));
+
+        // Setup
+        let usd = Asset::new("USD", 100_00);
+        system.adapter().create_asset(usd.clone()).await.unwrap();
+
+        let bob = Ulid::new();
+        let marketplace = Ulid::new();
+
+        // Mint to Bob
+        Money::mint("USD", bob, 200_00, "deposit".to_string(), system.clone())
+            .await
+            .unwrap();
+
+        // Reserve money
+        let reserve_tx = Money::reserve(
+            "USD",
+            bob,
+            marketplace,
+            100_00,
+            "Escrow for order #123".to_string(),
+            system.clone(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(reserve_tx.amount, 100_00);
+
+        // Check balance
+        let bob_balance = Balance::get("USD", bob, system.clone()).await.unwrap();
+        assert_eq!(bob_balance.available, 100_00);
+        assert_eq!(bob_balance.reserved, 100_00);
+        assert_eq!(bob_balance.total, 200_00);
+    }
+
+    #[tokio::test]
+    async fn test_idempotent_minting() {
+        let (_container, pool) = setup_test_db().await;
+        let adapter = PostgresAdapter::from_pool(pool);
+        adapter.init_schema().await.unwrap();
+
+        let system = Arc::new(LedgerSystem::new(Box::new(adapter)));
+
+        // Setup
+        let usd = Asset::new("USD", 100_00);
+        system.adapter().create_asset(usd.clone()).await.unwrap();
+
+        let charlie = Ulid::new();
+        let idempotency_key = "webhook-123-retry-1";
+
+        // First mint
+        let tx1 = Money::mint_idempotent(
+            idempotency_key.to_string(),
+            "USD",
+            charlie,
+            75_00,
+            "Webhook deposit".to_string(),
+            system.clone(),
+        )
+        .await
+        .unwrap();
+
+        // Retry with same key (simulating webhook retry)
+        let tx2 = Money::mint_idempotent(
+            idempotency_key.to_string(),
+            "USD",
+            charlie,
+            75_00,
+            "Webhook deposit".to_string(),
+            system.clone(),
+        )
+        .await
+        .unwrap();
+
+        // Should return the same transaction
+        assert_eq!(tx1.transaction_id, tx2.transaction_id);
+
+        // Balance should only reflect one mint
+        let charlie_balance = Balance::get("USD", charlie, system.clone()).await.unwrap();
+        assert_eq!(charlie_balance.available, 75_00);
+    }
+
+    #[tokio::test]
+    async fn test_burn_money() {
+        let (_container, pool) = setup_test_db().await;
+        let adapter = PostgresAdapter::from_pool(pool);
+        adapter.init_schema().await.unwrap();
+
+        let system = Arc::new(LedgerSystem::new(Box::new(adapter)));
+
+        // Setup
+        let usd = Asset::new("USD", 100_00);
+        system.adapter().create_asset(usd.clone()).await.unwrap();
+
+        let alice = Ulid::new();
+
+        // Mint to Alice
+        Money::mint("USD", alice, 300_00, "deposit".to_string(), system.clone())
+            .await
+            .unwrap();
+
+        // Burn some money
+        let alice_money = Money::new(system.clone(), "USD", alice);
+        let slice = alice_money.slice(50_00).unwrap();
+
+        slice.burn("Fee deduction".to_string()).await.unwrap();
+
+        // Check balance
+        let alice_balance = Balance::get("USD", alice, system.clone()).await.unwrap();
+        assert_eq!(alice_balance.available, 250_00);
+    }
+
+    #[tokio::test]
+    async fn test_multiple_transfers() {
+        let (_container, pool) = setup_test_db().await;
+        let adapter = PostgresAdapter::from_pool(pool);
+        adapter.init_schema().await.unwrap();
+
+        let system = Arc::new(LedgerSystem::new(Box::new(adapter)));
+
+        // Setup
+        let usd = Asset::new("USD", 100_00);
+        system.adapter().create_asset(usd.clone()).await.unwrap();
+
+        let alice = Ulid::new();
+        let bob = Ulid::new();
+        let charlie = Ulid::new();
+
+        // Mint to Alice
+        Money::mint("USD", alice, 1000_00, "deposit".to_string(), system.clone())
+            .await
+            .unwrap();
+
+        // Alice transfers to Bob
+        let alice_money = Money::new(system.clone(), "USD", alice);
+        let slice = alice_money.slice(300_00).unwrap();
+        slice
+            .transfer_to(bob, "payment 1".to_string())
+            .await
+            .unwrap();
+
+        // Bob transfers to Charlie
+        let bob_money = Money::new(system.clone(), "USD", bob);
+        let slice = bob_money.slice(150_00).unwrap();
+        slice
+            .transfer_to(charlie, "payment 2".to_string())
+            .await
+            .unwrap();
+
+        // Alice transfers to Charlie
+        let alice_money = Money::new(system.clone(), "USD", alice);
+        let slice = alice_money.slice(200_00).unwrap();
+        slice
+            .transfer_to(charlie, "payment 3".to_string())
+            .await
+            .unwrap();
+
+        // Check final balances
+        let alice_balance = Balance::get("USD", alice, system.clone()).await.unwrap();
+        let bob_balance = Balance::get("USD", bob, system.clone()).await.unwrap();
+        let charlie_balance = Balance::get("USD", charlie, system.clone()).await.unwrap();
+
+        assert_eq!(alice_balance.available, 500_00); // 1000 - 300 - 200
+        assert_eq!(bob_balance.available, 150_00); // 300 - 150
+        assert_eq!(charlie_balance.available, 350_00); // 150 + 200
+    }
+
+    #[tokio::test]
+    async fn test_invalid_amount() {
+        let (_container, pool) = setup_test_db().await;
+        let adapter = PostgresAdapter::from_pool(pool);
+        adapter.init_schema().await.unwrap();
+
+        let system = Arc::new(LedgerSystem::new(Box::new(adapter)));
+
+        let usd = Asset::new("USD", 100_00);
+        system.adapter().create_asset(usd.clone()).await.unwrap();
+
+        let alice = Ulid::new();
+
+        // Try to mint negative amount
+        let result =
+            Money::mint("USD", alice, -100_00, "invalid".to_string(), system.clone()).await;
+
+        assert!(matches!(result, Err(MoneyError::InvalidAmount)));
+
+        // Try to mint zero
+        let result = Money::mint("USD", alice, 0, "invalid".to_string(), system.clone()).await;
+
+        assert!(matches!(result, Err(MoneyError::InvalidAmount)));
+    }
+
+    #[tokio::test]
+    async fn test_asset_not_found() {
+        let (_container, pool) = setup_test_db().await;
+        let adapter = PostgresAdapter::from_pool(pool);
+        adapter.init_schema().await.unwrap();
+
+        let system = Arc::new(LedgerSystem::new(Box::new(adapter)));
+
+        let alice = Ulid::new();
+
+        // Try to mint with non-existent asset
+        let result =
+            Money::mint("INVALID", alice, 100_00, "test".to_string(), system.clone()).await;
+
+        assert!(matches!(result, Err(MoneyError::AssetNotFound(_))));
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_transfers() {
+        let (_container, pool) = setup_test_db().await;
+        let adapter = PostgresAdapter::from_pool(pool);
+        adapter.init_schema().await.unwrap();
+
+        let system = Arc::new(LedgerSystem::new(Box::new(adapter)));
+
+        // Setup
+        let usd = Asset::new("USD", 100_00);
+        system.adapter().create_asset(usd.clone()).await.unwrap();
+
+        let alice = Ulid::new();
+        let bob = Ulid::new();
+        let charlie = Ulid::new();
+
+        // Mint to Alice
+        Money::mint("USD", alice, 1000_00, "deposit".to_string(), system.clone())
+            .await
+            .unwrap();
+
+        // Spawn concurrent transfers
+        let system1 = system.clone();
+        let system2 = system.clone();
+
+        let handle1 = tokio::spawn(async move {
+            let alice_money = Money::new(system1.clone(), "USD", alice);
+            let slice = alice_money.slice(200_00).unwrap();
+            slice.transfer_to(bob, "concurrent 1".to_string()).await
+        });
+
+        let handle2 = tokio::spawn(async move {
+            let alice_money = Money::new(system2.clone(), "USD", alice);
+            let slice = alice_money.slice(300_00).unwrap();
+            slice.transfer_to(charlie, "concurrent 2".to_string()).await
+        });
+
+        // Both should succeed
+        handle1.await.unwrap().unwrap();
+        handle2.await.unwrap().unwrap();
+
+        // Check final balances
+        let alice_balance = Balance::get("USD", alice, system.clone()).await.unwrap();
+        let bob_balance = Balance::get("USD", bob, system.clone()).await.unwrap();
+        let charlie_balance = Balance::get("USD", charlie, system.clone()).await.unwrap();
+
+        assert_eq!(alice_balance.available, 500_00); // 1000 - 200 - 300
+        assert_eq!(bob_balance.available, 200_00);
+        assert_eq!(charlie_balance.available, 300_00);
+    }
+
+    #[tokio::test]
+    async fn test_fragmentation() {
+        let (_container, pool) = setup_test_db().await;
+        let adapter = PostgresAdapter::from_pool(pool);
+        adapter.init_schema().await.unwrap();
+
+        let system = Arc::new(LedgerSystem::new(Box::new(adapter)));
+
+        // Create asset with small unit size
+        let usd = Asset::new("USD", 100_00);
+        system.adapter().create_asset(usd.clone()).await.unwrap();
+
+        let alice = Ulid::new();
+
+        // Mint amount larger than unit - should fragment
+        Money::mint(
+            "USD",
+            alice,
+            500_00, // 5x the unit size
+            "deposit".to_string(),
+            system.clone(),
+        )
+        .await
+        .unwrap();
+
+        let balance = Balance::get("USD", alice, system.clone()).await.unwrap();
+        assert_eq!(balance.available, 500_00);
+
+        // The adapter should have created 5 ValueObjects of 100_00 each
+        // We can't directly check this without exposing internal methods,
+        // but the balance should be correct
+    }
+
+    #[tokio::test]
+    async fn test_balance_with_mixed_states() {
+        let (_container, pool) = setup_test_db().await;
+        let adapter = PostgresAdapter::from_pool(pool);
+        adapter.init_schema().await.unwrap();
+
+        let system = Arc::new(LedgerSystem::new(Box::new(adapter)));
+
+        let usd = Asset::new("USD", 100_00);
+        system.adapter().create_asset(usd.clone()).await.unwrap();
+
+        let bob = Ulid::new();
+        let marketplace = Ulid::new();
+
+        // Mint to Bob
+        Money::mint("USD", bob, 500_00, "deposit".to_string(), system.clone())
+            .await
+            .unwrap();
+
+        // Reserve some
+        Money::reserve(
+            "USD",
+            bob,
+            marketplace,
+            200_00,
+            "escrow".to_string(),
+            system.clone(),
+        )
+        .await
+        .unwrap();
+
+        // Burn some
+        let bob_money = Money::new(system.clone(), "USD", bob);
+        let slice = bob_money.slice(50_00).unwrap();
+        slice.burn("fee".to_string()).await.unwrap();
+
+        // Check balance
+        let balance = Balance::get("USD", bob, system.clone()).await.unwrap();
+        assert_eq!(balance.available, 250_00); // 500 - 200 (reserved) - 50 (burned)
+        assert_eq!(balance.reserved, 200_00);
+        assert_eq!(balance.total, 450_00); // 250 + 200
     }
 }

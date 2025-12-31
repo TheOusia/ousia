@@ -5,11 +5,10 @@ edition = "2024"
 
 [features]
 default = ["derive", "postgres", "ledger"]
-full = ["derive", "postgres", "sqlite", "ledger", "profiling"]
+full = ["derive", "postgres", "sqlite", "ledger"]
 derive = ["dep:ousia_derive"]
 postgres = ["dep:sqlx"]
 sqlite = ["dep:sqlx"]
-profiling = []
 ledger = ["dep:ledger"]
 
 [dependencies]

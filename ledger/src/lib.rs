@@ -18,7 +18,7 @@ use ulid::Ulid;
 /// Internal ledger adapter trait
 /// This is sealed and not exposed to library users
 #[async_trait]
-pub(crate) trait LedgerAdapter: Send + Sync {
+pub trait LedgerAdapter: Send + Sync {
     /// Mint new ValueObjects
     async fn mint_value_objects(
         &self,
@@ -91,7 +91,7 @@ impl LedgerSystem {
     }
 
     /// Get the internal adapter (for Money operations)
-    pub(crate) fn adapter(&self) -> &dyn LedgerAdapter {
+    pub fn adapter(&self) -> &dyn LedgerAdapter {
         self.adapter.as_ref()
     }
 }
