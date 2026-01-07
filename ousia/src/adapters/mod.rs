@@ -148,6 +148,15 @@ impl Query {
         }
     }
 
+    pub fn wide() -> Self {
+        Self {
+            owner: Ulid::nil(),
+            filters: Vec::new(),
+            limit: None,
+            cursor: None,
+        }
+    }
+
     pub fn filter(
         self,
         field: &'static IndexField,

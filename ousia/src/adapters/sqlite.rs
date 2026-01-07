@@ -718,8 +718,12 @@ impl Adapter for SqliteAdapter {
         type_name: &'static str,
         plan: Query,
     ) -> Result<Vec<ObjectRecord>, Error> {
-        let where_clause = Self::build_object_query_conditions(&plan.filters, plan.cursor);
+        let mut where_clause = Self::build_object_query_conditions(&plan.filters, plan.cursor);
         let order_clause = Self::build_order_clause(&plan.filters);
+
+        if plan.owner.is_nil() {
+            where_clause = where_clause.replace("owner = ", "owner > ");
+        }
 
         let mut sql = format!(
             r#"
