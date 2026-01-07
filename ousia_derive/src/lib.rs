@@ -668,6 +668,72 @@ pub fn derive_ousia_object(input: TokenStream) -> TokenStream {
         }
     } else {
         // Normal case: struct has data fields
+        fn is_option_type(ty: &Type) -> bool {
+            if let Type::Path(type_path) = ty {
+                if let Some(segment) = type_path.path.segments.last() {
+                    return segment.ident == "Option";
+                }
+            }
+            false
+        }
+
+        // Check which fields are Option types
+        let field_is_optional: Vec<bool> = non_meta_fields
+            .iter()
+            .map(|f| is_option_type(&f.ty))
+            .collect();
+
+        // Generate match arms - handle Option<T> fields differently
+        let match_arms = deserialize_field_variants
+            .iter()
+            .zip(deserialize_field_idents.iter())
+            .zip(deserialize_field_names.iter())
+            .zip(field_is_optional.iter())
+            .map(|(((variant, ident), name), is_opt)| {
+                if *is_opt {
+                    // For Option<T>: don't wrap in Some, just assign directly
+                    // map.next_value()? returns Option<T>, store as Some(Option<T>)
+                    quote! {
+                        Field::#variant => {
+                            if #ident.is_some() {
+                                return Err(serde::de::Error::duplicate_field(#name));
+                            }
+                            #ident = Some(map.next_value()?);
+                        }
+                    }
+                } else {
+                    // For T: wrap in Some as before
+                    quote! {
+                        Field::#variant => {
+                            if #ident.is_some() {
+                                return Err(serde::de::Error::duplicate_field(#name));
+                            }
+                            #ident = Some(map.next_value()?);
+                        }
+                    }
+                }
+            });
+
+        // Generate field initialization
+        let field_inits = deserialize_field_idents
+            .iter()
+            .zip(deserialize_field_names.iter())
+            .zip(field_is_optional.iter())
+            .map(|((ident, name), is_opt)| {
+                if *is_opt {
+                    // For Option<T>: unwrap outer Option, inner Option becomes the field value
+                    // Variable is Option<Option<T>>, we want Option<T>
+                    quote! {
+                        #ident: #ident.unwrap_or(None)
+                    }
+                } else {
+                    // For T: error if missing
+                    quote! {
+                        #ident: #ident.ok_or_else(|| serde::de::Error::missing_field(#name))?
+                    }
+                }
+            });
+
         quote! {
             impl<'de> serde::Deserialize<'de> for #ident {
                 fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
@@ -699,23 +765,13 @@ pub fn derive_ousia_object(input: TokenStream) -> TokenStream {
 
                             while let Some(key) = map.next_key()? {
                                 match key {
-                                    #(
-                                        Field::#deserialize_field_variants => {
-                                            if #deserialize_field_idents.is_some() {
-                                                return Err(serde::de::Error::duplicate_field(#deserialize_field_names));
-                                            }
-                                            #deserialize_field_idents = Some(map.next_value()?);
-                                        }
-                                    )*
+                                    #(#match_arms)*
                                 }
                             }
 
                             Ok(#ident {
                                 #meta_field_ident: #ousia::object::meta::Meta::default(),
-                                #(
-                                    #deserialize_field_idents: #deserialize_field_idents
-                                        .ok_or_else(|| serde::de::Error::missing_field(#deserialize_field_names))?,
-                                )*
+                                #(#field_inits,)*
                             })
                         }
                     }
