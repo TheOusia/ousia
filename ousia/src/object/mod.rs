@@ -9,7 +9,7 @@ use once_cell::sync::Lazy;
 /// It must never be assigned to user-generated objects.
 pub static SYSTEM_OWNER: Lazy<ulid::Ulid> = Lazy::new(|| {
     match ulid::Ulid::from_string(
-        &std::env::var("OUSIA_SYSTEM_ID").unwrap_or("00000000000000000000000000".to_string()),
+        &std::env::var("OUSIA_SYSTEM_ID").unwrap_or("00000000000000000000000001".to_string()),
     ) {
         Ok(id) => id,
         Err(err) => panic!("{:?}", err),
