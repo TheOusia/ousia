@@ -1,6 +1,8 @@
 use ulid::Ulid;
 
-use crate::query::{Cursor, IndexField, QueryFilter, QueryMode, ToIndexValue};
+use crate::query::{
+    Comparison, Cursor, IndexField, Operator, QueryFilter, QueryMode, QuerySearch, ToIndexValue,
+};
 
 /// -----------------------------
 /// Edge Query Plan (storage contract)
@@ -37,6 +39,19 @@ impl EdgeQuery {
             field,
             value: value.to_index_value(),
             mode,
+        });
+        consumed_self
+    }
+
+    pub fn where_eq(self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
+        let mut consumed_self = self;
+        consumed_self.filters.push(QueryFilter {
+            field,
+            value: value.to_index_value(),
+            mode: QueryMode::Search(QuerySearch {
+                comparison: Comparison::Equal,
+                operator: Operator::default(),
+            }),
         });
         consumed_self
     }
