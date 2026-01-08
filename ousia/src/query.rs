@@ -118,6 +118,15 @@ impl ToIndexValue for Ulid {
     }
 }
 
+impl<T: ToIndexValue + Default> ToIndexValue for Option<T> {
+    fn to_index_value(&self) -> IndexValue {
+        match self {
+            Some(val) => val.to_index_value(),
+            None => T::default().to_index_value(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IndexKind {
     Search, // equality + adapter-defined text matching
