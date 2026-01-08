@@ -112,6 +112,12 @@ impl ToIndexValue for chrono::DateTime<chrono::Utc> {
     }
 }
 
+impl ToIndexValue for Ulid {
+    fn to_index_value(&self) -> IndexValue {
+        IndexValue::String(self.to_string())
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IndexKind {
     Search, // equality + adapter-defined text matching
