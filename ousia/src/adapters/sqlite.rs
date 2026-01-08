@@ -997,6 +997,31 @@ impl Adapter for SqliteAdapter {
         Ok(())
     }
 
+    async fn update_edge(
+        &self,
+        record: EdgeRecord,
+        old_to: Ulid,
+        to: Option<Ulid>,
+    ) -> Result<(), Error> {
+        let pool = self.pool.clone();
+        let _ = sqlx::query(
+            r#"
+        UPDATE edges SET data = ?, "to" = ?
+        WHERE "from" = ? AND type = ? AND "to" = ?
+        "#,
+        )
+        .bind(record.data)
+        .bind(to.unwrap_or(old_to).to_string())
+        .bind(record.from.to_string())
+        .bind(record.type_name)
+        .bind(old_to.to_string())
+        .execute(&pool)
+        .await
+        .map_err(|err| Error::Storage(err.to_string()))?;
+
+        Ok(())
+    }
+
     async fn delete_edge(
         &self,
         type_name: &'static str,

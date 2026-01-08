@@ -250,6 +250,22 @@ impl Engine {
             .await
     }
 
+    /// Update an edge
+    pub async fn update_edge<E: Edge>(&self, edge: &mut E, to: Option<Ulid>) -> Result<(), Error> {
+        let old_link_id = edge.to();
+        if let Some(to) = to {
+            edge.meta_mut().to = to;
+        }
+
+        let _ = self
+            .inner
+            .adapter
+            .update_edge(EdgeRecord::from_edge(edge), old_link_id, to)
+            .await?;
+
+        Ok(())
+    }
+
     /// Delete an edge
     pub async fn delete_edge<E: Edge>(&self, from: Ulid, to: Ulid) -> Result<(), Error> {
         self.inner.adapter.delete_edge(E::TYPE, from, to).await

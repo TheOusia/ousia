@@ -1015,6 +1015,31 @@ impl Adapter for PostgresAdapter {
         Ok(())
     }
 
+    async fn update_edge(
+        &self,
+        record: EdgeRecord,
+        old_to: Ulid,
+        to: Option<Ulid>,
+    ) -> Result<(), Error> {
+        let pool = self.pool.clone();
+        let _ = sqlx::query(
+            r#"
+        UPDATE edges SET data = $1, "to" = $2
+        WHERE "from" = $3 AND type = $4 AND "to" = $6
+        "#,
+        )
+        .bind(record.data)
+        .bind(to.unwrap_or(old_to).to_string())
+        .bind(record.from.to_string())
+        .bind(record.type_name)
+        .bind(old_to.to_string())
+        .execute(&pool)
+        .await
+        .map_err(|err| Error::Storage(err.to_string()))?;
+
+        Ok(())
+    }
+
     async fn delete_edge(
         &self,
         type_name: &'static str,

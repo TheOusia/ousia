@@ -582,6 +582,12 @@ pub trait Adapter: Send + Sync + 'static {
 
     /* ---------------- EDGES ---------------- */
     async fn insert_edge(&self, record: EdgeRecord) -> Result<(), Error>;
+    async fn update_edge(
+        &self,
+        record: EdgeRecord,
+        old_to: Ulid,
+        to: Option<Ulid>,
+    ) -> Result<(), Error>;
     async fn delete_edge(&self, type_name: &'static str, from: Ulid, to: Ulid)
     -> Result<(), Error>;
 
