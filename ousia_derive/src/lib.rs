@@ -6,7 +6,8 @@ use syn::{
     Attribute, Data, DeriveInput, Expr, ExprLit, Field, Fields, Lit, Meta, Type, parse_macro_input,
 };
 
-const RESERVED_META_FIELDS: &[&str] = &["id", "owner", "type", "created_at", "updated_at"];
+const RESERVED_STRUCT_FIELDS: &[&str] = &["id", "owner", "type", "created_at", "updated_at"];
+const RESERVED_META_FIELDS: &[&str] = &["id", "owner", "type"];
 
 fn import_ousia() -> proc_macro2::TokenStream {
     // This finds the ousia crate in the user's dependencies
@@ -387,7 +388,7 @@ pub fn derive_ousia_object(input: TokenStream) -> TokenStream {
     // Validate no reserved meta field names
     for field in &non_meta_fields {
         let f_str = field.ident.as_ref().unwrap().to_string();
-        if RESERVED_META_FIELDS.contains(&f_str.as_str()) {
+        if RESERVED_STRUCT_FIELDS.contains(&f_str.as_str()) {
             panic!(
                 "Field `{}` is reserved for meta and cannot be declared in struct {}",
                 f_str, ident
