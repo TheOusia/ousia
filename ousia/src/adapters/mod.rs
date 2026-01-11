@@ -15,7 +15,8 @@ use crate::{
     error::Error,
     object::SYSTEM_OWNER,
     query::{
-        Comparison, Cursor, IndexField, Operator, QueryFilter, QueryMode, QuerySearch, ToIndexValue,
+        Comparison, Cursor, IndexField, Operator, QueryFilter, QueryMode, QuerySearch, QuerySort,
+        ToIndexValue,
     },
 };
 
@@ -172,6 +173,7 @@ impl Query {
         consumed_self
     }
 
+    // Equality
     pub fn where_eq(self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
         let mut consumed_self = self;
         consumed_self.filters.push(QueryFilter {
@@ -180,6 +182,230 @@ impl Query {
             mode: QueryMode::Search(QuerySearch {
                 comparison: Comparison::Equal,
                 operator: Operator::default(),
+            }),
+        });
+        consumed_self
+    }
+
+    // Not Equal
+    pub fn where_ne(self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
+        let mut consumed_self = self;
+        consumed_self.filters.push(QueryFilter {
+            field,
+            value: value.to_index_value(),
+            mode: QueryMode::Search(QuerySearch {
+                comparison: Comparison::NotEqual,
+                operator: Operator::default(),
+            }),
+        });
+        consumed_self
+    }
+
+    // Greater Than
+    pub fn where_gt(self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
+        let mut consumed_self = self;
+        consumed_self.filters.push(QueryFilter {
+            field,
+            value: value.to_index_value(),
+            mode: QueryMode::Search(QuerySearch {
+                comparison: Comparison::GreaterThan,
+                operator: Operator::default(),
+            }),
+        });
+        consumed_self
+    }
+
+    // Greater Than or Equal
+    pub fn where_gte(self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
+        let mut consumed_self = self;
+        consumed_self.filters.push(QueryFilter {
+            field,
+            value: value.to_index_value(),
+            mode: QueryMode::Search(QuerySearch {
+                comparison: Comparison::GreaterThanOrEqual,
+                operator: Operator::default(),
+            }),
+        });
+        consumed_self
+    }
+
+    // Less Than
+    pub fn where_lt(self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
+        let mut consumed_self = self;
+        consumed_self.filters.push(QueryFilter {
+            field,
+            value: value.to_index_value(),
+            mode: QueryMode::Search(QuerySearch {
+                comparison: Comparison::LessThan,
+                operator: Operator::default(),
+            }),
+        });
+        consumed_self
+    }
+
+    // Less Than or Equal
+    pub fn where_lte(self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
+        let mut consumed_self = self;
+        consumed_self.filters.push(QueryFilter {
+            field,
+            value: value.to_index_value(),
+            mode: QueryMode::Search(QuerySearch {
+                comparison: Comparison::LessThanOrEqual,
+                operator: Operator::default(),
+            }),
+        });
+        consumed_self
+    }
+
+    // Contains (for strings)
+    pub fn where_contains(self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
+        let mut consumed_self = self;
+        consumed_self.filters.push(QueryFilter {
+            field,
+            value: value.to_index_value(),
+            mode: QueryMode::Search(QuerySearch {
+                comparison: Comparison::Contains,
+                operator: Operator::default(),
+            }),
+        });
+        consumed_self
+    }
+
+    // Begins With (for strings)
+    pub fn where_begins_with(self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
+        let mut consumed_self = self;
+        consumed_self.filters.push(QueryFilter {
+            field,
+            value: value.to_index_value(),
+            mode: QueryMode::Search(QuerySearch {
+                comparison: Comparison::BeginsWith,
+                operator: Operator::default(),
+            }),
+        });
+        consumed_self
+    }
+
+    // Sorting
+    pub fn sort_asc(self, field: &'static IndexField) -> Self {
+        let mut consumed_self = self;
+        consumed_self.filters.push(QueryFilter {
+            field,
+            value: true.to_index_value(), // Dummy value for sort
+            mode: QueryMode::Sort(QuerySort { ascending: true }),
+        });
+        consumed_self
+    }
+
+    pub fn sort_desc(self, field: &'static IndexField) -> Self {
+        let mut consumed_self = self;
+        consumed_self.filters.push(QueryFilter {
+            field,
+            value: true.to_index_value(), // Dummy value for sort
+            mode: QueryMode::Sort(QuerySort { ascending: false }),
+        });
+        consumed_self
+    }
+
+    // OR operator variants
+    pub fn or_eq(self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
+        let mut consumed_self = self;
+        consumed_self.filters.push(QueryFilter {
+            field,
+            value: value.to_index_value(),
+            mode: QueryMode::Search(QuerySearch {
+                comparison: Comparison::Equal,
+                operator: Operator::Or,
+            }),
+        });
+        consumed_self
+    }
+
+    pub fn or_ne(self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
+        let mut consumed_self = self;
+        consumed_self.filters.push(QueryFilter {
+            field,
+            value: value.to_index_value(),
+            mode: QueryMode::Search(QuerySearch {
+                comparison: Comparison::NotEqual,
+                operator: Operator::Or,
+            }),
+        });
+        consumed_self
+    }
+
+    pub fn or_gt(self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
+        let mut consumed_self = self;
+        consumed_self.filters.push(QueryFilter {
+            field,
+            value: value.to_index_value(),
+            mode: QueryMode::Search(QuerySearch {
+                comparison: Comparison::GreaterThan,
+                operator: Operator::Or,
+            }),
+        });
+        consumed_self
+    }
+
+    pub fn or_gte(self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
+        let mut consumed_self = self;
+        consumed_self.filters.push(QueryFilter {
+            field,
+            value: value.to_index_value(),
+            mode: QueryMode::Search(QuerySearch {
+                comparison: Comparison::GreaterThanOrEqual,
+                operator: Operator::Or,
+            }),
+        });
+        consumed_self
+    }
+
+    pub fn or_lt(self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
+        let mut consumed_self = self;
+        consumed_self.filters.push(QueryFilter {
+            field,
+            value: value.to_index_value(),
+            mode: QueryMode::Search(QuerySearch {
+                comparison: Comparison::LessThan,
+                operator: Operator::Or,
+            }),
+        });
+        consumed_self
+    }
+
+    pub fn or_lte(self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
+        let mut consumed_self = self;
+        consumed_self.filters.push(QueryFilter {
+            field,
+            value: value.to_index_value(),
+            mode: QueryMode::Search(QuerySearch {
+                comparison: Comparison::LessThanOrEqual,
+                operator: Operator::Or,
+            }),
+        });
+        consumed_self
+    }
+
+    pub fn or_contains(self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
+        let mut consumed_self = self;
+        consumed_self.filters.push(QueryFilter {
+            field,
+            value: value.to_index_value(),
+            mode: QueryMode::Search(QuerySearch {
+                comparison: Comparison::Contains,
+                operator: Operator::Or,
+            }),
+        });
+        consumed_self
+    }
+
+    pub fn or_begins_with(self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
+        let mut consumed_self = self;
+        consumed_self.filters.push(QueryFilter {
+            field,
+            value: value.to_index_value(),
+            mode: QueryMode::Search(QuerySearch {
+                comparison: Comparison::BeginsWith,
+                operator: Operator::Or,
             }),
         });
         consumed_self
@@ -280,7 +506,7 @@ impl<'a, E: Edge, O: Object> EdgeQueryContext<'a, E, O> {
         self
     }
 
-    /// Filter on the target objects with equality comparison
+    /// Filter target objects where field equals value
     pub fn where_eq(mut self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
         self.filters.push(QueryFilter {
             field,
@@ -293,7 +519,203 @@ impl<'a, E: Edge, O: Object> EdgeQueryContext<'a, E, O> {
         self
     }
 
-    /// Filter on the edge properties
+    /// Filter target objects where field does not equal value
+    pub fn where_ne(mut self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
+        self.filters.push(QueryFilter {
+            field,
+            value: value.to_index_value(),
+            mode: QueryMode::Search(QuerySearch {
+                comparison: Comparison::NotEqual,
+                operator: Operator::default(),
+            }),
+        });
+        self
+    }
+
+    /// Filter target objects where field is greater than value
+    pub fn where_gt(mut self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
+        self.filters.push(QueryFilter {
+            field,
+            value: value.to_index_value(),
+            mode: QueryMode::Search(QuerySearch {
+                comparison: Comparison::GreaterThan,
+                operator: Operator::default(),
+            }),
+        });
+        self
+    }
+
+    /// Filter target objects where field is greater than or equal to value
+    pub fn where_gte(mut self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
+        self.filters.push(QueryFilter {
+            field,
+            value: value.to_index_value(),
+            mode: QueryMode::Search(QuerySearch {
+                comparison: Comparison::GreaterThanOrEqual,
+                operator: Operator::default(),
+            }),
+        });
+        self
+    }
+
+    /// Filter target objects where field is less than value
+    pub fn where_lt(mut self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
+        self.filters.push(QueryFilter {
+            field,
+            value: value.to_index_value(),
+            mode: QueryMode::Search(QuerySearch {
+                comparison: Comparison::LessThan,
+                operator: Operator::default(),
+            }),
+        });
+        self
+    }
+
+    /// Filter target objects where field is less than or equal to value
+    pub fn where_lte(mut self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
+        self.filters.push(QueryFilter {
+            field,
+            value: value.to_index_value(),
+            mode: QueryMode::Search(QuerySearch {
+                comparison: Comparison::LessThanOrEqual,
+                operator: Operator::default(),
+            }),
+        });
+        self
+    }
+
+    /// Filter target objects where field contains value (string search)
+    pub fn where_contains(mut self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
+        self.filters.push(QueryFilter {
+            field,
+            value: value.to_index_value(),
+            mode: QueryMode::Search(QuerySearch {
+                comparison: Comparison::Contains,
+                operator: Operator::default(),
+            }),
+        });
+        self
+    }
+
+    /// Filter target objects where field begins with value (prefix search)
+    pub fn where_begins_with(
+        mut self,
+        field: &'static IndexField,
+        value: impl ToIndexValue,
+    ) -> Self {
+        self.filters.push(QueryFilter {
+            field,
+            value: value.to_index_value(),
+            mode: QueryMode::Search(QuerySearch {
+                comparison: Comparison::BeginsWith,
+                operator: Operator::default(),
+            }),
+        });
+        self
+    }
+
+    // OR variants for target objects
+    pub fn or_eq(mut self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
+        self.filters.push(QueryFilter {
+            field,
+            value: value.to_index_value(),
+            mode: QueryMode::Search(QuerySearch {
+                comparison: Comparison::Equal,
+                operator: Operator::Or,
+            }),
+        });
+        self
+    }
+
+    pub fn or_ne(mut self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
+        self.filters.push(QueryFilter {
+            field,
+            value: value.to_index_value(),
+            mode: QueryMode::Search(QuerySearch {
+                comparison: Comparison::NotEqual,
+                operator: Operator::Or,
+            }),
+        });
+        self
+    }
+
+    pub fn or_gt(mut self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
+        self.filters.push(QueryFilter {
+            field,
+            value: value.to_index_value(),
+            mode: QueryMode::Search(QuerySearch {
+                comparison: Comparison::GreaterThan,
+                operator: Operator::Or,
+            }),
+        });
+        self
+    }
+
+    pub fn or_gte(mut self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
+        self.filters.push(QueryFilter {
+            field,
+            value: value.to_index_value(),
+            mode: QueryMode::Search(QuerySearch {
+                comparison: Comparison::GreaterThanOrEqual,
+                operator: Operator::Or,
+            }),
+        });
+        self
+    }
+
+    pub fn or_lt(mut self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
+        self.filters.push(QueryFilter {
+            field,
+            value: value.to_index_value(),
+            mode: QueryMode::Search(QuerySearch {
+                comparison: Comparison::LessThan,
+                operator: Operator::Or,
+            }),
+        });
+        self
+    }
+
+    pub fn or_lte(mut self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
+        self.filters.push(QueryFilter {
+            field,
+            value: value.to_index_value(),
+            mode: QueryMode::Search(QuerySearch {
+                comparison: Comparison::LessThanOrEqual,
+                operator: Operator::Or,
+            }),
+        });
+        self
+    }
+
+    pub fn or_contains(mut self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
+        self.filters.push(QueryFilter {
+            field,
+            value: value.to_index_value(),
+            mode: QueryMode::Search(QuerySearch {
+                comparison: Comparison::Contains,
+                operator: Operator::Or,
+            }),
+        });
+        self
+    }
+
+    pub fn or_begins_with(mut self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
+        self.filters.push(QueryFilter {
+            field,
+            value: value.to_index_value(),
+            mode: QueryMode::Search(QuerySearch {
+                comparison: Comparison::BeginsWith,
+                operator: Operator::Or,
+            }),
+        });
+        self
+    }
+
+    // ============================================================
+    // EDGE FILTERS (filters on the edge/pivot properties)
+    // ============================================================
+
+    /// Generic filter on edge properties
     pub fn edge_filter(
         mut self,
         field: &'static IndexField,
@@ -304,6 +726,263 @@ impl<'a, E: Edge, O: Object> EdgeQueryContext<'a, E, O> {
             field,
             value: value.to_index_value(),
             mode,
+        });
+        self
+    }
+
+    /// Filter edges where field equals value
+    pub fn edge_eq(mut self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
+        self.edge_filters.push(QueryFilter {
+            field,
+            value: value.to_index_value(),
+            mode: QueryMode::Search(QuerySearch {
+                comparison: Comparison::Equal,
+                operator: Operator::default(),
+            }),
+        });
+        self
+    }
+
+    /// Filter edges where field does not equal value
+    pub fn edge_ne(mut self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
+        self.edge_filters.push(QueryFilter {
+            field,
+            value: value.to_index_value(),
+            mode: QueryMode::Search(QuerySearch {
+                comparison: Comparison::NotEqual,
+                operator: Operator::default(),
+            }),
+        });
+        self
+    }
+
+    /// Filter edges where field is greater than value
+    pub fn edge_gt(mut self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
+        self.edge_filters.push(QueryFilter {
+            field,
+            value: value.to_index_value(),
+            mode: QueryMode::Search(QuerySearch {
+                comparison: Comparison::GreaterThan,
+                operator: Operator::default(),
+            }),
+        });
+        self
+    }
+
+    /// Filter edges where field is greater than or equal to value
+    pub fn edge_gte(mut self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
+        self.edge_filters.push(QueryFilter {
+            field,
+            value: value.to_index_value(),
+            mode: QueryMode::Search(QuerySearch {
+                comparison: Comparison::GreaterThanOrEqual,
+                operator: Operator::default(),
+            }),
+        });
+        self
+    }
+
+    /// Filter edges where field is less than value
+    pub fn edge_lt(mut self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
+        self.edge_filters.push(QueryFilter {
+            field,
+            value: value.to_index_value(),
+            mode: QueryMode::Search(QuerySearch {
+                comparison: Comparison::LessThan,
+                operator: Operator::default(),
+            }),
+        });
+        self
+    }
+
+    /// Filter edges where field is less than or equal to value
+    pub fn edge_lte(mut self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
+        self.edge_filters.push(QueryFilter {
+            field,
+            value: value.to_index_value(),
+            mode: QueryMode::Search(QuerySearch {
+                comparison: Comparison::LessThanOrEqual,
+                operator: Operator::default(),
+            }),
+        });
+        self
+    }
+
+    /// Filter edges where field contains value (string search)
+    pub fn edge_contains(mut self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
+        self.edge_filters.push(QueryFilter {
+            field,
+            value: value.to_index_value(),
+            mode: QueryMode::Search(QuerySearch {
+                comparison: Comparison::Contains,
+                operator: Operator::default(),
+            }),
+        });
+        self
+    }
+
+    /// Filter edges where field begins with value (prefix search)
+    pub fn edge_begins_with(
+        mut self,
+        field: &'static IndexField,
+        value: impl ToIndexValue,
+    ) -> Self {
+        self.edge_filters.push(QueryFilter {
+            field,
+            value: value.to_index_value(),
+            mode: QueryMode::Search(QuerySearch {
+                comparison: Comparison::BeginsWith,
+                operator: Operator::default(),
+            }),
+        });
+        self
+    }
+
+    // OR variants for edges
+    pub fn edge_or_eq(mut self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
+        self.edge_filters.push(QueryFilter {
+            field,
+            value: value.to_index_value(),
+            mode: QueryMode::Search(QuerySearch {
+                comparison: Comparison::Equal,
+                operator: Operator::Or,
+            }),
+        });
+        self
+    }
+
+    pub fn edge_or_ne(mut self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
+        self.edge_filters.push(QueryFilter {
+            field,
+            value: value.to_index_value(),
+            mode: QueryMode::Search(QuerySearch {
+                comparison: Comparison::NotEqual,
+                operator: Operator::Or,
+            }),
+        });
+        self
+    }
+
+    pub fn edge_or_gt(mut self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
+        self.edge_filters.push(QueryFilter {
+            field,
+            value: value.to_index_value(),
+            mode: QueryMode::Search(QuerySearch {
+                comparison: Comparison::GreaterThan,
+                operator: Operator::Or,
+            }),
+        });
+        self
+    }
+
+    pub fn edge_or_gte(mut self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
+        self.edge_filters.push(QueryFilter {
+            field,
+            value: value.to_index_value(),
+            mode: QueryMode::Search(QuerySearch {
+                comparison: Comparison::GreaterThanOrEqual,
+                operator: Operator::Or,
+            }),
+        });
+        self
+    }
+
+    pub fn edge_or_lt(mut self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
+        self.edge_filters.push(QueryFilter {
+            field,
+            value: value.to_index_value(),
+            mode: QueryMode::Search(QuerySearch {
+                comparison: Comparison::LessThan,
+                operator: Operator::Or,
+            }),
+        });
+        self
+    }
+
+    pub fn edge_or_lte(mut self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
+        self.edge_filters.push(QueryFilter {
+            field,
+            value: value.to_index_value(),
+            mode: QueryMode::Search(QuerySearch {
+                comparison: Comparison::LessThanOrEqual,
+                operator: Operator::Or,
+            }),
+        });
+        self
+    }
+
+    pub fn edge_or_contains(
+        mut self,
+        field: &'static IndexField,
+        value: impl ToIndexValue,
+    ) -> Self {
+        self.edge_filters.push(QueryFilter {
+            field,
+            value: value.to_index_value(),
+            mode: QueryMode::Search(QuerySearch {
+                comparison: Comparison::Contains,
+                operator: Operator::Or,
+            }),
+        });
+        self
+    }
+
+    pub fn edge_or_begins_with(
+        mut self,
+        field: &'static IndexField,
+        value: impl ToIndexValue,
+    ) -> Self {
+        self.edge_filters.push(QueryFilter {
+            field,
+            value: value.to_index_value(),
+            mode: QueryMode::Search(QuerySearch {
+                comparison: Comparison::BeginsWith,
+                operator: Operator::Or,
+            }),
+        });
+        self
+    }
+
+    // ============================================================
+    // SORTING
+    // ============================================================
+
+    /// Sort target objects by field in ascending order
+    pub fn sort_asc(mut self, field: &'static IndexField) -> Self {
+        self.filters.push(QueryFilter {
+            field,
+            value: true.to_index_value(),
+            mode: QueryMode::Sort(QuerySort { ascending: true }),
+        });
+        self
+    }
+
+    /// Sort target objects by field in descending order
+    pub fn sort_desc(mut self, field: &'static IndexField) -> Self {
+        self.filters.push(QueryFilter {
+            field,
+            value: true.to_index_value(),
+            mode: QueryMode::Sort(QuerySort { ascending: false }),
+        });
+        self
+    }
+
+    /// Sort edges by field in ascending order
+    pub fn edge_sort_asc(mut self, field: &'static IndexField) -> Self {
+        self.edge_filters.push(QueryFilter {
+            field,
+            value: true.to_index_value(),
+            mode: QueryMode::Sort(QuerySort { ascending: true }),
+        });
+        self
+    }
+
+    /// Sort edges by field in descending order
+    pub fn edge_sort_desc(mut self, field: &'static IndexField) -> Self {
+        self.edge_filters.push(QueryFilter {
+            field,
+            value: true.to_index_value(),
+            mode: QueryMode::Sort(QuerySort { ascending: false }),
         });
         self
     }
