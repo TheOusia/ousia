@@ -828,8 +828,8 @@ pub fn derive_ousia_object(input: TokenStream) -> TokenStream {
         }
 
         pub struct #indexes_struct_name {
-            created_at: #ousia::query::IndexField,
-            updated_at: #ousia::query::IndexField,
+            pub created_at: #ousia::query::IndexField,
+            pub updated_at: #ousia::query::IndexField,
             #(#indexes_struct_fields),*
         }
 
@@ -1252,8 +1252,8 @@ pub fn derive_ousia_edge(input: TokenStream) -> TokenStream {
         }
 
         pub struct #indexes_struct_name {
-            from: #ousia::query::IndexField,
-            to: #ousia::query::IndexField,
+            pub from: #ousia::query::IndexField,
+            pub to: #ousia::query::IndexField,
             #(#indexes_struct_fields),*
         }
 
