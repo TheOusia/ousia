@@ -837,11 +837,11 @@ pub fn derive_ousia_object(input: TokenStream) -> TokenStream {
             pub const FIELDS: #indexes_struct_name = #indexes_struct_name {
                 created_at: #ousia::query::IndexField {
                     name: "created_at",
-                    kinds: &[#ousia::query::IndexKind::Sort],
+                    kinds: &[#ousia::query::IndexKind::Search, #ousia::query::IndexKind::Sort],
                 },
                 updated_at: #ousia::query::IndexField {
                     name: "updated_at",
-                    kinds: &[#ousia::query::IndexKind::Sort],
+                    kinds: &[#ousia::query::IndexKind::Search, #ousia::query::IndexKind::Sort],
                 },
                 #(#indexes_const_fields),*
             };
