@@ -828,11 +828,21 @@ pub fn derive_ousia_object(input: TokenStream) -> TokenStream {
         }
 
         pub struct #indexes_struct_name {
+            created_at: #ousia::query::IndexField,
+            updated_at: #ousia::query::IndexField,
             #(#indexes_struct_fields),*
         }
 
         impl #ident {
             pub const FIELDS: #indexes_struct_name = #indexes_struct_name {
+                created_at: #ousia::query::IndexField {
+                    name: "created_at",
+                    kinds: &[#ousia::query::IndexKind::Sort],
+                },
+                updated_at: #ousia::query::IndexField {
+                    name: "updated_at",
+                    kinds: &[#ousia::query::IndexKind::Sort],
+                },
                 #(#indexes_const_fields),*
             };
         }
@@ -1242,11 +1252,21 @@ pub fn derive_ousia_edge(input: TokenStream) -> TokenStream {
         }
 
         pub struct #indexes_struct_name {
+            from: #ousia::query::IndexField,
+            to: #ousia::query::IndexField,
             #(#indexes_struct_fields),*
         }
 
         impl #ident {
             pub const FIELDS: #indexes_struct_name = #indexes_struct_name {
+                from: #ousia::query::IndexField {
+                    name: "from",
+                    kinds: &[#ousia::query::IndexKind::Search],
+                },
+                to: #ousia::query::IndexField {
+                    name: "to",
+                    kinds: &[#ousia::query::IndexKind::Search],
+                },
                 #(#indexes_const_fields),*
             };
         }
