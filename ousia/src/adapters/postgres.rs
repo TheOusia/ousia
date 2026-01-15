@@ -735,12 +735,14 @@ impl Adapter for PostgresAdapter {
         query = Self::query_bind_filters(query, &f);
 
         let pool = self.pool.clone();
-        let row = query
-            .fetch_one(&pool)
-            .await
-            .map_err(|err| Error::Storage(err.to_string()))?;
+        let row = query.fetch_optional(&pool).await.map_err(|err| match err {
+            sqlx::Error::RowNotFound => Error::NotFound,
+            _ => Error::Storage(err.to_string()),
+        })?;
 
-        Ok(Self::map_row_to_object_record(row).ok())
+        Ok(row
+            .map(|row| Self::map_row_to_object_record(row).ok())
+            .unwrap_or_default())
     }
 
     async fn query_objects(
@@ -1737,12 +1739,18 @@ impl LedgerAdapter for PostgresAdapter {
         )
         .bind(asset.to_string())
         .bind(owner.to_string())
-        .fetch_one(&self.pool)
+        .fetch_optional(&self.pool)
         .await
         .map_err(|e| MoneyError::Storage(e.to_string()))?;
 
-        let available: i64 = row.try_get("available").unwrap_or(0);
-        let reserved: i64 = row.try_get("reserved").unwrap_or(0);
+        let (available, reserved): (i64, i64) = row
+            .map(|row| {
+                (
+                    row.try_get("available").unwrap_or(0),
+                    row.try_get("reserved").unwrap_or(0),
+                )
+            })
+            .unwrap_or_default();
 
         Ok(Balance::from_value_objects(
             owner, asset, available, reserved,
