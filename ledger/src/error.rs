@@ -10,7 +10,7 @@ pub enum MoneyError {
     ReservationNotFound,
     InvalidAuthority,
     TransactionNotFound,
-    DuplicateIdempotencyKey(ulid::Ulid),
+    DuplicateIdempotencyKey(uuid::Uuid),
     Storage(String),
     Conflict(String),
 }

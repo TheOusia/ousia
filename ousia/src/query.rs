@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
-use ulid::Ulid;
+use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct IndexMeta(pub BTreeMap<String, IndexValue>);
@@ -14,14 +14,46 @@ impl IndexMeta {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(untagged)]
+pub enum IndexValueInner {
+    String(String),
+    Int(i64),
+    Float(f64),
+}
+
+impl IndexValueInner {
+    pub fn as_string(&self) -> Option<&str> {
+        match self {
+            IndexValueInner::String(s) => Some(s),
+            _ => None,
+        }
+    }
+
+    pub fn as_int(&self) -> Option<i64> {
+        match self {
+            IndexValueInner::Int(i) => Some(*i),
+            _ => None,
+        }
+    }
+
+    pub fn as_float(&self) -> Option<f64> {
+        match self {
+            IndexValueInner::Float(f) => Some(*f),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(untagged)]
 pub enum IndexValue {
     String(String),
     Int(i64),
     Float(f64),
     Bool(bool),
+    Uuid(Uuid),
     Timestamp(chrono::DateTime<chrono::Utc>),
+    Array(Vec<IndexValueInner>),
 }
-
 impl IndexValue {
     pub fn as_string(&self) -> Option<&str> {
         match self {
@@ -54,6 +86,13 @@ impl IndexValue {
     pub fn as_timestamp(&self) -> Option<chrono::DateTime<chrono::Utc>> {
         match self {
             IndexValue::Timestamp(t) => Some(*t),
+            _ => None,
+        }
+    }
+
+    pub fn as_array(&self) -> Option<Vec<IndexValueInner>> {
+        match self {
+            IndexValue::Array(a) => Some(a.clone()),
             _ => None,
         }
     }
@@ -112,9 +151,57 @@ impl ToIndexValue for chrono::DateTime<chrono::Utc> {
     }
 }
 
-impl ToIndexValue for Ulid {
+impl ToIndexValue for IndexValueInner {
     fn to_index_value(&self) -> IndexValue {
-        IndexValue::String(self.to_string())
+        match self {
+            IndexValueInner::String(s) => IndexValue::String(s.clone()),
+            IndexValueInner::Int(i) => IndexValue::Int(*i),
+            IndexValueInner::Float(f) => IndexValue::Float(*f),
+        }
+    }
+}
+
+impl ToIndexValue for Vec<IndexValueInner> {
+    fn to_index_value(&self) -> IndexValue {
+        IndexValue::Array(self.clone())
+    }
+}
+
+impl ToIndexValue for Vec<String> {
+    fn to_index_value(&self) -> IndexValue {
+        IndexValue::Array(
+            self.iter()
+                .map(|s| IndexValueInner::String(s.clone()))
+                .collect(),
+        )
+    }
+}
+
+impl ToIndexValue for Vec<&str> {
+    fn to_index_value(&self) -> IndexValue {
+        IndexValue::Array(
+            self.iter()
+                .map(|s| IndexValueInner::String(s.to_string()))
+                .collect(),
+        )
+    }
+}
+
+impl ToIndexValue for Vec<i64> {
+    fn to_index_value(&self) -> IndexValue {
+        IndexValue::Array(self.iter().map(|i| IndexValueInner::Int(*i)).collect())
+    }
+}
+
+impl ToIndexValue for Vec<f64> {
+    fn to_index_value(&self) -> IndexValue {
+        IndexValue::Array(self.iter().map(|f| IndexValueInner::Float(*f)).collect())
+    }
+}
+
+impl ToIndexValue for Uuid {
+    fn to_index_value(&self) -> IndexValue {
+        IndexValue::Uuid(self.clone())
     }
 }
 
@@ -229,10 +316,10 @@ pub enum Operator {
 /// Pagination cursor
 #[derive(Debug, Clone, Copy)]
 pub struct Cursor {
-    pub last_id: Ulid,
+    pub last_id: Uuid,
 }
 
-impl Into<Cursor> for Ulid {
+impl Into<Cursor> for Uuid {
     fn into(self) -> Cursor {
         Cursor { last_id: self }
     }

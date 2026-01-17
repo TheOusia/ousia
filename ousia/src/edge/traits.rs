@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use ulid::Ulid;
+use uuid::Uuid;
 
 use crate::{edge::meta::EdgeMeta, query::IndexMeta};
 
@@ -24,19 +24,19 @@ pub trait Edge: Serialize + for<'de> Deserialize<'de> + Sized + Send + Sync + 's
 }
 
 pub trait EdgeMetaTrait {
-    fn from(&self) -> Ulid;
-    fn to(&self) -> Ulid;
+    fn from(&self) -> Uuid;
+    fn to(&self) -> Uuid;
 }
 
 impl<E> EdgeMetaTrait for E
 where
     E: Edge,
 {
-    fn from(&self) -> ulid::Ulid {
+    fn from(&self) -> uuid::Uuid {
         self.meta().from()
     }
 
-    fn to(&self) -> ulid::Ulid {
+    fn to(&self) -> uuid::Uuid {
         self.meta().to()
     }
 }

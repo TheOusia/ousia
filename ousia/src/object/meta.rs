@@ -4,8 +4,8 @@ use crate::object::SYSTEM_OWNER;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Meta {
-    pub id: ulid::Ulid,
-    pub owner: ulid::Ulid,
+    pub id: uuid::Uuid,
+    pub owner: uuid::Uuid,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
@@ -13,8 +13,8 @@ pub struct Meta {
 impl Default for Meta {
     fn default() -> Self {
         Self {
-            id: ulid::Ulid::new(),
-            owner: *SYSTEM_OWNER,
+            id: uuid::Uuid::now_v7(),
+            owner: SYSTEM_OWNER,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         }
@@ -22,9 +22,9 @@ impl Default for Meta {
 }
 
 impl Meta {
-    pub fn new_with_owner(owner: ulid::Ulid) -> Self {
+    pub fn new_with_owner(owner: uuid::Uuid) -> Self {
         Self {
-            id: ulid::Ulid::new(),
+            id: uuid::Uuid::now_v7(),
             owner,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
@@ -33,11 +33,11 @@ impl Meta {
 }
 
 impl Meta {
-    pub fn id(&self) -> ulid::Ulid {
+    pub fn id(&self) -> uuid::Uuid {
         self.id
     }
 
-    pub fn owner(&self) -> ulid::Ulid {
+    pub fn owner(&self) -> uuid::Uuid {
         self.owner
     }
 

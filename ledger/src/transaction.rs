@@ -1,14 +1,14 @@
 // ousia/src/ledger/transaction.rs
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use ulid::Ulid;
+use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Transaction {
-    pub id: Ulid,
-    pub asset: Ulid,
-    pub sender: Option<Ulid>,
-    pub receiver: Option<Ulid>,
+    pub id: Uuid,
+    pub asset: Uuid,
+    pub sender: Option<Uuid>,
+    pub receiver: Option<Uuid>,
     pub burned_amount: i64,
     pub minted_amount: i64,
     pub metadata: String,
@@ -17,15 +17,15 @@ pub struct Transaction {
 
 impl Transaction {
     pub fn new(
-        asset_id: Ulid,
-        sender: Option<Ulid>,
-        receiver: Option<Ulid>,
+        asset_id: Uuid,
+        sender: Option<Uuid>,
+        receiver: Option<Uuid>,
         burned_amount: i64,
         minted_amount: i64,
         metadata: String,
     ) -> Self {
         Self {
-            id: Ulid::new(),
+            id: uuid::Uuid::now_v7(),
             asset: asset_id,
             sender,
             receiver,
@@ -40,10 +40,10 @@ impl Transaction {
 /// Handle returned from Money operations for potential reversion
 #[derive(Debug, Clone)]
 pub struct TransactionHandle {
-    pub transaction_id: Ulid,
-    pub asset_id: Ulid,
-    pub sender: Option<Ulid>,
-    pub receiver: Option<Ulid>,
+    pub transaction_id: Uuid,
+    pub asset_id: Uuid,
+    pub sender: Option<Uuid>,
+    pub receiver: Option<Uuid>,
     pub amount: i64,
 }
 
@@ -60,7 +60,7 @@ impl TransactionHandle {
 
     /// Revert the transaction by creating a compensating transaction
     /// Burns from receiver, mints back to sender
-    pub async fn revert(self, _reason: String) -> Result<Ulid, crate::MoneyError> {
+    pub async fn revert(self, _reason: String) -> Result<Uuid, crate::MoneyError> {
         // This will be implemented in the Money module
         // which has access to the LedgerSystem
         todo!("Revert implementation requires Money context")

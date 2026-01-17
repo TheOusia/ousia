@@ -1,21 +1,20 @@
 // ousia/src/ledger/money.rs
-use std::sync::Arc;
-use ulid::Ulid;
-
 use super::{Balance, LedgerSystem, MoneyError, Transaction, TransactionHandle, ValueObject};
+use std::sync::Arc;
+use uuid::Uuid;
 
 /// Money is a capability handle for (asset, owner)
 /// It does not hold state or balance
 #[derive(Clone)]
 pub struct Money {
     asset_code: String,
-    owner: Ulid,
+    owner: Uuid,
     system: Arc<LedgerSystem>,
 }
 
 impl Money {
     /// Create a new Money capability handle
-    pub fn new(system: Arc<LedgerSystem>, asset_code: impl Into<String>, owner: Ulid) -> Self {
+    pub fn new(system: Arc<LedgerSystem>, asset_code: impl Into<String>, owner: Uuid) -> Self {
         Self {
             asset_code: asset_code.into(),
             owner,
@@ -38,7 +37,7 @@ impl Money {
     /// Mint new money (deposit authority)
     pub async fn mint(
         asset_code: impl Into<String>,
-        owner: Ulid,
+        owner: Uuid,
         amount: i64,
         metadata: String,
         system: Arc<LedgerSystem>,
@@ -50,7 +49,7 @@ impl Money {
     pub async fn mint_idempotent(
         idempotency_key: String,
         asset_code: impl Into<String>,
-        owner: Ulid,
+        owner: Uuid,
         amount: i64,
         metadata: String,
         system: Arc<LedgerSystem>,
@@ -68,7 +67,7 @@ impl Money {
 
     async fn mint_internal(
         asset_code: String,
-        owner: Ulid,
+        owner: Uuid,
         amount: i64,
         metadata: String,
         system: Arc<LedgerSystem>,
@@ -97,8 +96,8 @@ impl Money {
     /// Reserve money (escrow authority)
     pub async fn reserve(
         asset_code: impl Into<String>,
-        from: Ulid,
-        for_authority: Ulid,
+        from: Uuid,
+        for_authority: Uuid,
         amount: i64,
         metadata: String,
         system: Arc<LedgerSystem>,
@@ -112,7 +111,7 @@ impl Money {
 
         // Burn from sender
         let to_burn = adapter.select_for_burn(asset.id, from, amount).await?;
-        let burn_ids: Vec<Ulid> = to_burn.iter().map(|vo| vo.id).collect();
+        let burn_ids: Vec<Uuid> = to_burn.iter().map(|vo| vo.id).collect();
 
         if to_burn.iter().map(|vo| vo.amount).sum::<i64>() < amount {
             return Err(MoneyError::InsufficientFunds);
@@ -163,9 +162,9 @@ impl Money {
     // fn fragment_amount(
     //     amount: i64,
     //     unit: i64,
-    //     asset_id: Ulid,
-    //     owner: Ulid,
-    //     reserved_for: Option<Ulid>,
+    //     asset_id: Uuid,
+    //     owner: Uuid,
+    //     reserved_for: Option<Uuid>,
     // ) -> Result<Vec<ValueObject>, MoneyError> {
     //     let mut fragments = Vec::new();
     //     let mut remaining = amount;
@@ -214,7 +213,7 @@ impl MoneySlice {
     /// Transfer this slice to a recipient
     pub async fn transfer_to(
         mut self,
-        recipient: Ulid,
+        recipient: Uuid,
         metadata: String,
     ) -> Result<(), MoneyError> {
         if self.consumed {
@@ -228,7 +227,7 @@ impl MoneySlice {
         let to_burn = adapter
             .select_for_burn(asset.id, self.parent.owner, self.amount)
             .await?;
-        let burn_ids: Vec<Ulid> = to_burn.iter().map(|vo| vo.id).collect();
+        let burn_ids: Vec<Uuid> = to_burn.iter().map(|vo| vo.id).collect();
 
         if to_burn.iter().map(|vo| vo.amount).sum::<i64>() < self.amount {
             return Err(MoneyError::InsufficientFunds);
@@ -293,7 +292,7 @@ impl MoneySlice {
         let to_burn = adapter
             .select_for_burn(asset.id, self.parent.owner, self.amount)
             .await?;
-        let burn_ids: Vec<Ulid> = to_burn.iter().map(|vo| vo.id).collect();
+        let burn_ids: Vec<Uuid> = to_burn.iter().map(|vo| vo.id).collect();
 
         if to_burn.iter().map(|vo| vo.amount).sum::<i64>() < self.amount {
             return Err(MoneyError::InsufficientFunds);
@@ -346,7 +345,7 @@ impl Drop for MoneySlice {
 impl Balance {
     pub async fn get(
         asset_code: impl Into<String>,
-        owner: Ulid,
+        owner: Uuid,
         system: Arc<LedgerSystem>,
     ) -> Result<Balance, MoneyError> {
         let adapter = system.adapter();
@@ -365,7 +364,7 @@ mod tests {
     fn test_money_slice_amount_validation() {
         // Test that invalid amounts are rejected
         let system = Arc::new(LedgerSystem::new(Box::new(MockAdapter)));
-        let money = Money::new(system, "USD", Ulid::new());
+        let money = Money::new(system, "USD", uuid::Uuid::now_v7());
 
         assert!(money.slice(0).is_err());
         assert!(money.slice(-100).is_err());
@@ -378,8 +377,8 @@ mod tests {
     impl LedgerAdapter for MockAdapter {
         async fn mint_value_objects(
             &self,
-            _asset_id: Ulid,
-            _owner: Ulid,
+            _asset_id: Uuid,
+            _owner: Uuid,
             _amount: i64,
             _metadata: String,
         ) -> Result<Vec<ValueObject>, MoneyError> {
@@ -388,7 +387,7 @@ mod tests {
 
         async fn burn_value_objects(
             &self,
-            _ids: Vec<Ulid>,
+            _ids: Vec<Uuid>,
             _metadata: String,
         ) -> Result<(), MoneyError> {
             Ok(())
@@ -396,8 +395,8 @@ mod tests {
 
         async fn select_for_burn(
             &self,
-            _asset_id: Ulid,
-            _owner: Ulid,
+            _asset_id: Uuid,
+            _owner: Uuid,
             _amount: i64,
         ) -> Result<Vec<ValueObject>, MoneyError> {
             Ok(vec![])
@@ -405,9 +404,9 @@ mod tests {
 
         async fn select_reserved(
             &self,
-            _asset_id: Ulid,
-            _owner: Ulid,
-            _authority: Ulid,
+            _asset_id: Uuid,
+            _owner: Uuid,
+            _authority: Uuid,
             _amount: i64,
         ) -> Result<Vec<ValueObject>, MoneyError> {
             Ok(vec![])
@@ -415,21 +414,21 @@ mod tests {
 
         async fn change_state(
             &self,
-            _ids: Vec<Ulid>,
+            _ids: Vec<Uuid>,
             _new_state: ValueObjectState,
         ) -> Result<(), MoneyError> {
             Ok(())
         }
 
-        async fn get_balance(&self, _asset_id: Ulid, _owner: Ulid) -> Result<Balance, MoneyError> {
-            Ok(Balance::new(Ulid::new(), Ulid::new()))
+        async fn get_balance(&self, _asset_id: Uuid, _owner: Uuid) -> Result<Balance, MoneyError> {
+            Ok(Balance::new(uuid::Uuid::now_v7(), uuid::Uuid::now_v7()))
         }
 
-        async fn record_transaction(&self, _transaction: Transaction) -> Result<Ulid, MoneyError> {
-            Ok(Ulid::new())
+        async fn record_transaction(&self, _transaction: Transaction) -> Result<Uuid, MoneyError> {
+            Ok(uuid::Uuid::now_v7())
         }
 
-        async fn get_transaction(&self, _tx_id: Ulid) -> Result<Transaction, MoneyError> {
+        async fn get_transaction(&self, _tx_id: Uuid) -> Result<Transaction, MoneyError> {
             Err(MoneyError::TransactionNotFound)
         }
 

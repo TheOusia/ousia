@@ -7,24 +7,24 @@ pub mod sqlite;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use ulid::Ulid;
+use uuid::Uuid;
 
 use crate::{
     Object, Union,
     edge::{Edge, query::EdgeQuery},
     error::Error,
-    object::SYSTEM_OWNER,
     query::{
         Comparison, Cursor, IndexField, Operator, QueryFilter, QueryMode, QuerySearch, QuerySort,
         ToIndexValue,
     },
+    system_owner,
 };
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ObjectRecord {
-    pub id: Ulid,
+    pub id: Uuid,
     pub type_name: String,
-    pub owner: Ulid,
+    pub owner: Uuid,
     pub data: serde_json::Value,
     pub index_meta: serde_json::Value,
     pub created_at: DateTime<Utc>,
@@ -83,8 +83,8 @@ impl<A: Object, B: Object> Into<Union<A, B>> for ObjectRecord {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct EdgeRecord {
     pub type_name: String,
-    pub from: Ulid,
-    pub to: Ulid,
+    pub from: Uuid,
+    pub to: Uuid,
     pub data: serde_json::Value,
     pub index_meta: serde_json::Value,
 }
@@ -122,7 +122,7 @@ impl EdgeRecord {
 
 #[derive(Debug)]
 pub struct Query {
-    pub owner: Ulid, // enforced, never optional
+    pub owner: Uuid, // enforced, never optional
     pub filters: Vec<QueryFilter>,
     pub limit: Option<u32>,
     pub cursor: Option<Cursor>,
@@ -131,7 +131,7 @@ pub struct Query {
 impl Default for Query {
     fn default() -> Self {
         Self {
-            owner: *SYSTEM_OWNER,
+            owner: system_owner(),
             filters: Vec::new(),
             limit: None,
             cursor: None,
@@ -140,7 +140,7 @@ impl Default for Query {
 }
 
 impl Query {
-    pub fn new(owner: Ulid) -> Self {
+    pub fn new(owner: Uuid) -> Self {
         Self {
             owner,
             filters: Vec::new(),
@@ -151,7 +151,7 @@ impl Query {
 
     pub fn wide() -> Self {
         Self {
-            owner: Ulid::nil(),
+            owner: Uuid::nil(),
             filters: Vec::new(),
             limit: None,
             cursor: None,
@@ -416,7 +416,7 @@ impl Query {
         self
     }
 
-    pub fn with_cursor(mut self, cursor: Ulid) -> Self {
+    pub fn with_cursor(mut self, cursor: Uuid) -> Self {
         self.cursor = Some(Cursor { last_id: cursor });
         self
     }
@@ -438,13 +438,13 @@ macro_rules! filter {
 }
 
 pub struct QueryContext<'a, T> {
-    root: Ulid,
+    root: Uuid,
     adapter: &'a dyn Adapter,
     _marker: std::marker::PhantomData<T>,
 }
 
 impl<'a, T: Object> QueryContext<'a, T> {
-    pub(crate) fn new(adapter: &'a dyn Adapter, root: Ulid) -> Self {
+    pub(crate) fn new(adapter: &'a dyn Adapter, root: Uuid) -> Self {
         Self {
             root,
             adapter,
@@ -469,7 +469,7 @@ impl<'a, T: Object> QueryContext<'a, T> {
 /// ==========================
 
 pub struct EdgeQueryContext<'a, E: Edge, O: crate::Object> {
-    owner: Ulid,
+    owner: Uuid,
     filters: Vec<QueryFilter>,
     edge_filters: Vec<QueryFilter>,
     limit: Option<u32>,
@@ -479,7 +479,7 @@ pub struct EdgeQueryContext<'a, E: Edge, O: crate::Object> {
 }
 
 impl<'a, E: Edge, O: Object> EdgeQueryContext<'a, E, O> {
-    pub(crate) fn new(adapter: &'a dyn Adapter, owner: Ulid) -> Self {
+    pub(crate) fn new(adapter: &'a dyn Adapter, owner: Uuid) -> Self {
         Self {
             adapter,
             owner,
@@ -994,7 +994,7 @@ impl<'a, E: Edge, O: Object> EdgeQueryContext<'a, E, O> {
     }
 
     /// Set cursor for pagination
-    pub fn with_cursor(mut self, cursor: Ulid) -> Self {
+    pub fn with_cursor(mut self, cursor: Uuid) -> Self {
         self.cursor = Some(Cursor { last_id: cursor });
         self
     }
@@ -1017,7 +1017,7 @@ impl<'a, E: Edge, O: Object> EdgeQueryContext<'a, E, O> {
             .await?;
 
         // Extract the 'to' IDs from edges
-        let target_ids: Vec<Ulid> = edge_records.iter().map(|e| e.to).collect();
+        let target_ids: Vec<Uuid> = edge_records.iter().map(|e| e.to).collect();
 
         if target_ids.is_empty() {
             return Ok(vec![]);
@@ -1181,26 +1181,26 @@ impl<'a, E: Edge, O: Object> EdgeQueryContext<'a, E, O> {
 pub trait Adapter: Send + Sync + 'static {
     /* ---------------- OBJECTS ---------------- */
     async fn insert_object(&self, record: ObjectRecord) -> Result<(), Error>;
-    async fn fetch_object(&self, id: Ulid) -> Result<Option<ObjectRecord>, Error>;
-    async fn fetch_bulk_objects(&self, ids: Vec<Ulid>) -> Result<Vec<ObjectRecord>, Error>;
+    async fn fetch_object(&self, id: Uuid) -> Result<Option<ObjectRecord>, Error>;
+    async fn fetch_bulk_objects(&self, ids: Vec<Uuid>) -> Result<Vec<ObjectRecord>, Error>;
     async fn update_object(&self, record: ObjectRecord) -> Result<(), Error>;
 
     /// Explicit ownership transfer
     async fn transfer_object(
         &self,
-        id: Ulid,
-        from_owner: Ulid,
-        to_owner: Ulid,
+        id: Uuid,
+        from_owner: Uuid,
+        to_owner: Uuid,
     ) -> Result<ObjectRecord, Error>;
 
-    async fn delete_object(&self, id: Ulid, owner: Ulid) -> Result<Option<ObjectRecord>, Error>;
+    async fn delete_object(&self, id: Uuid, owner: Uuid) -> Result<Option<ObjectRecord>, Error>;
 
     /* ---------------- QUERIES ---------------- */
     /// Fetch ALL objects matching `plan`. Filters by owner.
     async fn find_object(
         &self,
         type_name: &'static str,
-        owner: Ulid,
+        owner: Uuid,
         filters: &[QueryFilter],
     ) -> Result<Option<ObjectRecord>, Error>;
 
@@ -1220,14 +1220,14 @@ pub trait Adapter: Send + Sync + 'static {
     async fn fetch_owned_objects(
         &self,
         type_name: &'static str,
-        owner: Ulid,
+        owner: Uuid,
     ) -> Result<Vec<ObjectRecord>, Error>;
 
     /// Fetch a SINGLE owned object (O2O)
     async fn fetch_owned_object(
         &self,
         type_name: &'static str,
-        owner: Ulid,
+        owner: Uuid,
     ) -> Result<Option<ObjectRecord>, Error>;
 
     // ==================== Union Operations ====================
@@ -1235,28 +1235,28 @@ pub trait Adapter: Send + Sync + 'static {
         &self,
         a_type_name: &'static str,
         b_type_name: &'static str,
-        id: Ulid,
+        id: Uuid,
     ) -> Result<Option<ObjectRecord>, Error>;
 
     async fn fetch_union_objects(
         &self,
         a_type_name: &'static str,
         b_type_name: &'static str,
-        id: Vec<Ulid>,
+        id: Vec<Uuid>,
     ) -> Result<Vec<ObjectRecord>, Error>;
 
     async fn fetch_owned_union_object(
         &self,
         a_type_name: &'static str,
         b_type_name: &'static str,
-        owner: Ulid,
+        owner: Uuid,
     ) -> Result<Option<ObjectRecord>, Error>;
 
     async fn fetch_owned_union_objects(
         &self,
         a_type_name: &'static str,
         b_type_name: &'static str,
-        owner: Ulid,
+        owner: Uuid,
     ) -> Result<Vec<ObjectRecord>, Error>;
 
     /* ---------------- EDGES ---------------- */
@@ -1264,31 +1264,31 @@ pub trait Adapter: Send + Sync + 'static {
     async fn update_edge(
         &self,
         record: EdgeRecord,
-        old_to: Ulid,
-        to: Option<Ulid>,
+        old_to: Uuid,
+        to: Option<Uuid>,
     ) -> Result<(), Error>;
-    async fn delete_edge(&self, type_name: &'static str, from: Ulid, to: Ulid)
+    async fn delete_edge(&self, type_name: &'static str, from: Uuid, to: Uuid)
     -> Result<(), Error>;
 
-    async fn delete_object_edge(&self, type_name: &'static str, from: Ulid) -> Result<(), Error>;
+    async fn delete_object_edge(&self, type_name: &'static str, from: Uuid) -> Result<(), Error>;
 
     async fn query_edges(
         &self,
         type_name: &'static str,
-        owner: Ulid,
+        owner: Uuid,
         plan: EdgeQuery,
     ) -> Result<Vec<EdgeRecord>, Error>;
 
     async fn count_edges(
         &self,
         type_name: &'static str,
-        owner: Ulid,
+        owner: Uuid,
         plan: Option<EdgeQuery>,
     ) -> Result<u64, Error>;
 }
 
 impl dyn Adapter {
-    pub fn preload_object<'a, T: Object>(&'a self, id: Ulid) -> QueryContext<'a, T> {
+    pub fn preload_object<'a, T: Object>(&'a self, id: Uuid) -> QueryContext<'a, T> {
         QueryContext::new(self, id)
     }
 }

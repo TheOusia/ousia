@@ -15,7 +15,7 @@ use testcontainers_modules::postgres::Postgres;
 
 #[cfg(test)]
 use ousia::adapters::Adapter;
-use ulid::Ulid;
+use uuid::Uuid;
 
 /// Example: Blog Post object
 #[derive(OusiaObject, OusiaDefault, Debug)]
@@ -74,20 +74,11 @@ pub struct User {
     pub display_name: String,
 }
 
-#[derive(Debug, OusiaEdge)]
+#[derive(Debug, OusiaEdge, OusiaDefault)]
 #[ousia(type_name = "Follow", index = "notification:search")]
 struct Follow {
     _meta: EdgeMeta,
     notification: bool,
-}
-
-impl Default for Follow {
-    fn default() -> Self {
-        Self {
-            _meta: EdgeMeta::new(Ulid::nil(), Ulid::nil()),
-            notification: false,
-        }
-    }
 }
 
 mod sqlite_adpater_test {
@@ -274,7 +265,7 @@ mod sqlite_engine_test {
     #[test]
     fn test_object_ownership_not_system_owned() {
         let user = User {
-            _meta: Meta::new_with_owner(Ulid::new()),
+            _meta: Meta::new_with_owner(uuid::Uuid::now_v7()),
             username: "johndoe".to_string(),
             email: "john.doe@example.com".to_string(),
             display_name: "John Doe".to_string(),

@@ -263,11 +263,11 @@ fn generate_view_code(
     for meta_field in meta_fields {
         match meta_field.as_str() {
             "id" => {
-                struct_fields.push(quote! { pub id: ulid::Ulid });
+                struct_fields.push(quote! { pub id: uuid::Uuid });
                 field_assignments.push(quote! { id: self._meta.id });
             }
             "owner" => {
-                struct_fields.push(quote! { pub owner: ulid::Ulid });
+                struct_fields.push(quote! { pub owner: uuid::Uuid });
                 field_assignments.push(quote! { owner: self._meta.owner });
             }
             "created_at" => {
@@ -1143,7 +1143,7 @@ pub fn derive_ousia_edge(input: TokenStream) -> TokenStream {
                             while map.next_entry::<String, serde_json::Value>()?.is_some() {}
 
                             Ok(#ident {
-                                #meta_field_ident: #ousia::edge::EdgeMeta::new(ulid::Ulid::nil(), ulid::Ulid::nil()),
+                                #meta_field_ident: #ousia::edge::EdgeMeta::new(uuid::Uuid::now_v7(), uuid::Uuid::now_v7()),
                             })
                         }
 
@@ -1152,7 +1152,7 @@ pub fn derive_ousia_edge(input: TokenStream) -> TokenStream {
                             E: serde::de::Error,
                         {
                             Ok(#ident {
-                                #meta_field_ident: #ousia::edge::EdgeMeta::new(ulid::Ulid::nil(), ulid::Ulid::nil()),
+                                #meta_field_ident: #ousia::edge::EdgeMeta::new(uuid::Uuid::now_v7(), uuid::Uuid::now_v7()),
                             })
                         }
                     }
@@ -1206,7 +1206,7 @@ pub fn derive_ousia_edge(input: TokenStream) -> TokenStream {
                             }
 
                             Ok(#ident {
-                                #meta_field_ident: #ousia::edge::EdgeMeta::new(ulid::Ulid::nil(), ulid::Ulid::nil()),
+                                #meta_field_ident: #ousia::edge::EdgeMeta::new(uuid::Uuid::now_v7(), uuid::Uuid::now_v7()),
                                 #(
                                     #deserialize_field_idents: #deserialize_field_idents
                                         .ok_or_else(|| serde::de::Error::missing_field(#deserialize_field_names))?,
@@ -1335,7 +1335,7 @@ pub fn derive_ousia_default(input: TokenStream) -> TokenStream {
         let name = f.ident.as_ref().unwrap();
         if name == meta_field_ident {
             if is_edge {
-                quote! { #name: #ousia::edge::meta::EdgeMeta::new(ulid::Ulid::nil(), ulid::Ulid::nil()) }
+                quote! { #name: #ousia::edge::meta::EdgeMeta::new(uuid::Uuid::now_v7(), uuid::Uuid::now_v7()) }
             } else {
                 quote! { #name: #ousia::object::meta::Meta::default() }
             }

@@ -1,4 +1,4 @@
-use ulid::Ulid;
+use uuid::Uuid;
 
 use crate::query::{
     Comparison, Cursor, IndexField, Operator, QueryFilter, QueryMode, QuerySearch, QuerySort,
@@ -287,7 +287,7 @@ impl EdgeQuery {
         self
     }
 
-    pub fn with_cursor(mut self, cursor: Ulid) -> Self {
+    pub fn with_cursor(mut self, cursor: Uuid) -> Self {
         self.cursor = Some(Cursor { last_id: cursor });
         self
     }

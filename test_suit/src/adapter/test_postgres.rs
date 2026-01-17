@@ -11,7 +11,7 @@ use testcontainers_modules::postgres::Postgres;
 
 #[cfg(test)]
 use ousia::adapters::Adapter;
-use ulid::Ulid;
+use uuid::Uuid;
 
 /// Example: Blog Post object
 #[derive(OusiaObject, OusiaDefault, Debug)]
@@ -89,20 +89,11 @@ pub struct User {
     pub balance: Wallet,
 }
 
-#[derive(Debug, OusiaEdge)]
+#[derive(Debug, OusiaEdge, OusiaDefault)]
 #[ousia(type_name = "Follow", index = "notification:search")]
 struct Follow {
     _meta: EdgeMeta,
     notification: bool,
-}
-
-impl Default for Follow {
-    fn default() -> Self {
-        Self {
-            _meta: EdgeMeta::new(Ulid::nil(), Ulid::nil()),
-            notification: false,
-        }
-    }
 }
 
 pub(crate) async fn postgres_test_client() -> (ContainerAsync<Postgres>, PostgresAdapter) {
@@ -337,7 +328,7 @@ mod engine_test {
     #[test]
     fn test_object_ownership_not_system_owned() {
         let user = User {
-            _meta: Meta::new_with_owner(Ulid::new()),
+            _meta: Meta::new_with_owner(uuid::Uuid::now_v7()),
             username: "johndoe".to_string(),
             email: "john.doe@example.com".to_string(),
             display_name: "John Doe".to_string(),
@@ -883,6 +874,7 @@ mod engine_test {
     }
 }
 
+#[cfg(feature = "ledger")]
 mod ledger_tests {
     use super::*;
     use ousia::adapters::postgres::PostgresAdapter;
@@ -893,7 +885,7 @@ mod ledger_tests {
     use std::sync::Arc;
     use testcontainers::ContainerAsync;
     use testcontainers_modules::postgres::Postgres;
-    use ulid::Ulid;
+    use uuid::Uuid;
 
     #[tokio::test]
     async fn test_full_transaction_flow() {
@@ -906,8 +898,8 @@ mod ledger_tests {
         adapter.create_asset(asset.clone()).await.unwrap();
 
         // Create two users
-        let alice = Ulid::new();
-        let bob = Ulid::new();
+        let alice = uuid::Uuid::now_v7();
+        let bob = uuid::Uuid::now_v7();
 
         // Mint money to Alice
         adapter
@@ -925,7 +917,7 @@ mod ledger_tests {
             .select_for_burn(asset.id, alice, 20_000)
             .await
             .unwrap();
-        let burn_ids: Vec<Ulid> = to_burn.iter().map(|vo| vo.id).collect();
+        let burn_ids: Vec<Uuid> = to_burn.iter().map(|vo| vo.id).collect();
         adapter
             .burn_value_objects(burn_ids, "transfer".to_string())
             .await
@@ -953,7 +945,7 @@ mod ledger_tests {
         let asset = Asset::new("EUR", 10_000);
         adapter.create_asset(asset.clone()).await.unwrap();
 
-        let user = Ulid::new();
+        let user = uuid::Uuid::now_v7();
         let key = "unique-key-123";
 
         // First mint
@@ -984,8 +976,8 @@ mod ledger_tests {
         let asset = Asset::new("GBP", 10_000);
         adapter.create_asset(asset.clone()).await.unwrap();
 
-        let alice = Ulid::new();
-        let bob = Ulid::new();
+        let alice = uuid::Uuid::now_v7();
+        let bob = uuid::Uuid::now_v7();
 
         // Mint to Alice
         adapter
@@ -998,7 +990,7 @@ mod ledger_tests {
             .select_for_burn(asset.id, alice, 15_000)
             .await
             .unwrap();
-        let burn_ids: Vec<Ulid> = to_burn.iter().map(|vo| vo.id).collect();
+        let burn_ids: Vec<Uuid> = to_burn.iter().map(|vo| vo.id).collect();
         adapter
             .burn_value_objects(burn_ids, "transfer".to_string())
             .await
@@ -1071,7 +1063,7 @@ mod ledger_tests {
         let usd = Asset::new("USD", 100_00);
         system.adapter().create_asset(usd.clone()).await.unwrap();
 
-        let alice = Ulid::new();
+        let alice = uuid::Uuid::now_v7();
 
         // Mint $500 to Alice
         let mint_tx = Money::mint(
@@ -1105,8 +1097,8 @@ mod ledger_tests {
         let usd = Asset::new("USD", 100_00);
         system.adapter().create_asset(usd.clone()).await.unwrap();
 
-        let alice = Ulid::new();
-        let bob = Ulid::new();
+        let alice = uuid::Uuid::now_v7();
+        let bob = uuid::Uuid::now_v7();
 
         // Mint to Alice
         Money::mint(
@@ -1148,8 +1140,8 @@ mod ledger_tests {
         let usd = Asset::new("USD", 100_00);
         system.adapter().create_asset(usd.clone()).await.unwrap();
 
-        let alice = Ulid::new();
-        let bob = Ulid::new();
+        let alice = uuid::Uuid::now_v7();
+        let bob = uuid::Uuid::now_v7();
 
         // Mint small amount to Alice
         Money::mint("USD", alice, 50_00, "deposit".to_string(), system.clone())
@@ -1177,8 +1169,8 @@ mod ledger_tests {
         let usd = Asset::new("USD", 100_00);
         system.adapter().create_asset(usd.clone()).await.unwrap();
 
-        let bob = Ulid::new();
-        let marketplace = Ulid::new();
+        let bob = uuid::Uuid::now_v7();
+        let marketplace = uuid::Uuid::now_v7();
 
         // Mint to Bob
         Money::mint("USD", bob, 200_00, "deposit".to_string(), system.clone())
@@ -1218,7 +1210,7 @@ mod ledger_tests {
         let usd = Asset::new("USD", 100_00);
         system.adapter().create_asset(usd.clone()).await.unwrap();
 
-        let charlie = Ulid::new();
+        let charlie = uuid::Uuid::now_v7();
         let idempotency_key = "webhook-123-retry-1";
 
         // First mint
@@ -1265,7 +1257,7 @@ mod ledger_tests {
         let usd = Asset::new("USD", 100_00);
         system.adapter().create_asset(usd.clone()).await.unwrap();
 
-        let alice = Ulid::new();
+        let alice = uuid::Uuid::now_v7();
 
         // Mint to Alice
         Money::mint("USD", alice, 300_00, "deposit".to_string(), system.clone())
@@ -1295,9 +1287,9 @@ mod ledger_tests {
         let usd = Asset::new("USD", 100_00);
         system.adapter().create_asset(usd.clone()).await.unwrap();
 
-        let alice = Ulid::new();
-        let bob = Ulid::new();
-        let charlie = Ulid::new();
+        let alice = uuid::Uuid::now_v7();
+        let bob = uuid::Uuid::now_v7();
+        let charlie = uuid::Uuid::now_v7();
 
         // Mint to Alice
         Money::mint("USD", alice, 1000_00, "deposit".to_string(), system.clone())
@@ -1349,7 +1341,7 @@ mod ledger_tests {
         let usd = Asset::new("USD", 100_00);
         system.adapter().create_asset(usd.clone()).await.unwrap();
 
-        let alice = Ulid::new();
+        let alice = uuid::Uuid::now_v7();
 
         // Try to mint negative amount
         let result =
@@ -1371,7 +1363,7 @@ mod ledger_tests {
 
         let system = Arc::new(LedgerSystem::new(Box::new(adapter)));
 
-        let alice = Ulid::new();
+        let alice = uuid::Uuid::now_v7();
 
         // Try to mint with non-existent asset
         let result =
@@ -1392,9 +1384,9 @@ mod ledger_tests {
         let usd = Asset::new("USD", 100_00);
         system.adapter().create_asset(usd.clone()).await.unwrap();
 
-        let alice = Ulid::new();
-        let bob = Ulid::new();
-        let charlie = Ulid::new();
+        let alice = uuid::Uuid::now_v7();
+        let bob = uuid::Uuid::now_v7();
+        let charlie = uuid::Uuid::now_v7();
 
         // Mint to Alice
         Money::mint("USD", alice, 1000_00, "deposit".to_string(), system.clone())
@@ -1443,7 +1435,7 @@ mod ledger_tests {
         let usd = Asset::new("USD", 100_00);
         system.adapter().create_asset(usd.clone()).await.unwrap();
 
-        let alice = Ulid::new();
+        let alice = uuid::Uuid::now_v7();
 
         // Mint amount larger than unit - should fragment
         Money::mint(
@@ -1475,8 +1467,8 @@ mod ledger_tests {
         let usd = Asset::new("USD", 100_00);
         system.adapter().create_asset(usd.clone()).await.unwrap();
 
-        let bob = Ulid::new();
-        let marketplace = Ulid::new();
+        let bob = uuid::Uuid::now_v7();
+        let marketplace = uuid::Uuid::now_v7();
 
         // Mint to Bob
         Money::mint("USD", bob, 500_00, "deposit".to_string(), system.clone())

@@ -4,11 +4,11 @@ use sqlx::{
     postgres::{PgArguments, PgRow},
     query::{Query as PgQuery, QueryScalar},
 };
-use ulid::Ulid;
+use uuid::Uuid;
 
 use crate::{
     adapters::{Adapter, EdgeQuery, EdgeRecord, Error, ObjectRecord, Query},
-    query::{Cursor, IndexValue, QueryFilter},
+    query::{Cursor, IndexValue, IndexValueInner, QueryFilter},
 };
 
 /// PostgreSQL adapter using a unified JSON storage model
@@ -16,9 +16,9 @@ use crate::{
 /// Schema:
 /// ```sql
 /// CREATE TABLE public.objects (
-///     id TEXT PRIMARY KEY,
+///     id uuid PRIMARY KEY,
 ///     type TEXT NOT NULL,
-///     owner TEXT NOT NULL,
+///     owner uuid NOT NULL,
 ///     created_at TIMESTAMPTZ NOT NULL,
 ///     updated_at TIMESTAMPTZ NOT NULL,
 ///     data JSONB NOT NULL,
@@ -54,9 +54,9 @@ impl PostgresAdapter {
         sqlx::query(
             r#"
             CREATE TABLE IF NOT EXISTS public.objects (
-                id TEXT PRIMARY KEY,
+                id uuid PRIMARY KEY,
                 type TEXT NOT NULL,
-                owner TEXT NOT NULL,
+                owner uuid NOT NULL,
                 created_at TIMESTAMPTZ NOT NULL,
                 updated_at TIMESTAMPTZ NOT NULL,
                 data JSONB NOT NULL,
@@ -116,8 +116,8 @@ impl PostgresAdapter {
         sqlx::query(
             r#"
             CREATE TABLE IF NOT EXISTS public.edges (
-                "from" TEXT NOT NULL,
-                "to" TEXT NOT NULL,
+                "from" uuid NOT NULL,
+                "to" uuid NOT NULL,
                 type TEXT NOT NULL,
                 data JSONB NOT NULL,
                 index_meta JSONB NOT NULL
@@ -139,7 +139,7 @@ impl PostgresAdapter {
 
         sqlx::query(
             r#"
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_edges_from_key ON public.edges("from", type);
+            CREATE INDEX IF NOT EXISTS idx_edges_from_key ON public.edges("from", type);
             "#,
         )
         .execute(&mut *tx)
@@ -148,7 +148,7 @@ impl PostgresAdapter {
 
         sqlx::query(
             r#"
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_edges_to_key ON public.edges("to", type);
+            CREATE INDEX IF NOT EXISTS idx_edges_to_key ON public.edges("to", type);
             "#,
         )
         .execute(&mut *tx)
@@ -193,17 +193,13 @@ impl PostgresAdapter {
             .try_get::<String, _>("type")
             .map_err(|e| Error::Deserialize(e.to_string()))?;
 
-        let id = Ulid::from_string(
-            &row.try_get::<String, _>("id")
-                .map_err(|e| Error::Deserialize(e.to_string()))?,
-        )
-        .map_err(|e| Error::Deserialize(e.to_string()))?;
+        let id = row
+            .try_get::<Uuid, _>("id")
+            .map_err(|e| Error::Deserialize(e.to_string()))?;
 
-        let owner = Ulid::from_string(
-            &row.try_get::<String, _>("owner")
-                .map_err(|e| Error::Deserialize(e.to_string()))?,
-        )
-        .map_err(|e| Error::Deserialize(e.to_string()))?;
+        let owner = row
+            .try_get::<Uuid, _>("owner")
+            .map_err(|e| Error::Deserialize(e.to_string()))?;
 
         let created_at = row
             .try_get("created_at")
@@ -237,17 +233,13 @@ impl PostgresAdapter {
             .try_get::<String, _>("type")
             .map_err(|e| Error::Deserialize(e.to_string()))?;
 
-        let from = Ulid::from_string(
-            &row.try_get::<String, _>("from")
-                .map_err(|e| Error::Deserialize(e.to_string()))?,
-        )
-        .map_err(|e| Error::Deserialize(e.to_string()))?;
+        let from = row
+            .try_get::<Uuid, _>("from")
+            .map_err(|e| Error::Deserialize(e.to_string()))?;
 
-        let to = Ulid::from_string(
-            &row.try_get::<String, _>("to")
-                .map_err(|e| Error::Deserialize(e.to_string()))?,
-        )
-        .map_err(|e| Error::Deserialize(e.to_string()))?;
+        let to = row
+            .try_get::<Uuid, _>("to")
+            .map_err(|e| Error::Deserialize(e.to_string()))?;
 
         Ok(EdgeRecord {
             type_name,
@@ -277,6 +269,19 @@ impl PostgresAdapter {
                 IndexValue::Float(_) => "double",
                 IndexValue::Bool(_) => "boolean",
                 IndexValue::Timestamp(_) => "timestamptz",
+                IndexValue::Uuid(_) => "uuid",
+                IndexValue::Array(arr) => {
+                    // Determine array element type from first element
+                    if let Some(first) = arr.first() {
+                        match first {
+                            IndexValueInner::String(_) => "text[]",
+                            IndexValueInner::Int(_) => "bigint[]",
+                            IndexValueInner::Float(_) => "double precision[]",
+                        }
+                    } else {
+                        "text[]" // default for empty arrays
+                    }
+                }
             };
 
             match &filter.mode {
@@ -284,7 +289,13 @@ impl PostgresAdapter {
                     let comparison = match query_search.comparison {
                         crate::query::Comparison::Equal => "=",
                         crate::query::Comparison::BeginsWith => "ILIKE",
-                        crate::query::Comparison::Contains => "ILIKE",
+                        crate::query::Comparison::Contains => {
+                            if matches!(filter.value, IndexValue::Array(_)) {
+                                "&&" // PostgreSQL array overlap
+                            } else {
+                                "ILIKE"
+                            }
+                        }
                         crate::query::Comparison::GreaterThan => ">",
                         crate::query::Comparison::LessThan => "<",
                         crate::query::Comparison::GreaterThanOrEqual => ">=",
@@ -342,6 +353,19 @@ impl PostgresAdapter {
                 IndexValue::Float(_) => "double",
                 IndexValue::Bool(_) => "boolean",
                 IndexValue::Timestamp(_) => "timestamptz",
+                IndexValue::Uuid(_) => "uuid",
+                IndexValue::Array(arr) => {
+                    // Determine array element type from first element
+                    if let Some(first) = arr.first() {
+                        match first {
+                            IndexValueInner::String(_) => "text[]",
+                            IndexValueInner::Int(_) => "bigint[]",
+                            IndexValueInner::Float(_) => "double precision[]",
+                        }
+                    } else {
+                        "text[]" // default for empty arrays
+                    }
+                }
             };
 
             match &filter.mode {
@@ -349,7 +373,13 @@ impl PostgresAdapter {
                     let comparison = match query_search.comparison {
                         crate::query::Comparison::Equal => "=",
                         crate::query::Comparison::BeginsWith => "ILIKE",
-                        crate::query::Comparison::Contains => "ILIKE",
+                        crate::query::Comparison::Contains => {
+                            if matches!(filter.value, IndexValue::Array(_)) {
+                                "&&" // PostgreSQL array overlap
+                            } else {
+                                "ILIKE"
+                            }
+                        }
                         crate::query::Comparison::GreaterThan => ">",
                         crate::query::Comparison::LessThan => "<",
                         crate::query::Comparison::GreaterThanOrEqual => ">=",
@@ -410,6 +440,19 @@ impl PostgresAdapter {
                 IndexValue::Float(_) => "double",
                 IndexValue::Bool(_) => "boolean",
                 IndexValue::Timestamp(_) => "timestamptz",
+                IndexValue::Uuid(_) => "uuid",
+                IndexValue::Array(arr) => {
+                    // Determine array element type from first element
+                    if let Some(first) = arr.first() {
+                        match first {
+                            IndexValueInner::String(_) => "text[]",
+                            IndexValueInner::Int(_) => "bigint[]",
+                            IndexValueInner::Float(_) => "double precision[]",
+                        }
+                    } else {
+                        "text[]" // default for empty arrays
+                    }
+                }
             };
 
             match &filter.mode {
@@ -417,7 +460,13 @@ impl PostgresAdapter {
                     let comparison = match query_search.comparison {
                         crate::query::Comparison::Equal => "=",
                         crate::query::Comparison::BeginsWith => "ILIKE",
-                        crate::query::Comparison::Contains => "ILIKE",
+                        crate::query::Comparison::Contains => {
+                            if matches!(filter.value, IndexValue::Array(_)) {
+                                "&&" // PostgreSQL array overlap
+                            } else {
+                                "ILIKE"
+                            }
+                        }
                         crate::query::Comparison::GreaterThan => ">",
                         crate::query::Comparison::LessThan => "<",
                         crate::query::Comparison::GreaterThanOrEqual => ">=",
@@ -468,6 +517,7 @@ impl PostgresAdapter {
 
         let order_terms: Vec<String> = sort
             .iter()
+            .filter(|s| s.value.as_array().is_none())
             .map(|s| {
                 let direction = if s.mode.as_sort().unwrap().ascending {
                     "ASC"
@@ -481,6 +531,7 @@ impl PostgresAdapter {
                     IndexValue::Float(_) => "double",
                     IndexValue::Bool(_) => "boolean",
                     IndexValue::Timestamp(_) => "timestamptz",
+                    _ => "text",
                 };
                 format!(
                     "(index_meta->>'{}')::{} {}",
@@ -504,6 +555,7 @@ impl PostgresAdapter {
 
         let order_terms: Vec<String> = sort
             .iter()
+            .filter(|s| s.value.as_array().is_none())
             .map(|s| {
                 let direction = if s.mode.as_sort().unwrap().ascending {
                     "ASC"
@@ -516,7 +568,9 @@ impl PostgresAdapter {
                     IndexValue::Int(_) => "bigint",
                     IndexValue::Float(_) => "double",
                     IndexValue::Bool(_) => "boolean",
+                    IndexValue::Uuid(_) => "uuid",
                     IndexValue::Timestamp(_) => "timestamptz",
+                    _ => "text",
                 };
                 format!(
                     "(index_meta->>'{}')::{} {}",
@@ -546,6 +600,31 @@ impl PostgresAdapter {
                 IndexValue::Float(f) => query.bind(f),
                 IndexValue::Bool(b) => query.bind(b),
                 IndexValue::Timestamp(t) => query.bind(t),
+                IndexValue::Uuid(uid) => query.bind(uid),
+                IndexValue::Array(arr) => {
+                    // Determine array element type from first element
+                    if let Some(first) = arr.first() {
+                        match first {
+                            IndexValueInner::String(_) => query.bind(
+                                arr.iter()
+                                    .map(|s| s.as_string().unwrap_or_default())
+                                    .collect::<Vec<&str>>(),
+                            ),
+                            IndexValueInner::Int(_) => query.bind(
+                                arr.iter()
+                                    .map(|s| s.as_int().unwrap_or_default())
+                                    .collect::<Vec<i64>>(),
+                            ),
+                            IndexValueInner::Float(_) => query.bind(
+                                arr.iter()
+                                    .map(|s| s.as_float().unwrap_or_default())
+                                    .collect::<Vec<f64>>(),
+                            ),
+                        }
+                    } else {
+                        query.bind(vec![] as Vec<String>)
+                    }
+                }
             };
         }
         query
@@ -569,6 +648,31 @@ impl PostgresAdapter {
                 IndexValue::Float(f) => query.bind(f),
                 IndexValue::Bool(b) => query.bind(b),
                 IndexValue::Timestamp(t) => query.bind(t),
+                IndexValue::Uuid(uid) => query.bind(uid),
+                IndexValue::Array(arr) => {
+                    // Determine array element type from first element
+                    if let Some(first) = arr.first() {
+                        match first {
+                            IndexValueInner::String(_) => query.bind(
+                                arr.iter()
+                                    .map(|s| s.as_string().unwrap_or_default())
+                                    .collect::<Vec<&str>>(),
+                            ),
+                            IndexValueInner::Int(_) => query.bind(
+                                arr.iter()
+                                    .map(|s| s.as_int().unwrap_or_default())
+                                    .collect::<Vec<i64>>(),
+                            ),
+                            IndexValueInner::Float(_) => query.bind(
+                                arr.iter()
+                                    .map(|s| s.as_float().unwrap_or_default())
+                                    .collect::<Vec<f64>>(),
+                            ),
+                        }
+                    } else {
+                        query.bind(vec![] as Vec<String>)
+                    }
+                }
             };
         }
         query
@@ -585,9 +689,9 @@ impl Adapter for PostgresAdapter {
             VALUES ($1, $2, $3, $4, $5, $6, $7)
             "#,
         )
-        .bind(record.id.to_string())
+        .bind(record.id)
         .bind(record.type_name)
-        .bind(record.owner.to_string())
+        .bind(record.owner)
         .bind(record.created_at)
         .bind(record.updated_at)
         .bind(record.data)
@@ -598,7 +702,7 @@ impl Adapter for PostgresAdapter {
         Ok(())
     }
 
-    async fn fetch_object(&self, id: Ulid) -> Result<Option<ObjectRecord>, Error> {
+    async fn fetch_object(&self, id: Uuid) -> Result<Option<ObjectRecord>, Error> {
         let pool = self.pool.clone();
         let row = sqlx::query(
             r#"
@@ -607,7 +711,7 @@ impl Adapter for PostgresAdapter {
             WHERE id = $1
             "#,
         )
-        .bind(id.to_string())
+        .bind(id)
         .fetch_optional(&pool)
         .await
         .map_err(|err| Error::Storage(err.to_string()))?;
@@ -618,7 +722,7 @@ impl Adapter for PostgresAdapter {
         }
     }
 
-    async fn fetch_bulk_objects(&self, ids: Vec<Ulid>) -> Result<Vec<ObjectRecord>, Error> {
+    async fn fetch_bulk_objects(&self, ids: Vec<Uuid>) -> Result<Vec<ObjectRecord>, Error> {
         let pool = self.pool.clone();
         let rows = sqlx::query(
             r#"
@@ -627,7 +731,7 @@ impl Adapter for PostgresAdapter {
             WHERE id = ANY($1)
             "#,
         )
-        .bind(ids.iter().map(|id| id.to_string()).collect::<Vec<String>>())
+        .bind(ids.into_iter().map(|id| id).collect::<Vec<Uuid>>())
         .fetch_all(&pool)
         .await
         .map_err(|err| Error::Storage(err.to_string()))?;
@@ -646,7 +750,7 @@ impl Adapter for PostgresAdapter {
             WHERE id = $1
             "#,
         )
-        .bind(record.id.to_string())
+        .bind(record.id)
         .bind(record.updated_at)
         .bind(record.data)
         .bind(record.index_meta)
@@ -659,9 +763,9 @@ impl Adapter for PostgresAdapter {
 
     async fn transfer_object(
         &self,
-        id: Ulid,
-        from_owner: Ulid,
-        to_owner: Ulid,
+        id: Uuid,
+        from_owner: Uuid,
+        to_owner: Uuid,
     ) -> Result<ObjectRecord, Error> {
         let pool = self.pool.clone();
         let row = sqlx::query(
@@ -672,10 +776,10 @@ impl Adapter for PostgresAdapter {
             RETURNING *
             "#,
         )
-        .bind(id.to_string())
-        .bind(from_owner.to_string())
+        .bind(id)
+        .bind(from_owner)
         .bind(Utc::now())
-        .bind(to_owner.to_string())
+        .bind(to_owner)
         .fetch_one(&pool)
         .await
         .map_err(|err| match err {
@@ -686,7 +790,7 @@ impl Adapter for PostgresAdapter {
         Self::map_row_to_object_record(row)
     }
 
-    async fn delete_object(&self, id: Ulid, owner: Ulid) -> Result<Option<ObjectRecord>, Error> {
+    async fn delete_object(&self, id: Uuid, owner: Uuid) -> Result<Option<ObjectRecord>, Error> {
         let pool = self.pool.clone();
         let row = sqlx::query(
             r#"
@@ -695,8 +799,8 @@ impl Adapter for PostgresAdapter {
             RETURNING *
             "#,
         )
-        .bind(id.to_string())
-        .bind(owner.to_string())
+        .bind(id)
+        .bind(owner)
         .fetch_optional(&pool)
         .await
         .map_err(|err| match err {
@@ -713,7 +817,7 @@ impl Adapter for PostgresAdapter {
     async fn find_object(
         &self,
         type_name: &'static str,
-        owner: Ulid,
+        owner: Uuid,
         filters: &[QueryFilter],
     ) -> Result<Option<ObjectRecord>, Error> {
         let where_clause = Self::build_object_query_conditions(&filters.to_vec(), None);
@@ -729,7 +833,7 @@ impl Adapter for PostgresAdapter {
             where_clause, order_clause
         );
 
-        let mut query = sqlx::query(&sql).bind(type_name).bind(owner.to_string());
+        let mut query = sqlx::query(&sql).bind(type_name).bind(owner);
 
         let f = filters.to_vec();
         query = Self::query_bind_filters(query, &f);
@@ -771,12 +875,10 @@ impl Adapter for PostgresAdapter {
             sql.push_str(&format!(" LIMIT {}", limit));
         }
 
-        let mut query = sqlx::query(&sql)
-            .bind(type_name)
-            .bind(plan.owner.to_string());
+        let mut query = sqlx::query(&sql).bind(type_name).bind(plan.owner);
 
         if let Some(cursor) = plan.cursor {
-            query = query.bind(cursor.last_id.to_string());
+            query = query.bind(cursor.last_id);
         }
 
         query = Self::query_bind_filters(query, &plan.filters);
@@ -818,7 +920,7 @@ impl Adapter for PostgresAdapter {
 
                 let mut query = sqlx::query_scalar::<_, i64>(&sql)
                     .bind(type_name)
-                    .bind(plan.owner.to_string());
+                    .bind(plan.owner);
 
                 query = Self::query_scalar_bind_filters(query, &plan.filters);
 
@@ -844,7 +946,7 @@ impl Adapter for PostgresAdapter {
     async fn fetch_owned_objects(
         &self,
         type_name: &'static str,
-        owner: Ulid,
+        owner: Uuid,
     ) -> Result<Vec<ObjectRecord>, Error> {
         let pool = self.pool.clone();
         let rows = sqlx::query(
@@ -854,7 +956,7 @@ impl Adapter for PostgresAdapter {
             WHERE owner = $1 AND type = $2
             "#,
         )
-        .bind(owner.to_string())
+        .bind(owner)
         .bind(type_name)
         .fetch_all(&pool)
         .await
@@ -868,7 +970,7 @@ impl Adapter for PostgresAdapter {
     async fn fetch_owned_object(
         &self,
         type_name: &'static str,
-        owner: Ulid,
+        owner: Uuid,
     ) -> Result<Option<ObjectRecord>, Error> {
         let pool = self.pool.clone();
         let row = sqlx::query(
@@ -878,7 +980,7 @@ impl Adapter for PostgresAdapter {
             WHERE owner = $1 AND type = $2
             "#,
         )
-        .bind(owner.to_string())
+        .bind(owner)
         .bind(type_name)
         .fetch_optional(&pool)
         .await
@@ -894,7 +996,7 @@ impl Adapter for PostgresAdapter {
         &self,
         a_type_name: &'static str,
         b_type_name: &'static str,
-        id: Ulid,
+        id: Uuid,
     ) -> Result<Option<ObjectRecord>, Error> {
         let pool = self.pool.clone();
         let row = sqlx::query(
@@ -904,7 +1006,7 @@ impl Adapter for PostgresAdapter {
             WHERE id = $1 AND (type = $2 OR type = $3)
             "#,
         )
-        .bind(id.to_string())
+        .bind(id)
         .bind(a_type_name)
         .bind(b_type_name)
         .fetch_optional(&pool)
@@ -921,7 +1023,7 @@ impl Adapter for PostgresAdapter {
         &self,
         a_type_name: &'static str,
         b_type_name: &'static str,
-        ids: Vec<Ulid>,
+        ids: Vec<Uuid>,
     ) -> Result<Vec<ObjectRecord>, Error> {
         let pool = self.pool.clone();
         let rows = sqlx::query(
@@ -931,7 +1033,7 @@ impl Adapter for PostgresAdapter {
             WHERE id = ANY($1) AND (type = $2 OR type = $3)
             "#,
         )
-        .bind(ids.iter().map(|id| id.to_string()).collect::<Vec<String>>())
+        .bind(ids.into_iter().map(|id| id).collect::<Vec<Uuid>>())
         .bind(a_type_name)
         .bind(b_type_name)
         .fetch_all(&pool)
@@ -947,7 +1049,7 @@ impl Adapter for PostgresAdapter {
         &self,
         a_type_name: &'static str,
         b_type_name: &'static str,
-        owner: Ulid,
+        owner: Uuid,
     ) -> Result<Option<ObjectRecord>, Error> {
         let pool = self.pool.clone();
         let row = sqlx::query(
@@ -957,7 +1059,7 @@ impl Adapter for PostgresAdapter {
             WHERE owner = $1 AND (type = $2 OR type = $3)
             "#,
         )
-        .bind(owner.to_string())
+        .bind(owner)
         .bind(a_type_name)
         .bind(b_type_name)
         .fetch_optional(&pool)
@@ -974,7 +1076,7 @@ impl Adapter for PostgresAdapter {
         &self,
         a_type_name: &'static str,
         b_type_name: &'static str,
-        owner: Ulid,
+        owner: Uuid,
     ) -> Result<Vec<ObjectRecord>, Error> {
         let pool = self.pool.clone();
         let rows = sqlx::query(
@@ -984,7 +1086,7 @@ impl Adapter for PostgresAdapter {
             WHERE owner = $1 AND (type = $2 OR type = $3)
             "#,
         )
-        .bind(owner.to_string())
+        .bind(owner)
         .bind(a_type_name)
         .bind(b_type_name)
         .fetch_all(&pool)
@@ -1005,8 +1107,8 @@ impl Adapter for PostgresAdapter {
             VALUES ($1, $2, $3, $4, $5)
             "#,
         )
-        .bind(record.from.to_string())
-        .bind(record.to.to_string())
+        .bind(record.from)
+        .bind(record.to)
         .bind(record.type_name)
         .bind(record.data)
         .bind(record.index_meta)
@@ -1020,8 +1122,8 @@ impl Adapter for PostgresAdapter {
     async fn update_edge(
         &self,
         record: EdgeRecord,
-        old_to: Ulid,
-        to: Option<Ulid>,
+        old_to: Uuid,
+        to: Option<Uuid>,
     ) -> Result<(), Error> {
         let pool = self.pool.clone();
         let _ = sqlx::query(
@@ -1031,10 +1133,10 @@ impl Adapter for PostgresAdapter {
         "#,
         )
         .bind(record.data)
-        .bind(to.unwrap_or(old_to).to_string())
-        .bind(record.from.to_string())
+        .bind(to.unwrap_or(old_to))
+        .bind(record.from)
         .bind(record.type_name)
-        .bind(old_to.to_string())
+        .bind(old_to)
         .execute(&pool)
         .await
         .map_err(|err| Error::Storage(err.to_string()))?;
@@ -1045,8 +1147,8 @@ impl Adapter for PostgresAdapter {
     async fn delete_edge(
         &self,
         type_name: &'static str,
-        from: Ulid,
-        to: Ulid,
+        from: Uuid,
+        to: Uuid,
     ) -> Result<(), Error> {
         let pool = self.pool.clone();
         let _ = sqlx::query(
@@ -1056,8 +1158,8 @@ impl Adapter for PostgresAdapter {
             "#,
         )
         .bind(type_name)
-        .bind(from.to_string())
-        .bind(to.to_string())
+        .bind(from)
+        .bind(to)
         .execute(&pool)
         .await
         .map_err(|err| Error::Storage(err.to_string()))?;
@@ -1065,7 +1167,7 @@ impl Adapter for PostgresAdapter {
         Ok(())
     }
 
-    async fn delete_object_edge(&self, type_name: &'static str, from: Ulid) -> Result<(), Error> {
+    async fn delete_object_edge(&self, type_name: &'static str, from: Uuid) -> Result<(), Error> {
         let pool = self.pool.clone();
         let _ = sqlx::query(
             r#"
@@ -1074,7 +1176,7 @@ impl Adapter for PostgresAdapter {
             "#,
         )
         .bind(type_name)
-        .bind(from.to_string())
+        .bind(from)
         .execute(&pool)
         .await
         .map_err(|err| Error::Storage(err.to_string()))?;
@@ -1085,7 +1187,7 @@ impl Adapter for PostgresAdapter {
     async fn query_edges(
         &self,
         type_name: &'static str,
-        owner: Ulid,
+        owner: Uuid,
         plan: EdgeQuery,
     ) -> Result<Vec<EdgeRecord>, Error> {
         let where_clause = Self::build_edge_query_conditions(&plan.filters, plan.cursor);
@@ -1105,9 +1207,9 @@ impl Adapter for PostgresAdapter {
             sql.push_str(&format!(" LIMIT {}", limit));
         }
 
-        let mut query = sqlx::query(&sql).bind(type_name).bind(owner.to_string());
+        let mut query = sqlx::query(&sql).bind(type_name).bind(owner);
         if let Some(cursor) = plan.cursor {
-            query = query.bind(cursor.last_id.to_string());
+            query = query.bind(cursor.last_id);
         }
 
         query = Self::query_bind_filters(query, &plan.filters);
@@ -1127,7 +1229,7 @@ impl Adapter for PostgresAdapter {
     async fn count_edges(
         &self,
         type_name: &'static str,
-        owner: Ulid,
+        owner: Uuid,
         plan: Option<EdgeQuery>,
     ) -> Result<u64, Error> {
         let pool = self.pool.clone();
@@ -1150,7 +1252,7 @@ impl Adapter for PostgresAdapter {
 
                 let mut query = sqlx::query_scalar::<_, i64>(&sql)
                     .bind(type_name)
-                    .bind(owner.to_string());
+                    .bind(owner);
 
                 query = Self::query_scalar_bind_filters(query, &plan.filters);
 
@@ -1166,7 +1268,7 @@ impl Adapter for PostgresAdapter {
                 let count: i64 =
                     sqlx::query_scalar("SELECT COUNT(*) FROM edges WHERE type = $1 AND from = $2")
                         .bind(type_name)
-                        .bind(owner.to_string())
+                        .bind(owner)
                         .fetch_one(&pool)
                         .await
                         .map_err(|err| Error::Storage(err.to_string()))?;
@@ -1360,7 +1462,7 @@ impl PostgresAdapter {
         }
     }
 
-    async fn get_asset_by_id(&self, id: Ulid) -> Result<Asset, MoneyError> {
+    async fn get_asset_by_id(&self, id: Uuid) -> Result<Asset, MoneyError> {
         let row = sqlx::query(
             r#"
             SELECT id, code, unit
@@ -1368,7 +1470,7 @@ impl PostgresAdapter {
             WHERE id = $1
             "#,
         )
-        .bind(id.to_string())
+        .bind(id)
         .fetch_optional(&self.pool)
         .await
         .map_err(|e| MoneyError::Storage(e.to_string()))?
@@ -1378,11 +1480,13 @@ impl PostgresAdapter {
     }
 
     fn row_to_value_object(&self, row: sqlx::postgres::PgRow) -> Result<ValueObject, MoneyError> {
-        let id = Ulid::from_string(&row.try_get::<String, _>("id").unwrap())
+        let id = row
+            .try_get::<Uuid, _>("id")
             .map_err(|e| MoneyError::Storage(e.to_string()))?;
-        let asset = Ulid::from_string(&row.try_get::<String, _>("asset").unwrap())
+        let asset = Uuid::parse_str(&row.try_get::<String, _>("asset").unwrap())
             .map_err(|e| MoneyError::Storage(e.to_string()))?;
-        let owner = Ulid::from_string(&row.try_get::<String, _>("owner").unwrap())
+        let owner = row
+            .try_get::<Uuid, _>("owner")
             .map_err(|e| MoneyError::Storage(e.to_string()))?;
         let amount: i64 = row.try_get("amount").unwrap();
         let state_str: String = row.try_get("state").unwrap();
@@ -1390,7 +1494,7 @@ impl PostgresAdapter {
         let reserved_for = row
             .try_get::<Option<String>, _>("reserved_for")
             .unwrap()
-            .map(|s| Ulid::from_string(&s))
+            .map(|s| Uuid::parse_str(&s))
             .transpose()
             .map_err(|e| MoneyError::Storage(e.to_string()))?;
         let created_at = row.try_get("created_at").unwrap();
@@ -1407,21 +1511,16 @@ impl PostgresAdapter {
     }
 
     fn row_to_transaction(&self, row: sqlx::postgres::PgRow) -> Result<Transaction, MoneyError> {
-        let id = Ulid::from_string(&row.try_get::<String, _>("id").unwrap())
+        let id = row
+            .try_get::<Uuid, _>("id")
             .map_err(|e| MoneyError::Storage(e.to_string()))?;
-        let asset = Ulid::from_string(&row.try_get::<String, _>("asset").unwrap())
+        let asset = Uuid::parse_str(&row.try_get::<String, _>("asset").unwrap())
             .map_err(|e| MoneyError::Storage(e.to_string()))?;
         let sender = row
-            .try_get::<Option<String>, _>("sender")
-            .unwrap()
-            .map(|s| Ulid::from_string(&s))
-            .transpose()
+            .try_get::<Option<Uuid>, _>("sender")
             .map_err(|e| MoneyError::Storage(e.to_string()))?;
         let receiver = row
-            .try_get::<Option<String>, _>("receiver")
-            .unwrap()
-            .map(|s| Ulid::from_string(&s))
-            .transpose()
+            .try_get::<Option<Uuid>, _>("receiver")
             .map_err(|e| MoneyError::Storage(e.to_string()))?;
         let burned_amount: i64 = row.try_get("burned_amount").unwrap();
         let minted_amount: i64 = row.try_get("minted_amount").unwrap();
@@ -1441,7 +1540,8 @@ impl PostgresAdapter {
     }
 
     fn row_to_asset(&self, row: sqlx::postgres::PgRow) -> Result<Asset, MoneyError> {
-        let id = Ulid::from_string(&row.try_get::<String, _>("id").unwrap())
+        let id = row
+            .try_get::<Uuid, _>("id")
             .map_err(|e| MoneyError::Storage(e.to_string()))?;
         let code: String = row.try_get("code").unwrap();
         let unit: i64 = row.try_get("unit").unwrap();
@@ -1450,7 +1550,7 @@ impl PostgresAdapter {
     }
 
     /// Check and handle idempotency key
-    async fn check_idempotency(&self, key: &str) -> Result<Option<Ulid>, MoneyError> {
+    async fn check_idempotency(&self, key: &str) -> Result<Option<Uuid>, MoneyError> {
         let result = sqlx::query(
             r#"
             SELECT transaction_id FROM idempotency_keys WHERE key = $1
@@ -1463,7 +1563,7 @@ impl PostgresAdapter {
 
         match result {
             Some(row) => {
-                let tx_id = Ulid::from_string(&row.try_get::<String, _>("transaction_id").unwrap())
+                let tx_id = Uuid::parse_str(&row.try_get::<String, _>("transaction_id").unwrap())
                     .map_err(|e| MoneyError::Storage(e.to_string()))?;
                 Ok(Some(tx_id))
             }
@@ -1472,7 +1572,7 @@ impl PostgresAdapter {
     }
 
     /// Store idempotency key
-    async fn store_idempotency(&self, key: &str, tx_id: Ulid) -> Result<(), MoneyError> {
+    async fn store_idempotency(&self, key: &str, tx_id: Uuid) -> Result<(), MoneyError> {
         sqlx::query(
             r#"
             INSERT INTO idempotency_keys (key, transaction_id)
@@ -1481,7 +1581,7 @@ impl PostgresAdapter {
             "#,
         )
         .bind(key)
-        .bind(tx_id.to_string())
+        .bind(tx_id)
         .execute(&self.pool)
         .await
         .map_err(|e| MoneyError::Storage(e.to_string()))?;
@@ -1490,506 +1590,506 @@ impl PostgresAdapter {
     }
 }
 
-#[cfg(feature = "ledger")]
-#[async_trait::async_trait]
-impl LedgerAdapter for PostgresAdapter {
-    async fn mint_value_objects(
-        &self,
-        asset: Ulid,
-        owner: Ulid,
-        amount: i64,
-        metadata: String,
-    ) -> Result<Vec<ValueObject>, MoneyError> {
-        if amount <= 0 {
-            return Err(MoneyError::InvalidAmount);
-        }
-
-        // Get asset to determine unit size
-        let asset = self.get_asset_by_id(asset).await?;
-
-        let effective_chunk_size = if amount > asset.unit * MAX_FRAGMENTS {
-            // Calculate minimum chunk size to stay within MAX_FRAGMENTS
-            (amount + MAX_FRAGMENTS - 1) / MAX_FRAGMENTS // Ceiling division
-        } else {
-            asset.unit
-        };
-
-        // Fragment the amount
-        let mut value_objects = Vec::new();
-        let mut remaining = amount;
-
-        while remaining > 0 {
-            let chunk = remaining.min(effective_chunk_size);
-
-            // Determine if this is a reserved mint
-            let vo = if metadata.starts_with("reserve:") {
-                // For reserved mints, the metadata should contain the authority
-                // This is a simplified version - in production you'd parse this properly
-                ValueObject::new_alive(asset.id, owner, chunk)
-            } else {
-                ValueObject::new_alive(asset.id, owner, chunk)
-            };
-
-            // Insert ValueObject
-            sqlx::query(
-                r#"
-                INSERT INTO value_objects (id, asset, owner, amount, state, reserved_for, created_at)
-                VALUES ($1, $2, $3, $4, $5, $6, $7)
-                "#,
-            )
-            .bind(vo.id.to_string())
-            .bind(vo.asset.to_string())
-            .bind(vo.owner.to_string())
-            .bind(vo.amount)
-            .bind(Self::state_to_string(vo.state))
-            .bind(vo.reserved_for.map(|id| id.to_string()))
-            .bind(vo.created_at)
-            .execute(&self.pool)
-            .await
-            .map_err(|e| MoneyError::Storage(e.to_string()))?;
-
-            value_objects.push(vo);
-            remaining -= chunk;
-        }
-
-        Ok(value_objects)
-    }
-
-    async fn burn_value_objects(&self, ids: Vec<Ulid>, metadata: String) -> Result<(), MoneyError> {
-        if ids.is_empty() {
-            return Ok(());
-        }
-
-        let id_strings: Vec<String> = ids.iter().map(|id| id.to_string()).collect();
-
-        let result = sqlx::query(
-            r#"
-            UPDATE value_objects
-            SET state = 'burned', burned_at = NOW()
-            WHERE id = ANY($1) AND state != 'burned'
-            "#,
-        )
-        .bind(&id_strings)
-        .execute(&self.pool)
-        .await
-        .map_err(|e| MoneyError::Storage(e.to_string()))?;
-
-        if result.rows_affected() == 0 {
-            return Err(MoneyError::Storage(
-                "No value objects were burned".to_string(),
-            ));
-        }
-
-        Ok(())
-    }
-
-    async fn select_for_burn(
-        &self,
-        asset: Ulid,
-        owner: Ulid,
-        amount: i64,
-    ) -> Result<Vec<ValueObject>, MoneyError> {
-        if amount <= 0 {
-            return Err(MoneyError::InvalidAmount);
-        }
-
-        let rows = sqlx::query(
-            r#"
-            SELECT id, asset, owner, amount, state, reserved_for, created_at
-            FROM value_objects
-            WHERE asset = $1
-              AND owner = $2
-              AND state = 'alive'
-            ORDER BY created_at ASC
-            FOR UPDATE SKIP LOCKED
-            "#,
-        )
-        .bind(asset.to_string())
-        .bind(owner.to_string())
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|e| MoneyError::Storage(e.to_string()))?;
-
-        let mut selected = Vec::new();
-        let mut total = 0i64;
-
-        for row in rows {
-            let vo = self.row_to_value_object(row)?;
-            total += vo.amount;
-            selected.push(vo);
-
-            if total >= amount {
-                break;
-            }
-        }
-
-        if total < amount {
-            return Err(MoneyError::InsufficientFunds);
-        }
-
-        Ok(selected)
-    }
-
-    async fn select_reserved(
-        &self,
-        asset: Ulid,
-        owner: Ulid,
-        authority: Ulid,
-        amount: i64,
-    ) -> Result<Vec<ValueObject>, MoneyError> {
-        if amount <= 0 {
-            return Err(MoneyError::InvalidAmount);
-        }
-
-        let rows = sqlx::query(
-            r#"
-            SELECT id, asset, owner, amount, state, reserved_for, created_at
-            FROM value_objects
-            WHERE asset = $1
-              AND owner = $2
-              AND state = 'reserved'
-              AND reserved_for = $3
-            ORDER BY created_at ASC
-            FOR UPDATE SKIP LOCKED
-            "#,
-        )
-        .bind(asset.to_string())
-        .bind(owner.to_string())
-        .bind(authority.to_string())
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|e| MoneyError::Storage(e.to_string()))?;
-
-        let mut selected = Vec::new();
-        let mut total = 0i64;
-
-        for row in rows {
-            let vo = self.row_to_value_object(row)?;
-            total += vo.amount;
-            selected.push(vo);
-
-            if total >= amount {
-                break;
-            }
-        }
-
-        if total < amount {
-            return Err(MoneyError::ReservationNotFound);
-        }
-
-        Ok(selected)
-    }
-
-    async fn change_state(
-        &self,
-        ids: Vec<Ulid>,
-        new_state: ValueObjectState,
-    ) -> Result<(), MoneyError> {
-        if ids.is_empty() {
-            return Ok(());
-        }
-
-        let id_strings: Vec<String> = ids.iter().map(|id| id.to_string()).collect();
-
-        // Validate state transitions
-        let current_states = sqlx::query(
-            r#"
-            SELECT id, state FROM value_objects WHERE id = ANY($1)
-            "#,
-        )
-        .bind(&id_strings)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|e| MoneyError::Storage(e.to_string()))?;
-
-        for row in current_states {
-            let state_str: String = row.try_get("state").unwrap();
-            let current = Self::string_to_state(&state_str)?;
-
-            if !current.can_transition_to(new_state) {
-                return Err(MoneyError::InvalidAuthority);
-            }
-        }
-
-        sqlx::query(
-            r#"
-            UPDATE value_objects
-            SET state = $1
-            WHERE id = ANY($2)
-            "#,
-        )
-        .bind(Self::state_to_string(new_state))
-        .bind(&id_strings)
-        .execute(&self.pool)
-        .await
-        .map_err(|e| MoneyError::Storage(e.to_string()))?;
-
-        Ok(())
-    }
-
-    async fn get_balance(&self, asset: Ulid, owner: Ulid) -> Result<Balance, MoneyError> {
-        let row = sqlx::query(
-            r#"
-            SELECT
-                COALESCE(SUM(CASE WHEN state = 'alive' THEN amount ELSE 0 END), 0) as available,
-                COALESCE(SUM(CASE WHEN state = 'reserved' THEN amount ELSE 0 END), 0) as reserved
-            FROM value_objects
-            WHERE asset = $1 AND owner = $2
-            "#,
-        )
-        .bind(asset.to_string())
-        .bind(owner.to_string())
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(|e| MoneyError::Storage(e.to_string()))?;
-
-        let (available, reserved): (i64, i64) = row
-            .map(|row| {
-                (
-                    row.try_get("available").unwrap_or(0),
-                    row.try_get("reserved").unwrap_or(0),
-                )
-            })
-            .unwrap_or_default();
-
-        Ok(Balance::from_value_objects(
-            owner, asset, available, reserved,
-        ))
-    }
-
-    async fn record_transaction(&self, transaction: Transaction) -> Result<Ulid, MoneyError> {
-        sqlx::query(
-            r#"
-            INSERT INTO transactions (id, asset, sender, receiver, burned_amount, minted_amount, metadata, created_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-            "#,
-        )
-        .bind(transaction.id.to_string())
-        .bind(transaction.asset.to_string())
-        .bind(transaction.sender.map(|id| id.to_string()))
-        .bind(transaction.receiver.map(|id| id.to_string()))
-        .bind(transaction.burned_amount)
-        .bind(transaction.minted_amount)
-        .bind(&transaction.metadata)
-        .bind(transaction.created_at)
-        .execute(&self.pool)
-        .await
-        .map_err(|e| MoneyError::Storage(e.to_string()))?;
-
-        Ok(transaction.id)
-    }
-
-    async fn get_transaction(&self, tx_id: Ulid) -> Result<Transaction, MoneyError> {
-        let row = sqlx::query(
-            r#"
-            SELECT id, asset, sender, receiver, burned_amount, minted_amount, metadata, created_at
-            FROM transactions
-            WHERE id = $1
-            "#,
-        )
-        .bind(tx_id.to_string())
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(|e| MoneyError::Storage(e.to_string()))?
-        .ok_or(MoneyError::TransactionNotFound)?;
-
-        Ok(self.row_to_transaction(row)?)
-    }
-
-    async fn get_asset(&self, code: &str) -> Result<Asset, MoneyError> {
-        let row = sqlx::query(
-            r#"
-            SELECT id, code, unit
-            FROM assets
-            WHERE code = $1
-            "#,
-        )
-        .bind(code)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(|e| MoneyError::Storage(e.to_string()))?
-        .ok_or_else(|| MoneyError::AssetNotFound(code.to_string()))?;
-
-        Ok(self.row_to_asset(row)?)
-    }
-
-    async fn create_asset(&self, asset: Asset) -> Result<(), MoneyError> {
-        sqlx::query(
-            r#"
-            INSERT INTO assets (id, code, unit, created_at)
-            VALUES ($1, $2, $3, NOW())
-            ON CONFLICT (code) DO NOTHING
-            "#,
-        )
-        .bind(asset.id.to_string())
-        .bind(&asset.code)
-        .bind(asset.unit)
-        .execute(&self.pool)
-        .await
-        .map_err(|e| MoneyError::Storage(e.to_string()))?;
-
-        Ok(())
-    }
-
-    async fn begin_transaction(&self) -> Result<(), MoneyError> {
-        // For now, we'll rely on connection-level transactions
-        // In a more advanced implementation, you'd manage explicit transactions
-        Ok(())
-    }
-
-    async fn commit_transaction(&self) -> Result<(), MoneyError> {
-        Ok(())
-    }
-
-    async fn rollback_transaction(&self) -> Result<(), MoneyError> {
-        Ok(())
-    }
-}
-
-#[cfg(feature = "ledger")]
-impl PostgresAdapter {
-    /// Mint with idempotency key support
-    pub async fn mint_idempotent(
-        &self,
-        idempotency_key: &str,
-        asset: Ulid,
-        owner: Ulid,
-        amount: i64,
-        metadata: String,
-    ) -> Result<Ulid, MoneyError> {
-        // Check if this key was already processed
-        if let Some(existing_tx_id) = self.check_idempotency(idempotency_key).await? {
-            return Ok(existing_tx_id);
-        }
-
-        // Perform the mint
-        let _vos = self
-            .mint_value_objects(asset, owner, amount, metadata.clone())
-            .await?;
-
-        // Record transaction
-        let transaction = Transaction::new(asset, None, Some(owner), 0, amount, metadata);
-        let tx_id = self.record_transaction(transaction).await?;
-
-        // Store idempotency key
-        self.store_idempotency(idempotency_key, tx_id).await?;
-
-        Ok(tx_id)
-    }
-
-    /// Revert a transaction
-    pub async fn revert_transaction(
-        &self,
-        tx_id: Ulid,
-        reason: String,
-    ) -> Result<Ulid, MoneyError> {
-        // Get original transaction
-        let original = self.get_transaction(tx_id).await?;
-
-        // Create compensating transaction (reverse the flow)
-        let compensating = Transaction::new(
-            original.asset,
-            original.receiver,      // Reverse: receiver becomes sender
-            original.sender,        // Reverse: sender becomes receiver
-            original.minted_amount, // Burn what was minted
-            original.burned_amount, // Mint what was burned
-            format!("revert:{}:{}", tx_id, reason),
-        );
-
-        // If there was a receiver, burn from them
-        if let Some(receiver) = original.receiver {
-            let to_burn = self
-                .select_for_burn(original.asset, receiver, original.minted_amount)
-                .await?;
-            let burn_ids: Vec<Ulid> = to_burn.iter().map(|vo| vo.id).collect();
-            self.burn_value_objects(burn_ids, format!("revert:{}", tx_id))
-                .await?;
-        }
-
-        // If there was a sender, mint back to them
-        if let Some(sender) = original.sender {
-            self.mint_value_objects(
-                original.asset,
-                sender,
-                original.burned_amount,
-                format!("revert:{}", tx_id),
-            )
-            .await?;
-        }
-
-        // Record the compensating transaction
-        let revert_tx_id = self.record_transaction(compensating).await?;
-
-        // Mark original as reverted
-        sqlx::query(
-            r#"
-            UPDATE transactions
-            SET reverted_at = NOW(), reverted_by = $2
-            WHERE id = $1
-            "#,
-        )
-        .bind(tx_id.to_string())
-        .bind(revert_tx_id.to_string())
-        .execute(&self.pool)
-        .await
-        .map_err(|e| MoneyError::Storage(e.to_string()))?;
-
-        Ok(revert_tx_id)
-    }
-
-    /// Get transaction history for an owner
-    pub async fn get_transaction_history(
-        &self,
-        owner: Ulid,
-        limit: i64,
-    ) -> Result<Vec<Transaction>, MoneyError> {
-        let rows = sqlx::query(
-            r#"
-            SELECT id, asset, sender, receiver, burned_amount, minted_amount, metadata, created_at
-            FROM transactions
-            WHERE sender = $1 OR receiver = $1
-            ORDER BY created_at DESC
-            LIMIT $2
-            "#,
-        )
-        .bind(owner.to_string())
-        .bind(limit)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|e| MoneyError::Storage(e.to_string()))?;
-
-        rows.into_iter()
-            .map(|row| self.row_to_transaction(row))
-            .collect()
-    }
-
-    /// Get all assets
-    pub async fn list_assets(&self) -> Result<Vec<Asset>, MoneyError> {
-        let rows = sqlx::query(
-            r#"
-            SELECT id, code, unit FROM assets ORDER BY code
-            "#,
-        )
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|e| MoneyError::Storage(e.to_string()))?;
-
-        rows.into_iter().map(|row| self.row_to_asset(row)).collect()
-    }
-
-    /// Cleanup old idempotency keys (run periodically)
-    pub async fn cleanup_idempotency_keys(&self, older_than_days: i64) -> Result<u64, MoneyError> {
-        let result = sqlx::query(
-            r#"
-            DELETE FROM idempotency_keys
-            WHERE created_at < NOW() - INTERVAL '1 day' * $1
-            "#,
-        )
-        .bind(older_than_days)
-        .execute(&self.pool)
-        .await
-        .map_err(|e| MoneyError::Storage(e.to_string()))?;
-
-        Ok(result.rows_affected())
-    }
-}
+// #[cfg(feature = "ledger")]
+// #[async_trait::async_trait]
+// impl LedgerAdapter for PostgresAdapter {
+//     async fn mint_value_objects(
+//         &self,
+//         asset: Uuid,
+//         owner: Uuid,
+//         amount: i64,
+//         metadata: String,
+//     ) -> Result<Vec<ValueObject>, MoneyError> {
+//         if amount <= 0 {
+//             return Err(MoneyError::InvalidAmount);
+//         }
+
+//         // Get asset to determine unit size
+//         let asset = self.get_asset_by_id(asset).await?;
+
+//         let effective_chunk_size = if amount > asset.unit * MAX_FRAGMENTS {
+//             // Calculate minimum chunk size to stay within MAX_FRAGMENTS
+//             (amount + MAX_FRAGMENTS - 1) / MAX_FRAGMENTS // Ceiling division
+//         } else {
+//             asset.unit
+//         };
+
+//         // Fragment the amount
+//         let mut value_objects = Vec::new();
+//         let mut remaining = amount;
+
+//         while remaining > 0 {
+//             let chunk = remaining.min(effective_chunk_size);
+
+//             // Determine if this is a reserved mint
+//             let vo = if metadata.starts_with("reserve:") {
+//                 // For reserved mints, the metadata should contain the authority
+//                 // This is a simplified version - in production you'd parse this properly
+//                 ValueObject::new_alive(asset.id, owner, chunk)
+//             } else {
+//                 ValueObject::new_alive(asset.id, owner, chunk)
+//             };
+
+//             // Insert ValueObject
+//             sqlx::query(
+//                 r#"
+//                 INSERT INTO value_objects (id, asset, owner, amount, state, reserved_for, created_at)
+//                 VALUES ($1, $2, $3, $4, $5, $6, $7)
+//                 "#,
+//             )
+//             .bind(vo.id)
+//             .bind(vo.asset.to_string())
+//             .bind(vo.owner)
+//             .bind(vo.amount)
+//             .bind(Self::state_to_string(vo.state))
+//             .bind(vo.reserved_for.map(|id| id))
+//             .bind(vo.created_at)
+//             .execute(&self.pool)
+//             .await
+//             .map_err(|e| MoneyError::Storage(e.to_string()))?;
+
+//             value_objects.push(vo);
+//             remaining -= chunk;
+//         }
+
+//         Ok(value_objects)
+//     }
+
+//     async fn burn_value_objects(&self, ids: Vec<Uuid>, metadata: String) -> Result<(), MoneyError> {
+//         if ids.is_empty() {
+//             return Ok(());
+//         }
+
+//         let ids: Vec<Uuid> = ids.into_iter().map(|id| id).collect();
+
+//         let result = sqlx::query(
+//             r#"
+//             UPDATE value_objects
+//             SET state = 'burned', burned_at = NOW()
+//             WHERE id = ANY($1) AND state != 'burned'
+//             "#,
+//         )
+//         .bind(ids)
+//         .execute(&self.pool)
+//         .await
+//         .map_err(|e| MoneyError::Storage(e.to_string()))?;
+
+//         if result.rows_affected() == 0 {
+//             return Err(MoneyError::Storage(
+//                 "No value objects were burned".to_string(),
+//             ));
+//         }
+
+//         Ok(())
+//     }
+
+//     async fn select_for_burn(
+//         &self,
+//         asset: Uuid,
+//         owner: Uuid,
+//         amount: i64,
+//     ) -> Result<Vec<ValueObject>, MoneyError> {
+//         if amount <= 0 {
+//             return Err(MoneyError::InvalidAmount);
+//         }
+
+//         let rows = sqlx::query(
+//             r#"
+//             SELECT id, asset, owner, amount, state, reserved_for, created_at
+//             FROM value_objects
+//             WHERE asset = $1
+//               AND owner = $2
+//               AND state = 'alive'
+//             ORDER BY created_at ASC
+//             FOR UPDATE SKIP LOCKED
+//             "#,
+//         )
+//         .bind(asset.to_string())
+//         .bind(owner)
+//         .fetch_all(&self.pool)
+//         .await
+//         .map_err(|e| MoneyError::Storage(e.to_string()))?;
+
+//         let mut selected = Vec::new();
+//         let mut total = 0i64;
+
+//         for row in rows {
+//             let vo = self.row_to_value_object(row)?;
+//             total += vo.amount;
+//             selected.push(vo);
+
+//             if total >= amount {
+//                 break;
+//             }
+//         }
+
+//         if total < amount {
+//             return Err(MoneyError::InsufficientFunds);
+//         }
+
+//         Ok(selected)
+//     }
+
+//     async fn select_reserved(
+//         &self,
+//         asset: Uuid,
+//         owner: Uuid,
+//         authority: Uuid,
+//         amount: i64,
+//     ) -> Result<Vec<ValueObject>, MoneyError> {
+//         if amount <= 0 {
+//             return Err(MoneyError::InvalidAmount);
+//         }
+
+//         let rows = sqlx::query(
+//             r#"
+//             SELECT id, asset, owner, amount, state, reserved_for, created_at
+//             FROM value_objects
+//             WHERE asset = $1
+//               AND owner = $2
+//               AND state = 'reserved'
+//               AND reserved_for = $3
+//             ORDER BY created_at ASC
+//             FOR UPDATE SKIP LOCKED
+//             "#,
+//         )
+//         .bind(asset.to_string())
+//         .bind(owner)
+//         .bind(authority.to_string())
+//         .fetch_all(&self.pool)
+//         .await
+//         .map_err(|e| MoneyError::Storage(e.to_string()))?;
+
+//         let mut selected = Vec::new();
+//         let mut total = 0i64;
+
+//         for row in rows {
+//             let vo = self.row_to_value_object(row)?;
+//             total += vo.amount;
+//             selected.push(vo);
+
+//             if total >= amount {
+//                 break;
+//             }
+//         }
+
+//         if total < amount {
+//             return Err(MoneyError::ReservationNotFound);
+//         }
+
+//         Ok(selected)
+//     }
+
+//     async fn change_state(
+//         &self,
+//         ids: Vec<Uuid>,
+//         new_state: ValueObjectState,
+//     ) -> Result<(), MoneyError> {
+//         if ids.is_empty() {
+//             return Ok(());
+//         }
+
+//         let ids: Vec<Uuid> = ids.into_iter().map(|id| id).collect();
+
+//         // Validate state transitions
+//         let current_states = sqlx::query(
+//             r#"
+//             SELECT id, state FROM value_objects WHERE id = ANY($1)
+//             "#,
+//         )
+//         .bind(&ids)
+//         .fetch_all(&self.pool)
+//         .await
+//         .map_err(|e| MoneyError::Storage(e.to_string()))?;
+
+//         for row in current_states {
+//             let state_str: String = row.try_get("state").unwrap();
+//             let current = Self::string_to_state(&state_str)?;
+
+//             if !current.can_transition_to(new_state) {
+//                 return Err(MoneyError::InvalidAuthority);
+//             }
+//         }
+
+//         sqlx::query(
+//             r#"
+//             UPDATE value_objects
+//             SET state = $1
+//             WHERE id = ANY($2)
+//             "#,
+//         )
+//         .bind(Self::state_to_string(new_state))
+//         .bind(ids)
+//         .execute(&self.pool)
+//         .await
+//         .map_err(|e| MoneyError::Storage(e.to_string()))?;
+
+//         Ok(())
+//     }
+
+//     async fn get_balance(&self, asset: Uuid, owner: Uuid) -> Result<Balance, MoneyError> {
+//         let row = sqlx::query(
+//             r#"
+//             SELECT
+//                 COALESCE(SUM(CASE WHEN state = 'alive' THEN amount ELSE 0 END), 0) as available,
+//                 COALESCE(SUM(CASE WHEN state = 'reserved' THEN amount ELSE 0 END), 0) as reserved
+//             FROM value_objects
+//             WHERE asset = $1 AND owner = $2
+//             "#,
+//         )
+//         .bind(asset.to_string())
+//         .bind(owner)
+//         .fetch_optional(&self.pool)
+//         .await
+//         .map_err(|e| MoneyError::Storage(e.to_string()))?;
+
+//         let (available, reserved): (i64, i64) = row
+//             .map(|row| {
+//                 (
+//                     row.try_get("available").unwrap_or(0),
+//                     row.try_get("reserved").unwrap_or(0),
+//                 )
+//             })
+//             .unwrap_or_default();
+
+//         Ok(Balance::from_value_objects(
+//             owner, asset, available, reserved,
+//         ))
+//     }
+
+//     async fn record_transaction(&self, transaction: Transaction) -> Result<Uuid, MoneyError> {
+//         sqlx::query(
+//             r#"
+//             INSERT INTO transactions (id, asset, sender, receiver, burned_amount, minted_amount, metadata, created_at)
+//             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+//             "#,
+//         )
+//         .bind(transaction.id)
+//         .bind(transaction.asset.to_string())
+//         .bind(transaction.sender.map(|id| id))
+//         .bind(transaction.receiver.map(|id| id))
+//         .bind(transaction.burned_amount)
+//         .bind(transaction.minted_amount)
+//         .bind(&transaction.metadata)
+//         .bind(transaction.created_at)
+//         .execute(&self.pool)
+//         .await
+//         .map_err(|e| MoneyError::Storage(e.to_string()))?;
+
+//         Ok(transaction.id)
+//     }
+
+//     async fn get_transaction(&self, tx_id: Uuid) -> Result<Transaction, MoneyError> {
+//         let row = sqlx::query(
+//             r#"
+//             SELECT id, asset, sender, receiver, burned_amount, minted_amount, metadata, created_at
+//             FROM transactions
+//             WHERE id = $1
+//             "#,
+//         )
+//         .bind(tx_id)
+//         .fetch_optional(&self.pool)
+//         .await
+//         .map_err(|e| MoneyError::Storage(e.to_string()))?
+//         .ok_or(MoneyError::TransactionNotFound)?;
+
+//         Ok(self.row_to_transaction(row)?)
+//     }
+
+//     async fn get_asset(&self, code: &str) -> Result<Asset, MoneyError> {
+//         let row = sqlx::query(
+//             r#"
+//             SELECT id, code, unit
+//             FROM assets
+//             WHERE code = $1
+//             "#,
+//         )
+//         .bind(code)
+//         .fetch_optional(&self.pool)
+//         .await
+//         .map_err(|e| MoneyError::Storage(e.to_string()))?
+//         .ok_or_else(|| MoneyError::AssetNotFound(code.to_string()))?;
+
+//         Ok(self.row_to_asset(row)?)
+//     }
+
+//     async fn create_asset(&self, asset: Asset) -> Result<(), MoneyError> {
+//         sqlx::query(
+//             r#"
+//             INSERT INTO assets (id, code, unit, created_at)
+//             VALUES ($1, $2, $3, NOW())
+//             ON CONFLICT (code) DO NOTHING
+//             "#,
+//         )
+//         .bind(asset.id)
+//         .bind(&asset.code)
+//         .bind(asset.unit)
+//         .execute(&self.pool)
+//         .await
+//         .map_err(|e| MoneyError::Storage(e.to_string()))?;
+
+//         Ok(())
+//     }
+
+//     async fn begin_transaction(&self) -> Result<(), MoneyError> {
+//         // For now, we'll rely on connection-level transactions
+//         // In a more advanced implementation, you'd manage explicit transactions
+//         Ok(())
+//     }
+
+//     async fn commit_transaction(&self) -> Result<(), MoneyError> {
+//         Ok(())
+//     }
+
+//     async fn rollback_transaction(&self) -> Result<(), MoneyError> {
+//         Ok(())
+//     }
+// }
+
+// #[cfg(feature = "ledger")]
+// impl PostgresAdapter {
+//     /// Mint with idempotency key support
+//     pub async fn mint_idempotent(
+//         &self,
+//         idempotency_key: &str,
+//         asset: Uuid,
+//         owner: Uuid,
+//         amount: i64,
+//         metadata: String,
+//     ) -> Result<Uuid, MoneyError> {
+//         // Check if this key was already processed
+//         if let Some(existing_tx_id) = self.check_idempotency(idempotency_key).await? {
+//             return Ok(existing_tx_id);
+//         }
+
+//         // Perform the mint
+//         let _vos = self
+//             .mint_value_objects(asset, owner, amount, metadata.clone())
+//             .await?;
+
+//         // Record transaction
+//         let transaction = Transaction::new(asset, None, Some(owner), 0, amount, metadata);
+//         let tx_id = self.record_transaction(transaction).await?;
+
+//         // Store idempotency key
+//         self.store_idempotency(idempotency_key, tx_id).await?;
+
+//         Ok(tx_id)
+//     }
+
+//     /// Revert a transaction
+//     pub async fn revert_transaction(
+//         &self,
+//         tx_id: Uuid,
+//         reason: String,
+//     ) -> Result<Uuid, MoneyError> {
+//         // Get original transaction
+//         let original = self.get_transaction(tx_id).await?;
+
+//         // Create compensating transaction (reverse the flow)
+//         let compensating = Transaction::new(
+//             original.asset,
+//             original.receiver,      // Reverse: receiver becomes sender
+//             original.sender,        // Reverse: sender becomes receiver
+//             original.minted_amount, // Burn what was minted
+//             original.burned_amount, // Mint what was burned
+//             format!("revert:{}:{}", tx_id, reason),
+//         );
+
+//         // If there was a receiver, burn from them
+//         if let Some(receiver) = original.receiver {
+//             let to_burn = self
+//                 .select_for_burn(original.asset, receiver, original.minted_amount)
+//                 .await?;
+//             let burn_ids: Vec<Uuid> = to_burn.iter().map(|vo| vo.id).collect();
+//             self.burn_value_objects(burn_ids, format!("revert:{}", tx_id))
+//                 .await?;
+//         }
+
+//         // If there was a sender, mint back to them
+//         if let Some(sender) = original.sender {
+//             self.mint_value_objects(
+//                 original.asset,
+//                 sender,
+//                 original.burned_amount,
+//                 format!("revert:{}", tx_id),
+//             )
+//             .await?;
+//         }
+
+//         // Record the compensating transaction
+//         let revert_tx_id = self.record_transaction(compensating).await?;
+
+//         // Mark original as reverted
+//         sqlx::query(
+//             r#"
+//             UPDATE transactions
+//             SET reverted_at = NOW(), reverted_by = $2
+//             WHERE id = $1
+//             "#,
+//         )
+//         .bind(tx_id)
+//         .bind(revert_tx_id)
+//         .execute(&self.pool)
+//         .await
+//         .map_err(|e| MoneyError::Storage(e.to_string()))?;
+
+//         Ok(revert_tx_id)
+//     }
+
+//     /// Get transaction history for an owner
+//     pub async fn get_transaction_history(
+//         &self,
+//         owner: Uuid,
+//         limit: i64,
+//     ) -> Result<Vec<Transaction>, MoneyError> {
+//         let rows = sqlx::query(
+//             r#"
+//             SELECT id, asset, sender, receiver, burned_amount, minted_amount, metadata, created_at
+//             FROM transactions
+//             WHERE sender = $1 OR receiver = $1
+//             ORDER BY created_at DESC
+//             LIMIT $2
+//             "#,
+//         )
+//         .bind(owner)
+//         .bind(limit)
+//         .fetch_all(&self.pool)
+//         .await
+//         .map_err(|e| MoneyError::Storage(e.to_string()))?;
+
+//         rows.into_iter()
+//             .map(|row| self.row_to_transaction(row))
+//             .collect()
+//     }
+
+//     /// Get all assets
+//     pub async fn list_assets(&self) -> Result<Vec<Asset>, MoneyError> {
+//         let rows = sqlx::query(
+//             r#"
+//             SELECT id, code, unit FROM assets ORDER BY code
+//             "#,
+//         )
+//         .fetch_all(&self.pool)
+//         .await
+//         .map_err(|e| MoneyError::Storage(e.to_string()))?;
+
+//         rows.into_iter().map(|row| self.row_to_asset(row)).collect()
+//     }
+
+//     /// Cleanup old idempotency keys (run periodically)
+//     pub async fn cleanup_idempotency_keys(&self, older_than_days: i64) -> Result<u64, MoneyError> {
+//         let result = sqlx::query(
+//             r#"
+//             DELETE FROM idempotency_keys
+//             WHERE created_at < NOW() - INTERVAL '1 day' * $1
+//             "#,
+//         )
+//         .bind(older_than_days)
+//         .execute(&self.pool)
+//         .await
+//         .map_err(|e| MoneyError::Storage(e.to_string()))?;
+
+//         Ok(result.rows_affected())
+//     }
+// }

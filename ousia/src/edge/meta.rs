@@ -1,26 +1,26 @@
 use serde::{Deserialize, Serialize};
-use ulid::Ulid;
+use uuid::Uuid;
 
 use crate::edge::EdgeMetaTrait;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct EdgeMeta {
-    pub from: Ulid,
-    pub to: Ulid,
+    pub from: Uuid,
+    pub to: Uuid,
 }
 
 impl EdgeMeta {
-    pub fn new(from: Ulid, to: Ulid) -> Self {
+    pub fn new(from: Uuid, to: Uuid) -> Self {
         Self { from, to }
     }
 }
 
 impl EdgeMetaTrait for EdgeMeta {
-    fn from(&self) -> Ulid {
+    fn from(&self) -> Uuid {
         self.from
     }
 
-    fn to(&self) -> Ulid {
+    fn to(&self) -> Uuid {
         self.to
     }
 }

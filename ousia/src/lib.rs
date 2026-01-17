@@ -19,7 +19,7 @@ pub use crate::object::*;
 use crate::query::QueryFilter;
 use chrono::Utc;
 pub use query::IndexQuery;
-use ulid::Ulid;
+use uuid::Uuid;
 
 #[cfg(feature = "derive")]
 pub use ousia_derive::*;
@@ -59,7 +59,7 @@ impl Engine {
     }
 
     /// Fetch an object by ID
-    pub async fn fetch_object<T: Object>(&self, id: Ulid) -> Result<Option<T>, Error> {
+    pub async fn fetch_object<T: Object>(&self, id: Uuid) -> Result<Option<T>, Error> {
         let val = self.inner.adapter.fetch_object(id).await?;
         match val {
             Some(record) => record.to_object().map(Some),
@@ -68,7 +68,7 @@ impl Engine {
     }
 
     /// Fetch multiple objects by IDs
-    pub async fn fetch_objects<T: Object>(&self, ids: Vec<Ulid>) -> Result<Vec<T>, Error> {
+    pub async fn fetch_objects<T: Object>(&self, ids: Vec<Uuid>) -> Result<Vec<T>, Error> {
         let records = self.inner.adapter.fetch_bulk_objects(ids).await?;
         records.into_iter().map(|r| r.to_object()).collect()
     }
@@ -90,8 +90,8 @@ impl Engine {
     /// Delete an object
     pub async fn delete_object<T: Object>(
         &self,
-        id: Ulid,
-        owner: Ulid,
+        id: Uuid,
+        owner: Uuid,
     ) -> Result<Option<T>, Error> {
         let record = self.inner.adapter.delete_object(id, owner).await?;
 
@@ -104,9 +104,9 @@ impl Engine {
     /// Transfer ownership of an object
     pub async fn transfer_object<T: Object>(
         &self,
-        id: Ulid,
-        from_owner: Ulid,
-        to_owner: Ulid,
+        id: Uuid,
+        from_owner: Uuid,
+        to_owner: Uuid,
     ) -> Result<T, Error> {
         let record = self
             .inner
@@ -127,7 +127,7 @@ impl Engine {
         let record = self
             .inner
             .adapter
-            .find_object(T::TYPE, *SYSTEM_OWNER, filters)
+            .find_object(T::TYPE, SYSTEM_OWNER, filters)
             .await?;
         match record {
             Some(r) => r.to_object().map(Some),
@@ -137,7 +137,7 @@ impl Engine {
 
     pub async fn find_object_with_owner<T: Object>(
         &self,
-        owner: Ulid,
+        owner: Uuid,
         filters: &[QueryFilter],
     ) -> Result<Option<T>, Error> {
         let record = self
@@ -162,7 +162,7 @@ impl Engine {
     }
 
     /// Fetch all objects owned by a specific owner
-    pub async fn fetch_owned_objects<T: Object>(&self, owner: Ulid) -> Result<Vec<T>, Error> {
+    pub async fn fetch_owned_objects<T: Object>(&self, owner: Uuid) -> Result<Vec<T>, Error> {
         let records = self
             .inner
             .adapter
@@ -172,7 +172,7 @@ impl Engine {
     }
 
     /// Fetch a single owned object (for one-to-one relationships)
-    pub async fn fetch_owned_object<T: Object>(&self, owner: Ulid) -> Result<Option<T>, Error> {
+    pub async fn fetch_owned_object<T: Object>(&self, owner: Uuid) -> Result<Option<T>, Error> {
         let record = self
             .inner
             .adapter
@@ -188,7 +188,7 @@ impl Engine {
     /// Fetch an union by ID
     pub async fn fetch_union_object<A: Object, B: Object>(
         &self,
-        id: Ulid,
+        id: Uuid,
     ) -> Result<Option<Union<A, B>>, Error> {
         let record = self
             .inner
@@ -203,7 +203,7 @@ impl Engine {
 
     pub async fn fetch_union_objects<A: Object, B: Object>(
         &self,
-        id: Vec<Ulid>,
+        id: Vec<Uuid>,
     ) -> Result<Vec<Union<A, B>>, Error> {
         let records = self
             .inner
@@ -215,7 +215,7 @@ impl Engine {
 
     pub async fn fetch_owned_union_object<A: Object, B: Object>(
         &self,
-        owner: Ulid,
+        owner: Uuid,
     ) -> Result<Option<Union<A, B>>, Error> {
         let record = self
             .inner
@@ -230,7 +230,7 @@ impl Engine {
 
     pub async fn fetch_owned_union_objects<A: Object, B: Object>(
         &self,
-        owner: Ulid,
+        owner: Uuid,
     ) -> Result<Vec<Union<A, B>>, Error> {
         let records = self
             .inner
@@ -251,7 +251,7 @@ impl Engine {
     }
 
     /// Update an edge
-    pub async fn update_edge<E: Edge>(&self, edge: &mut E, to: Option<Ulid>) -> Result<(), Error> {
+    pub async fn update_edge<E: Edge>(&self, edge: &mut E, to: Option<Uuid>) -> Result<(), Error> {
         let old_link_id = edge.to();
         if let Some(to) = to {
             edge.meta_mut().to = to;
@@ -267,19 +267,19 @@ impl Engine {
     }
 
     /// Delete an edge
-    pub async fn delete_edge<E: Edge>(&self, from: Ulid, to: Ulid) -> Result<(), Error> {
+    pub async fn delete_edge<E: Edge>(&self, from: Uuid, to: Uuid) -> Result<(), Error> {
         self.inner.adapter.delete_edge(E::TYPE, from, to).await
     }
 
     /// Delete all edge of an object
-    pub async fn delete_object_edge<E: Edge>(&self, from: Ulid) -> Result<(), Error> {
+    pub async fn delete_object_edge<E: Edge>(&self, from: Uuid) -> Result<(), Error> {
         self.inner.adapter.delete_object_edge(E::TYPE, from).await
     }
 
     /// Query edges
     pub async fn query_edges<E: Edge>(
         &self,
-        from: Ulid,
+        from: Uuid,
         query: EdgeQuery,
     ) -> Result<Vec<E>, Error> {
         let records = self.inner.adapter.query_edges(E::TYPE, from, query).await?;
@@ -289,7 +289,7 @@ impl Engine {
     /// Count edges
     pub async fn count_edges<E: Edge>(
         &self,
-        from: Ulid,
+        from: Uuid,
         query: Option<EdgeQuery>,
     ) -> Result<u64, Error> {
         self.inner.adapter.count_edges(E::TYPE, from, query).await
@@ -298,7 +298,7 @@ impl Engine {
     // ==================== Advanced Query API ====================
 
     /// Start a query context for complex traversals
-    pub fn preload_object<'a, T: Object>(&'a self, id: Ulid) -> QueryContext<'a, T> {
+    pub fn preload_object<'a, T: Object>(&'a self, id: Uuid) -> QueryContext<'a, T> {
         self.inner.adapter.preload_object(id)
     }
 }

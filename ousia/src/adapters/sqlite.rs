@@ -4,11 +4,11 @@ use sqlx::{
     query::{Query as SqlxQuery, QueryScalar},
     sqlite::{SqliteArguments, SqlitePool, SqlitePoolOptions, SqliteRow},
 };
-use ulid::Ulid;
+use uuid::Uuid;
 
 use crate::{
     adapters::{Adapter, EdgeQuery, EdgeRecord, Error, ObjectRecord, Query},
-    query::{Cursor, IndexValue, QueryFilter},
+    query::{Cursor, IndexValue, IndexValueInner, QueryFilter},
 };
 
 /// SQLite adapter using a unified JSON storage model
@@ -16,9 +16,9 @@ use crate::{
 /// Schema:
 /// ```sql
 /// CREATE TABLE objects (
-///     id TEXT PRIMARY KEY,
+///     id BLOB PRIMARY KEY,
 ///     type TEXT NOT NULL,
-///     owner TEXT NOT NULL,
+///     owner BLOB NOT NULL,
 ///     created_at TEXT NOT NULL,
 ///     updated_at TEXT NOT NULL,
 ///     data TEXT NOT NULL,
@@ -73,9 +73,9 @@ impl SqliteAdapter {
         sqlx::query(
             r#"
             CREATE TABLE IF NOT EXISTS objects (
-                id TEXT PRIMARY KEY,
+                id BLOB PRIMARY KEY,
                 type TEXT NOT NULL,
-                owner TEXT NOT NULL,
+                owner BLOB NOT NULL,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 data TEXT NOT NULL,
@@ -126,8 +126,8 @@ impl SqliteAdapter {
         sqlx::query(
             r#"
             CREATE TABLE IF NOT EXISTS edges (
-                "from" TEXT NOT NULL,
-                "to" TEXT NOT NULL,
+                "from" BLOB NOT NULL,
+                "to" BLOB NOT NULL,
                 type TEXT NOT NULL,
                 data TEXT NOT NULL,
                 index_meta TEXT NOT NULL,
@@ -183,17 +183,13 @@ impl SqliteAdapter {
             .try_get::<String, _>("type")
             .map_err(|e| Error::Deserialize(e.to_string()))?;
 
-        let id = Ulid::from_string(
-            &row.try_get::<String, _>("id")
-                .map_err(|e| Error::Deserialize(e.to_string()))?,
-        )
-        .map_err(|e| Error::Deserialize(e.to_string()))?;
+        let id = row
+            .try_get::<Uuid, _>("id")
+            .map_err(|e| Error::Deserialize(e.to_string()))?;
 
-        let owner = Ulid::from_string(
-            &row.try_get::<String, _>("owner")
-                .map_err(|e| Error::Deserialize(e.to_string()))?,
-        )
-        .map_err(|e| Error::Deserialize(e.to_string()))?;
+        let owner = row
+            .try_get::<Uuid, _>("owner")
+            .map_err(|e| Error::Deserialize(e.to_string()))?;
 
         let created_at_str: String = row
             .try_get("created_at")
@@ -241,17 +237,13 @@ impl SqliteAdapter {
             .try_get::<String, _>("type")
             .map_err(|e| Error::Deserialize(e.to_string()))?;
 
-        let from = Ulid::from_string(
-            &row.try_get::<String, _>("from")
-                .map_err(|e| Error::Deserialize(e.to_string()))?,
-        )
-        .map_err(|e| Error::Deserialize(e.to_string()))?;
+        let from = row
+            .try_get::<Uuid, _>("from")
+            .map_err(|e| Error::Deserialize(e.to_string()))?;
 
-        let to = Ulid::from_string(
-            &row.try_get::<String, _>("to")
-                .map_err(|e| Error::Deserialize(e.to_string()))?,
-        )
-        .map_err(|e| Error::Deserialize(e.to_string()))?;
+        let to = row
+            .try_get::<Uuid, _>("to")
+            .map_err(|e| Error::Deserialize(e.to_string()))?;
 
         Ok(EdgeRecord {
             type_name,
@@ -261,7 +253,6 @@ impl SqliteAdapter {
             index_meta: index_meta_json,
         })
     }
-
     fn build_object_query_conditions(filters: &Vec<QueryFilter>, cursor: Option<Cursor>) -> String {
         let mut conditions = vec![
             ("type = ?".to_string(), "AND"),
@@ -278,7 +269,14 @@ impl SqliteAdapter {
                     let comparison = match query_search.comparison {
                         crate::query::Comparison::Equal => "=",
                         crate::query::Comparison::BeginsWith => "LIKE",
-                        crate::query::Comparison::Contains => "LIKE",
+                        crate::query::Comparison::Contains => {
+                            if matches!(filter.value, IndexValue::Array(_)) {
+                                // For arrays, we'll use a custom check
+                                "ARRAY_CONTAINS"
+                            } else {
+                                "LIKE"
+                            }
+                        }
                         crate::query::Comparison::GreaterThan => ">",
                         crate::query::Comparison::LessThan => "<",
                         crate::query::Comparison::GreaterThanOrEqual => ">=",
@@ -286,10 +284,19 @@ impl SqliteAdapter {
                         crate::query::Comparison::NotEqual => "!=",
                     };
 
-                    let condition = format!(
-                        "json_extract(index_meta, '$.{}') {} ?",
-                        filter.field.name, comparison
-                    );
+                    let condition = if comparison == "ARRAY_CONTAINS" {
+                        // For array contains, we need to check if any element in the stored JSON array
+                        // is present in the query array. We'll use a placeholder that gets expanded later.
+                        format!(
+                            "EXISTS (SELECT 1 FROM json_each(json_extract(index_meta, '$.{}')) WHERE value IN (SELECT value FROM json_each(?)))",
+                            filter.field.name
+                        )
+                    } else {
+                        format!(
+                            "json_extract(index_meta, '$.{}') {} ?",
+                            filter.field.name, comparison
+                        )
+                    };
 
                     let operator = match query_search.operator {
                         crate::query::Operator::And => "AND",
@@ -330,7 +337,13 @@ impl SqliteAdapter {
                     let comparison = match query_search.comparison {
                         crate::query::Comparison::Equal => "=",
                         crate::query::Comparison::BeginsWith => "LIKE",
-                        crate::query::Comparison::Contains => "LIKE",
+                        crate::query::Comparison::Contains => {
+                            if matches!(filter.value, IndexValue::Array(_)) {
+                                "ARRAY_CONTAINS"
+                            } else {
+                                "LIKE"
+                            }
+                        }
                         crate::query::Comparison::GreaterThan => ">",
                         crate::query::Comparison::LessThan => "<",
                         crate::query::Comparison::GreaterThanOrEqual => ">=",
@@ -338,10 +351,17 @@ impl SqliteAdapter {
                         crate::query::Comparison::NotEqual => "!=",
                     };
 
-                    let condition = format!(
-                        "json_extract(index_meta, '$.{}') {} ?",
-                        filter.field.name, comparison
-                    );
+                    let condition = if comparison == "ARRAY_CONTAINS" {
+                        format!(
+                            "EXISTS (SELECT 1 FROM json_each(json_extract(index_meta, '$.{}')) WHERE value IN (SELECT value FROM json_each(?)))",
+                            filter.field.name
+                        )
+                    } else {
+                        format!(
+                            "json_extract(index_meta, '$.{}') {} ?",
+                            filter.field.name, comparison
+                        )
+                    };
 
                     let operator = match query_search.operator {
                         crate::query::Operator::And => "AND",
@@ -385,7 +405,13 @@ impl SqliteAdapter {
                     let comparison = match query_search.comparison {
                         crate::query::Comparison::Equal => "=",
                         crate::query::Comparison::BeginsWith => "LIKE",
-                        crate::query::Comparison::Contains => "LIKE",
+                        crate::query::Comparison::Contains => {
+                            if matches!(filter.value, IndexValue::Array(_)) {
+                                "ARRAY_CONTAINS"
+                            } else {
+                                "LIKE"
+                            }
+                        }
                         crate::query::Comparison::GreaterThan => ">",
                         crate::query::Comparison::LessThan => "<",
                         crate::query::Comparison::GreaterThanOrEqual => ">=",
@@ -393,10 +419,17 @@ impl SqliteAdapter {
                         crate::query::Comparison::NotEqual => "!=",
                     };
 
-                    let condition = format!(
-                        "json_extract(index_meta, '$.{}') {} ?",
-                        filter.field.name, comparison
-                    );
+                    let condition = if comparison == "ARRAY_CONTAINS" {
+                        format!(
+                            "EXISTS (SELECT 1 FROM json_each(json_extract(index_meta, '$.{}')) WHERE value IN (SELECT value FROM json_each(?)))",
+                            filter.field.name
+                        )
+                    } else {
+                        format!(
+                            "json_extract(index_meta, '$.{}') {} ?",
+                            filter.field.name, comparison
+                        )
+                    };
 
                     let operator = match query_search.operator {
                         crate::query::Operator::And => "AND",
@@ -433,6 +466,7 @@ impl SqliteAdapter {
 
         let order_terms: Vec<String> = sort
             .iter()
+            .filter(|s| s.value.as_array().is_none()) // Filter out array types from sorting
             .map(|s| {
                 let direction = if s.mode.as_sort().unwrap().ascending {
                     "ASC"
@@ -462,6 +496,7 @@ impl SqliteAdapter {
 
         let order_terms: Vec<String> = sort
             .iter()
+            .filter(|s| s.value.as_array().is_none()) // Filter out array types from sorting
             .map(|s| {
                 let direction = if s.mode.as_sort().unwrap().ascending {
                     "ASC"
@@ -497,6 +532,44 @@ impl SqliteAdapter {
                 IndexValue::Float(f) => query.bind(f),
                 IndexValue::Bool(b) => query.bind(b),
                 IndexValue::Timestamp(t) => query.bind(t.to_rfc3339()),
+                IndexValue::Uuid(uid) => query.bind(uid),
+                IndexValue::Array(arr) => {
+                    // Convert array to JSON string for SQLite
+                    if let Some(first) = arr.first() {
+                        match first {
+                            IndexValueInner::String(_) => {
+                                let values: Vec<&str> = arr
+                                    .iter()
+                                    .map(|s| s.as_string().unwrap_or_default())
+                                    .collect();
+                                query.bind(
+                                    serde_json::to_string(&values)
+                                        .unwrap_or_else(|_| "[]".to_string()),
+                                )
+                            }
+                            IndexValueInner::Int(_) => {
+                                let values: Vec<i64> =
+                                    arr.iter().map(|s| s.as_int().unwrap_or_default()).collect();
+                                query.bind(
+                                    serde_json::to_string(&values)
+                                        .unwrap_or_else(|_| "[]".to_string()),
+                                )
+                            }
+                            IndexValueInner::Float(_) => {
+                                let values: Vec<f64> = arr
+                                    .iter()
+                                    .map(|s| s.as_float().unwrap_or_default())
+                                    .collect();
+                                query.bind(
+                                    serde_json::to_string(&values)
+                                        .unwrap_or_else(|_| "[]".to_string()),
+                                )
+                            }
+                        }
+                    } else {
+                        query.bind("[]".to_string())
+                    }
+                }
             };
         }
         query
@@ -520,6 +593,44 @@ impl SqliteAdapter {
                 IndexValue::Float(f) => query.bind(f),
                 IndexValue::Bool(b) => query.bind(b),
                 IndexValue::Timestamp(t) => query.bind(t.to_rfc3339()),
+                IndexValue::Uuid(uid) => query.bind(uid),
+                IndexValue::Array(arr) => {
+                    // Convert array to JSON string for SQLite
+                    if let Some(first) = arr.first() {
+                        match first {
+                            IndexValueInner::String(_) => {
+                                let values: Vec<&str> = arr
+                                    .iter()
+                                    .map(|s| s.as_string().unwrap_or_default())
+                                    .collect();
+                                query.bind(
+                                    serde_json::to_string(&values)
+                                        .unwrap_or_else(|_| "[]".to_string()),
+                                )
+                            }
+                            IndexValueInner::Int(_) => {
+                                let values: Vec<i64> =
+                                    arr.iter().map(|s| s.as_int().unwrap_or_default()).collect();
+                                query.bind(
+                                    serde_json::to_string(&values)
+                                        .unwrap_or_else(|_| "[]".to_string()),
+                                )
+                            }
+                            IndexValueInner::Float(_) => {
+                                let values: Vec<f64> = arr
+                                    .iter()
+                                    .map(|s| s.as_float().unwrap_or_default())
+                                    .collect();
+                                query.bind(
+                                    serde_json::to_string(&values)
+                                        .unwrap_or_else(|_| "[]".to_string()),
+                                )
+                            }
+                        }
+                    } else {
+                        query.bind("[]".to_string())
+                    }
+                }
             };
         }
         query
@@ -536,9 +647,9 @@ impl Adapter for SqliteAdapter {
             VALUES (?, ?, ?, ?, ?, ?, ?)
             "#,
         )
-        .bind(record.id.to_string())
+        .bind(record.id)
         .bind(record.type_name)
-        .bind(record.owner.to_string())
+        .bind(record.owner)
         .bind(record.created_at.to_rfc3339())
         .bind(record.updated_at.to_rfc3339())
         .bind(serde_json::to_string(&record.data).map_err(|e| Error::Serialize(e.to_string()))?)
@@ -552,7 +663,7 @@ impl Adapter for SqliteAdapter {
         Ok(())
     }
 
-    async fn fetch_object(&self, id: Ulid) -> Result<Option<ObjectRecord>, Error> {
+    async fn fetch_object(&self, id: Uuid) -> Result<Option<ObjectRecord>, Error> {
         let pool = self.pool.clone();
         let row = sqlx::query(
             r#"
@@ -561,7 +672,7 @@ impl Adapter for SqliteAdapter {
             WHERE id = ?
             "#,
         )
-        .bind(id.to_string())
+        .bind(id)
         .fetch_optional(&pool)
         .await
         .map_err(|err| Error::Storage(err.to_string()))?;
@@ -572,7 +683,7 @@ impl Adapter for SqliteAdapter {
         }
     }
 
-    async fn fetch_bulk_objects(&self, ids: Vec<Ulid>) -> Result<Vec<ObjectRecord>, Error> {
+    async fn fetch_bulk_objects(&self, ids: Vec<Uuid>) -> Result<Vec<ObjectRecord>, Error> {
         let pool = self.pool.clone();
         let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
         let sql = format!(
@@ -582,7 +693,7 @@ impl Adapter for SqliteAdapter {
 
         let mut query = sqlx::query(&sql);
         for id in ids {
-            query = query.bind(id.to_string());
+            query = query.bind(id);
         }
 
         let rows = query
@@ -610,7 +721,7 @@ impl Adapter for SqliteAdapter {
             serde_json::to_string(&record.index_meta)
                 .map_err(|e| Error::Serialize(e.to_string()))?,
         )
-        .bind(record.id.to_string())
+        .bind(record.id)
         .execute(&pool)
         .await
         .map_err(|err| Error::Storage(err.to_string()))?;
@@ -620,9 +731,9 @@ impl Adapter for SqliteAdapter {
 
     async fn transfer_object(
         &self,
-        id: Ulid,
-        from_owner: Ulid,
-        to_owner: Ulid,
+        id: Uuid,
+        from_owner: Uuid,
+        to_owner: Uuid,
     ) -> Result<ObjectRecord, Error> {
         let pool = self.pool.clone();
 
@@ -635,9 +746,9 @@ impl Adapter for SqliteAdapter {
             "#,
         )
         .bind(Utc::now().to_rfc3339())
-        .bind(to_owner.to_string())
-        .bind(id.to_string())
-        .bind(from_owner.to_string())
+        .bind(to_owner)
+        .bind(id)
+        .bind(from_owner)
         .execute(&pool)
         .await
         .map_err(|err| Error::Storage(err.to_string()))?;
@@ -649,7 +760,7 @@ impl Adapter for SqliteAdapter {
         self.fetch_object(id).await?.ok_or(Error::NotFound)
     }
 
-    async fn delete_object(&self, id: Ulid, owner: Ulid) -> Result<Option<ObjectRecord>, Error> {
+    async fn delete_object(&self, id: Uuid, owner: Uuid) -> Result<Option<ObjectRecord>, Error> {
         let pool = self.pool.clone();
 
         // Fetch first, then delete (SQLite doesn't have RETURNING)
@@ -666,8 +777,8 @@ impl Adapter for SqliteAdapter {
                 WHERE id = ? AND owner = ?
                 "#,
             )
-            .bind(id.to_string())
-            .bind(owner.to_string())
+            .bind(id)
+            .bind(owner)
             .execute(&pool)
             .await
             .map_err(|err| Error::Storage(err.to_string()))?;
@@ -679,7 +790,7 @@ impl Adapter for SqliteAdapter {
     async fn find_object(
         &self,
         type_name: &'static str,
-        owner: Ulid,
+        owner: Uuid,
         filters: &[QueryFilter],
     ) -> Result<Option<ObjectRecord>, Error> {
         let where_clause = Self::build_object_query_conditions(&filters.to_vec(), None);
@@ -696,7 +807,7 @@ impl Adapter for SqliteAdapter {
             where_clause, order_clause
         );
 
-        let mut query = sqlx::query(&sql).bind(type_name).bind(owner.to_string());
+        let mut query = sqlx::query(&sql).bind(type_name).bind(owner);
 
         let f = filters.to_vec();
         query = Self::query_bind_filters(query, &f);
@@ -739,12 +850,10 @@ impl Adapter for SqliteAdapter {
             sql.push_str(&format!(" LIMIT {}", limit));
         }
 
-        let mut query = sqlx::query(&sql)
-            .bind(type_name)
-            .bind(plan.owner.to_string());
+        let mut query = sqlx::query(&sql).bind(type_name).bind(plan.owner);
 
         if let Some(cursor) = plan.cursor {
-            query = query.bind(cursor.last_id.to_string());
+            query = query.bind(cursor.last_id);
         }
 
         query = Self::query_bind_filters(query, &plan.filters);
@@ -785,7 +894,7 @@ impl Adapter for SqliteAdapter {
 
                 let mut query = sqlx::query_scalar::<_, i64>(&sql)
                     .bind(type_name)
-                    .bind(plan.owner.to_string());
+                    .bind(plan.owner);
 
                 query = Self::query_scalar_bind_filters(query, &plan.filters);
 
@@ -811,7 +920,7 @@ impl Adapter for SqliteAdapter {
     async fn fetch_owned_objects(
         &self,
         type_name: &'static str,
-        owner: Ulid,
+        owner: Uuid,
     ) -> Result<Vec<ObjectRecord>, Error> {
         let pool = self.pool.clone();
         let rows = sqlx::query(
@@ -821,7 +930,7 @@ impl Adapter for SqliteAdapter {
             WHERE owner = ? AND type = ?
             "#,
         )
-        .bind(owner.to_string())
+        .bind(owner)
         .bind(type_name)
         .fetch_all(&pool)
         .await
@@ -835,7 +944,7 @@ impl Adapter for SqliteAdapter {
     async fn fetch_owned_object(
         &self,
         type_name: &'static str,
-        owner: Ulid,
+        owner: Uuid,
     ) -> Result<Option<ObjectRecord>, Error> {
         let pool = self.pool.clone();
         let row = sqlx::query(
@@ -846,7 +955,7 @@ impl Adapter for SqliteAdapter {
             LIMIT 1
             "#,
         )
-        .bind(owner.to_string())
+        .bind(owner)
         .bind(type_name)
         .fetch_optional(&pool)
         .await
@@ -862,7 +971,7 @@ impl Adapter for SqliteAdapter {
         &self,
         a_type_name: &'static str,
         b_type_name: &'static str,
-        id: Ulid,
+        id: Uuid,
     ) -> Result<Option<ObjectRecord>, Error> {
         let pool = self.pool.clone();
         let row = sqlx::query(
@@ -872,7 +981,7 @@ impl Adapter for SqliteAdapter {
             WHERE owner = ? AND (type = ? OR type = ?)
             "#,
         )
-        .bind(id.to_string())
+        .bind(id)
         .bind(a_type_name)
         .bind(b_type_name)
         .fetch_optional(&pool)
@@ -889,7 +998,7 @@ impl Adapter for SqliteAdapter {
         &self,
         a_type_name: &'static str,
         b_type_name: &'static str,
-        ids: Vec<Ulid>,
+        ids: Vec<Uuid>,
     ) -> Result<Vec<ObjectRecord>, Error> {
         let pool = self.pool.clone();
 
@@ -906,7 +1015,7 @@ impl Adapter for SqliteAdapter {
         let mut query = sqlx::query(&sql);
 
         for id in ids {
-            query = query.bind(id.to_string());
+            query = query.bind(id);
         }
         let rows = query
             .bind(a_type_name)
@@ -924,7 +1033,7 @@ impl Adapter for SqliteAdapter {
         &self,
         a_type_name: &'static str,
         b_type_name: &'static str,
-        owner: Ulid,
+        owner: Uuid,
     ) -> Result<Option<ObjectRecord>, Error> {
         let pool = self.pool.clone();
         let row = sqlx::query(
@@ -934,7 +1043,7 @@ impl Adapter for SqliteAdapter {
             WHERE owner = ? AND (type = ? OR type = ?)
             "#,
         )
-        .bind(owner.to_string())
+        .bind(owner)
         .bind(a_type_name)
         .bind(b_type_name)
         .fetch_optional(&pool)
@@ -951,7 +1060,7 @@ impl Adapter for SqliteAdapter {
         &self,
         a_type_name: &'static str,
         b_type_name: &'static str,
-        owner: Ulid,
+        owner: Uuid,
     ) -> Result<Vec<ObjectRecord>, Error> {
         let pool = self.pool.clone();
         let rows = sqlx::query(
@@ -961,7 +1070,7 @@ impl Adapter for SqliteAdapter {
             WHERE owner = ? AND (type = ? OR type = ?)
             "#,
         )
-        .bind(owner.to_string())
+        .bind(owner)
         .bind(a_type_name)
         .bind(b_type_name)
         .fetch_all(&pool)
@@ -982,8 +1091,8 @@ impl Adapter for SqliteAdapter {
             VALUES (?, ?, ?, ?, ?)
             "#,
         )
-        .bind(record.from.to_string())
-        .bind(record.to.to_string())
+        .bind(record.from)
+        .bind(record.to)
         .bind(record.type_name)
         .bind(serde_json::to_string(&record.data).map_err(|e| Error::Serialize(e.to_string()))?)
         .bind(
@@ -1000,8 +1109,8 @@ impl Adapter for SqliteAdapter {
     async fn update_edge(
         &self,
         record: EdgeRecord,
-        old_to: Ulid,
-        to: Option<Ulid>,
+        old_to: Uuid,
+        to: Option<Uuid>,
     ) -> Result<(), Error> {
         let pool = self.pool.clone();
         let _ = sqlx::query(
@@ -1011,10 +1120,10 @@ impl Adapter for SqliteAdapter {
         "#,
         )
         .bind(record.data)
-        .bind(to.unwrap_or(old_to).to_string())
-        .bind(record.from.to_string())
+        .bind(to.unwrap_or(old_to))
+        .bind(record.from)
         .bind(record.type_name)
-        .bind(old_to.to_string())
+        .bind(old_to)
         .execute(&pool)
         .await
         .map_err(|err| Error::Storage(err.to_string()))?;
@@ -1025,8 +1134,8 @@ impl Adapter for SqliteAdapter {
     async fn delete_edge(
         &self,
         type_name: &'static str,
-        from: Ulid,
-        to: Ulid,
+        from: Uuid,
+        to: Uuid,
     ) -> Result<(), Error> {
         let pool = self.pool.clone();
         let _ = sqlx::query(
@@ -1036,8 +1145,8 @@ impl Adapter for SqliteAdapter {
             "#,
         )
         .bind(type_name)
-        .bind(from.to_string())
-        .bind(to.to_string())
+        .bind(from)
+        .bind(to)
         .execute(&pool)
         .await
         .map_err(|err| Error::Storage(err.to_string()))?;
@@ -1045,7 +1154,7 @@ impl Adapter for SqliteAdapter {
         Ok(())
     }
 
-    async fn delete_object_edge(&self, type_name: &'static str, from: Ulid) -> Result<(), Error> {
+    async fn delete_object_edge(&self, type_name: &'static str, from: Uuid) -> Result<(), Error> {
         let pool = self.pool.clone();
         let _ = sqlx::query(
             r#"
@@ -1065,7 +1174,7 @@ impl Adapter for SqliteAdapter {
     async fn query_edges(
         &self,
         type_name: &'static str,
-        owner: Ulid,
+        owner: Uuid,
         plan: EdgeQuery,
     ) -> Result<Vec<EdgeRecord>, Error> {
         let where_clause = Self::build_edge_query_conditions(&plan.filters, plan.cursor);
@@ -1085,10 +1194,10 @@ impl Adapter for SqliteAdapter {
             sql.push_str(&format!(" LIMIT {}", limit));
         }
 
-        let mut query = sqlx::query(&sql).bind(type_name).bind(owner.to_string());
+        let mut query = sqlx::query(&sql).bind(type_name).bind(owner);
 
         if let Some(cursor) = plan.cursor {
-            query = query.bind(cursor.last_id.to_string());
+            query = query.bind(cursor.last_id);
         }
         query = Self::query_bind_filters(query, &plan.filters);
 
@@ -1104,7 +1213,7 @@ impl Adapter for SqliteAdapter {
     async fn count_edges(
         &self,
         type_name: &'static str,
-        owner: Ulid,
+        owner: Uuid,
         plan: Option<EdgeQuery>,
     ) -> Result<u64, Error> {
         let pool = self.pool.clone();
@@ -1127,7 +1236,7 @@ impl Adapter for SqliteAdapter {
 
                 let mut query = sqlx::query_scalar::<_, i64>(&sql)
                     .bind(type_name)
-                    .bind(owner.to_string());
+                    .bind(owner);
 
                 query = Self::query_scalar_bind_filters(query, &plan.filters);
 
@@ -1143,7 +1252,7 @@ impl Adapter for SqliteAdapter {
                     r#"SELECT COUNT(*) FROM edges WHERE type = ? AND "from" = ?"#,
                 )
                 .bind(type_name)
-                .bind(owner.to_string())
+                .bind(owner)
                 .fetch_one(&pool)
                 .await
                 .map_err(|err| Error::Storage(err.to_string()))?;

@@ -2,7 +2,7 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use ulid::Ulid;
+use uuid::Uuid;
 
 /// State of a ValueObject
 /// State transitions are one-way: alive/reserved → burned
@@ -63,13 +63,13 @@ impl ValueObjectState {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ValueObject {
     /// Unique identifier for this ValueObject
-    pub id: Ulid,
+    pub id: Uuid,
 
     /// Which asset this value belongs to (USD, NGN, etc.)
-    pub asset: Ulid,
+    pub asset: Uuid,
 
     /// Who owns this value
-    pub owner: Ulid,
+    pub owner: Uuid,
 
     /// Amount of value (immutable)
     /// This must be <= Asset.unit
@@ -80,7 +80,7 @@ pub struct ValueObject {
 
     /// If reserved, which authority can activate/release it
     /// Only relevant when state == Reserved
-    pub reserved_for: Option<Ulid>,
+    pub reserved_for: Option<Uuid>,
 
     /// When this ValueObject was created
     pub created_at: DateTime<Utc>,
@@ -88,9 +88,9 @@ pub struct ValueObject {
 
 impl ValueObject {
     /// Create a new alive ValueObject
-    pub fn new_alive(asset_id: Ulid, owner: Ulid, amount: i64) -> Self {
+    pub fn new_alive(asset_id: Uuid, owner: Uuid, amount: i64) -> Self {
         Self {
-            id: Ulid::new(),
+            id: uuid::Uuid::now_v7(),
             asset: asset_id,
             owner,
             amount,
@@ -102,9 +102,9 @@ impl ValueObject {
 
     /// Create a new reserved ValueObject
     /// Reserved ValueObjects are owned but not spendable until activated
-    pub fn new_reserved(asset_id: Ulid, owner: Ulid, amount: i64, reserved_for: Ulid) -> Self {
+    pub fn new_reserved(asset_id: Uuid, owner: Uuid, amount: i64, reserved_for: Uuid) -> Self {
         Self {
-            id: Ulid::new(),
+            id: uuid::Uuid::now_v7(),
             asset: asset_id,
             owner,
             amount,
@@ -135,7 +135,7 @@ impl ValueObject {
     }
 
     /// Check if a specific authority can activate/release this reserved ValueObject
-    pub fn can_be_activated_by(&self, authority: Ulid) -> bool {
+    pub fn can_be_activated_by(&self, authority: Uuid) -> bool {
         if !self.is_reserved() {
             return false;
         }
@@ -163,8 +163,8 @@ mod tests {
 
     #[test]
     fn test_value_object_creation_alive() {
-        let asset_id = Ulid::new();
-        let owner = Ulid::new();
+        let asset_id = uuid::Uuid::now_v7();
+        let owner = uuid::Uuid::now_v7();
         let vo = ValueObject::new_alive(asset_id, owner, 1000);
 
         assert_eq!(vo.asset, asset_id);
@@ -179,9 +179,9 @@ mod tests {
 
     #[test]
     fn test_value_object_creation_reserved() {
-        let asset_id = Ulid::new();
-        let owner = Ulid::new();
-        let authority = Ulid::new();
+        let asset_id = uuid::Uuid::now_v7();
+        let owner = uuid::Uuid::now_v7();
+        let authority = uuid::Uuid::now_v7();
         let vo = ValueObject::new_reserved(asset_id, owner, 1000, authority);
 
         assert_eq!(vo.asset, asset_id);
@@ -218,10 +218,10 @@ mod tests {
 
     #[test]
     fn test_can_be_activated_by() {
-        let asset_id = Ulid::new();
-        let owner = Ulid::new();
-        let authority = Ulid::new();
-        let wrong_authority = Ulid::new();
+        let asset_id = uuid::Uuid::now_v7();
+        let owner = uuid::Uuid::now_v7();
+        let authority = uuid::Uuid::now_v7();
+        let wrong_authority = uuid::Uuid::now_v7();
 
         let vo = ValueObject::new_reserved(asset_id, owner, 1000, authority);
 
@@ -235,7 +235,7 @@ mod tests {
 
     #[test]
     fn test_validate_amount() {
-        let vo = ValueObject::new_alive(Ulid::new(), Ulid::new(), 100);
+        let vo = ValueObject::new_alive(uuid::Uuid::now_v7(), uuid::Uuid::now_v7(), 100);
 
         // Valid: amount within limit
         assert!(vo.validate_amount(100));
@@ -245,17 +245,17 @@ mod tests {
         assert!(!vo.validate_amount(99));
 
         // Invalid: zero amount
-        let zero_vo = ValueObject::new_alive(Ulid::new(), Ulid::new(), 0);
+        let zero_vo = ValueObject::new_alive(uuid::Uuid::now_v7(), uuid::Uuid::now_v7(), 0);
         assert!(!zero_vo.validate_amount(100));
 
         // Invalid: negative amount
-        let neg_vo = ValueObject::new_alive(Ulid::new(), Ulid::new(), -100);
+        let neg_vo = ValueObject::new_alive(uuid::Uuid::now_v7(), uuid::Uuid::now_v7(), -100);
         assert!(!neg_vo.validate_amount(100));
     }
 
     #[test]
     fn test_age() {
-        let vo = ValueObject::new_alive(Ulid::new(), Ulid::new(), 1000);
+        let vo = ValueObject::new_alive(uuid::Uuid::now_v7(), uuid::Uuid::now_v7(), 1000);
         let age = vo.age();
 
         // Age should be very small (just created)

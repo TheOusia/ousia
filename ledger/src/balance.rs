@@ -1,12 +1,12 @@
 // ousia/src/ledger/balance.rs
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use ulid::Ulid;
+use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Balance {
-    pub owner: Ulid,
-    pub asset: Ulid,
+    pub owner: Uuid,
+    pub asset: Uuid,
     pub available: i64,
     pub reserved: i64,
     pub total: i64,
@@ -14,7 +14,7 @@ pub struct Balance {
 }
 
 impl Balance {
-    pub fn new(owner_id: Ulid, asset_id: Ulid) -> Self {
+    pub fn new(owner_id: Uuid, asset_id: Uuid) -> Self {
         Self {
             owner: owner_id,
             asset: asset_id,
@@ -25,7 +25,7 @@ impl Balance {
         }
     }
 
-    pub fn from_value_objects(owner: Ulid, asset: Ulid, alive_sum: i64, reserved_sum: i64) -> Self {
+    pub fn from_value_objects(owner: Uuid, asset: Uuid, alive_sum: i64, reserved_sum: i64) -> Self {
         Self {
             owner,
             asset,

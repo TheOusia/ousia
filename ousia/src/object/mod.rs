@@ -4,18 +4,13 @@ pub mod traits;
 pub use meta::*;
 pub use traits::*;
 
-use once_cell::sync::Lazy;
+use uuid::Uuid;
 /// SYSTEM_OWNER represents the root/system authority.
 /// It must never be assigned to user-generated objects.
-pub static SYSTEM_OWNER: Lazy<ulid::Ulid> = Lazy::new(|| {
-    match ulid::Ulid::from_string(
-        &std::env::var("OUSIA_SYSTEM_ID").unwrap_or("00000000000000000000000001".to_string()),
-    ) {
-        Ok(id) => id,
-        Err(err) => panic!("{:?}", err),
-    }
-});
+pub const SYSTEM_OWNER: Uuid = Uuid::from_bytes([
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x70, 0x00, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+]);
 
-pub fn system_owner() -> ulid::Ulid {
-    *SYSTEM_OWNER
+pub fn system_owner() -> Uuid {
+    SYSTEM_OWNER
 }

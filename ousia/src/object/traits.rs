@@ -39,8 +39,8 @@ pub trait Object:
 }
 
 pub trait ObjectMeta {
-    fn id(&self) -> ulid::Ulid;
-    fn owner(&self) -> ulid::Ulid;
+    fn id(&self) -> uuid::Uuid;
+    fn owner(&self) -> uuid::Uuid;
     fn created_at(&self) -> chrono::DateTime<chrono::Utc>;
     fn updated_at(&self) -> chrono::DateTime<chrono::Utc>;
 }
@@ -49,11 +49,11 @@ impl<T> ObjectMeta for T
 where
     T: Object,
 {
-    fn id(&self) -> ulid::Ulid {
+    fn id(&self) -> uuid::Uuid {
         self.meta().id()
     }
 
-    fn owner(&self) -> ulid::Ulid {
+    fn owner(&self) -> uuid::Uuid {
         self.meta().owner()
     }
 
@@ -84,19 +84,19 @@ pub trait ObjectOwnership {
 
     fn is_owned_by<O: Object>(&self, owner: &O) -> bool;
 
-    fn set_owner(&mut self, owner: ulid::Ulid);
+    fn set_owner(&mut self, owner: uuid::Uuid);
 }
 
 impl<T: Object> ObjectOwnership for T {
     fn is_system_owned(&self) -> bool {
-        self.meta().owner() == *super::SYSTEM_OWNER
+        self.meta().owner() == super::SYSTEM_OWNER
     }
 
     fn is_owned_by<O: Object>(&self, object: &O) -> bool {
         self.meta().owner() == object.meta().id()
     }
 
-    fn set_owner(&mut self, owner: ulid::Ulid) {
+    fn set_owner(&mut self, owner: uuid::Uuid) {
         self.meta_mut().owner = owner;
     }
 }
