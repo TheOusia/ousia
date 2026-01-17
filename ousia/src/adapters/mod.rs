@@ -1,3 +1,6 @@
+#[cfg(feature = "cockroach")]
+pub mod cockroach;
+
 #[cfg(feature = "postgres")]
 pub mod postgres;
 

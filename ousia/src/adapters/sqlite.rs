@@ -1085,20 +1085,27 @@ impl Adapter for SqliteAdapter {
     /* ---------------- EDGES ---------------- */
     async fn insert_edge(&self, record: EdgeRecord) -> Result<(), Error> {
         let pool = self.pool.clone();
+
+        let data =
+            serde_json::to_string(&record.data).map_err(|e| Error::Serialize(e.to_string()))?;
+        let index_meta = serde_json::to_string(&record.index_meta)
+            .map_err(|e| Error::Serialize(e.to_string()))?;
+
         let _ = sqlx::query(
             r#"
             INSERT INTO edges ("from", "to", type, data, index_meta)
             VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT ("from", type, "to")
+            DO UPDATE SET data = ?, index_meta = ?;
             "#,
         )
         .bind(record.from)
         .bind(record.to)
         .bind(record.type_name)
-        .bind(serde_json::to_string(&record.data).map_err(|e| Error::Serialize(e.to_string()))?)
-        .bind(
-            serde_json::to_string(&record.index_meta)
-                .map_err(|e| Error::Serialize(e.to_string()))?,
-        )
+        .bind(&data)
+        .bind(&index_meta)
+        .bind(&data)
+        .bind(&index_meta)
         .execute(&pool)
         .await
         .map_err(|err| Error::Storage(err.to_string()))?;

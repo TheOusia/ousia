@@ -4,9 +4,10 @@ version = "1.0.0"
 edition = "2024"
 
 [features]
-default = ["derive", "postgres", "ledger"]
-full = ["derive", "postgres", "sqlite", "ledger"]
+default = ["derive", "cockroach", "ledger"]
+full = ["derive", "cockroach", "postgres", "sqlite", "ledger"]
 derive = ["dep:ousia_derive"]
+cockroach = ["dep:sqlx"]
 postgres = ["dep:sqlx"]
 sqlite = ["dep:sqlx"]
 ledger = ["dep:ledger"]

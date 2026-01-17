@@ -1105,6 +1105,8 @@ impl Adapter for PostgresAdapter {
             r#"
             INSERT INTO edges ("from", "to", type, data, index_meta)
             VALUES ($1, $2, $3, $4, $5)
+            ON CONFLICT ("from", type, "to")
+            DO UPDATE SET data = $4, index_meta = $5;
             "#,
         )
         .bind(record.from)
