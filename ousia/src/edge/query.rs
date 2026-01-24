@@ -20,8 +20,6 @@ impl Default for EdgeQuery {
     fn default() -> Self {
         Self {
             filters: Vec::new(),
-            // sort: Vec::new(),
-            // search: Vec::new(),
             limit: None,
             cursor: None,
         }

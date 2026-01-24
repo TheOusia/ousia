@@ -1285,6 +1285,13 @@ pub trait Adapter: Send + Sync + 'static {
         plan: EdgeQuery,
     ) -> Result<Vec<EdgeRecord>, Error>;
 
+    async fn query_reverse_edges(
+        &self,
+        type_name: &'static str,
+        owner_reverse: Uuid,
+        plan: EdgeQuery,
+    ) -> Result<Vec<EdgeRecord>, Error>;
+
     async fn count_edges(
         &self,
         type_name: &'static str,

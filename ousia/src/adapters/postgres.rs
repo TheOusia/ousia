@@ -1247,6 +1247,48 @@ impl Adapter for PostgresAdapter {
             .collect())
     }
 
+    async fn query_reverse_edges(
+        &self,
+        type_name: &'static str,
+        owner_reverse: Uuid,
+        plan: EdgeQuery,
+    ) -> Result<Vec<EdgeRecord>, Error> {
+        let where_clause = Self::build_edge_reverse_query_conditions(&plan.filters, plan.cursor);
+        let order_clause = Self::build_edge_order_clause(&plan.filters);
+
+        let mut sql = format!(
+            r#"
+            SELECT "from", "to", "type", data, index_meta
+            FROM edges
+            {}
+            {}
+            "#,
+            where_clause, order_clause
+        );
+
+        if let Some(limit) = plan.limit {
+            sql.push_str(&format!(" LIMIT {}", limit));
+        }
+
+        let mut query = sqlx::query(&sql).bind(type_name).bind(owner_reverse);
+        if let Some(cursor) = plan.cursor {
+            query = query.bind(cursor.last_id);
+        }
+
+        query = Self::query_bind_filters(query, &plan.filters);
+
+        let pool = self.pool.clone();
+        let rows = query
+            .fetch_all(&pool)
+            .await
+            .map_err(|err| Error::Storage(err.to_string()))?;
+
+        Ok(rows
+            .into_iter()
+            .filter_map(|row| Self::map_row_to_edge_record(row).ok())
+            .collect())
+    }
+
     async fn count_edges(
         &self,
         type_name: &'static str,
