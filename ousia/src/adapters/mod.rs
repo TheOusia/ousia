@@ -7,6 +7,9 @@ pub mod postgres;
 #[cfg(feature = "sqlite")]
 pub mod sqlite;
 
+#[cfg(all(feature = "sqlite", feature = "sequence"))]
+compile_error!("The `sqlite` feature is not supported for sequences.");
+
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -1288,6 +1291,13 @@ pub trait Adapter: Send + Sync + 'static {
         owner: Uuid,
         plan: Option<EdgeQuery>,
     ) -> Result<u64, Error>;
+
+    /* ---------------- SEQUENCE ---------------- */
+    #[cfg(feature = "sequence")]
+    async fn sequence_value(&self, sq: String) -> u64;
+
+    #[cfg(feature = "sequence")]
+    async fn sequence_next_value(&self, sq: String) -> u64;
 }
 
 impl dyn Adapter {

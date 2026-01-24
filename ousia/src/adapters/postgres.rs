@@ -178,6 +178,25 @@ impl PostgresAdapter {
         Ok(())
     }
 
+    async fn ensure_sequence_exists(&self, sq: String) {
+        let _ = sqlx::query(
+            "DO $$
+            BEGIN
+                IF NOT EXISTS (
+                    SELECT 1
+                    FROM pg_catalog.pg_sequence
+                    WHERE sequencename = $1
+                ) THEN
+                    CREATE SEQUENCE $1;
+                END IF;
+            END $$;",
+        )
+        .bind(sq)
+        .execute(&self.pool.clone())
+        .await
+        .unwrap();
+    }
+
     fn map_row_to_object_record(row: PgRow) -> Result<ObjectRecord, Error> {
         let data_json: serde_json::Value = row
             .try_get("data")
@@ -1278,6 +1297,32 @@ impl Adapter for PostgresAdapter {
                 Ok(count as u64)
             }
         }
+    }
+
+    #[cfg(feature = "sequence")]
+    async fn sequence_value(&self, sq: String) -> u64 {
+        self.ensure_sequence_exists(sq.clone()).await;
+
+        let next_val: i64 = sqlx::query_scalar("SELECT currval($1);")
+            .bind(sq)
+            .fetch_one(&self.pool.clone())
+            .await
+            .expect("Failed to fetch the next sequence value");
+
+        next_val as u64
+    }
+
+    #[cfg(feature = "sequence")]
+    async fn sequence_next_value(&self, sq: String) -> u64 {
+        self.ensure_sequence_exists(sq.clone()).await;
+
+        let next_val: i64 = sqlx::query_scalar("SELECT nextval($1);")
+            .bind(sq)
+            .fetch_one(&self.pool.clone())
+            .await
+            .expect("Failed to fetch the next sequence value");
+
+        next_val as u64
     }
 }
 
