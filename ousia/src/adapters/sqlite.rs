@@ -1307,4 +1307,53 @@ impl Adapter for SqliteAdapter {
             }
         }
     }
+
+    async fn count_reverse_edges(
+        &self,
+        type_name: &'static str,
+        to: Uuid,
+        plan: Option<EdgeQuery>,
+    ) -> Result<u64, Error> {
+        let pool = self.pool.clone();
+
+        match plan {
+            Some(plan) => {
+                let where_clause = Self::build_edge_reverse_query_conditions(&plan.filters, None);
+
+                let mut sql = format!(
+                    r#"
+                    SELECT COUNT(*) FROM edges
+                    {}
+                    "#,
+                    where_clause
+                );
+
+                if let Some(limit) = plan.limit {
+                    sql.push_str(&format!(" LIMIT {}", limit));
+                }
+
+                let mut query = sqlx::query_scalar::<_, i64>(&sql).bind(type_name).bind(to);
+
+                query = Self::query_scalar_bind_filters(query, &plan.filters);
+
+                let count = query
+                    .fetch_one(&pool)
+                    .await
+                    .map_err(|e| Error::Storage(e.to_string()))?;
+
+                Ok(count as u64)
+            }
+            None => {
+                let count: i64 =
+                    sqlx::query_scalar(r#"SELECT COUNT(*) FROM edges WHERE type = ? AND "to" = ?"#)
+                        .bind(type_name)
+                        .bind(to)
+                        .fetch_one(&pool)
+                        .await
+                        .map_err(|err| Error::Storage(err.to_string()))?;
+
+                Ok(count as u64)
+            }
+        }
+    }
 }

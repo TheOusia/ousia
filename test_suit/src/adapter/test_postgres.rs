@@ -872,6 +872,84 @@ mod engine_test {
         // At least one User must exist
         assert!(unions.iter().any(|u| u.is_first()));
     }
+
+    #[tokio::test]
+    async fn test_reverse_edges() {
+        let (_resource, pool) = setup_test_db().await;
+        let adapter = PostgresAdapter::from_pool(pool);
+        adapter.init_schema().await.unwrap();
+
+        let engine = Engine::new(Box::new(adapter));
+
+        let mut alice = User::default();
+        alice.username = "alice".into();
+        alice.email = "alice@example.com".into();
+        alice.display_name = "Alice".into();
+
+        let mut michael = User::default();
+        michael.username = "michael".into();
+        michael.email = "michael@example.com".into();
+        michael.display_name = "Michael".into();
+
+        let mut bob = User::default();
+        bob.username = "bob".into();
+        bob.email = "bob@example.com".into();
+        bob.display_name = "Bob".into();
+
+        engine.create_object(&alice).await.unwrap();
+        engine.create_object(&bob).await.unwrap();
+
+        engine
+            .create_edge::<Follow>(&Follow {
+                _meta: EdgeMeta::new(alice.id(), bob.id()),
+                notification: true,
+            })
+            .await
+            .unwrap();
+        engine
+            .create_edge::<Follow>(&Follow {
+                _meta: EdgeMeta::new(michael.id(), bob.id()),
+                notification: false,
+            })
+            .await
+            .unwrap();
+
+        let alice_following = engine
+            .query_edges::<Follow>(alice.id(), EdgeQuery::default())
+            .await
+            .unwrap();
+
+        assert_eq!(alice_following.len(), 1);
+
+        let michael_following = engine
+            .query_edges::<Follow>(michael.id(), EdgeQuery::default())
+            .await
+            .unwrap();
+
+        assert_eq!(michael_following.len(), 1);
+
+        let bob_following = engine
+            .query_edges::<Follow>(bob.id(), EdgeQuery::default())
+            .await
+            .unwrap();
+
+        assert_eq!(bob_following.len(), 0);
+
+        let bob_followers = engine
+            .query_reverse_edges::<Follow>(bob.id(), EdgeQuery::default())
+            .await
+            .unwrap();
+        assert_eq!(bob_followers.len(), 2);
+
+        let bob_following_count = engine.count_edges::<Follow>(bob.id(), None).await.unwrap();
+        assert_eq!(bob_following_count, 0);
+
+        let bob_followers_count = engine
+            .count_reverse_edges::<Follow>(bob.id(), None)
+            .await
+            .unwrap();
+        assert_eq!(bob_followers_count, 2);
+    }
 }
 
 #[cfg(feature = "ledger")]

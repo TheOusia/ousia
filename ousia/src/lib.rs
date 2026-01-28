@@ -286,6 +286,20 @@ impl Engine {
         records.into_iter().map(|r| r.to_edge()).collect()
     }
 
+    /// Query reverse edges
+    pub async fn query_reverse_edges<E: Edge>(
+        &self,
+        to: Uuid,
+        query: EdgeQuery,
+    ) -> Result<Vec<E>, Error> {
+        let records = self
+            .inner
+            .adapter
+            .query_reverse_edges(E::TYPE, to, query)
+            .await?;
+        records.into_iter().map(|r| r.to_edge()).collect()
+    }
+
     /// Count edges
     pub async fn count_edges<E: Edge>(
         &self,
@@ -293,6 +307,18 @@ impl Engine {
         query: Option<EdgeQuery>,
     ) -> Result<u64, Error> {
         self.inner.adapter.count_edges(E::TYPE, from, query).await
+    }
+
+    /// Count reverse edges
+    pub async fn count_reverse_edges<E: Edge>(
+        &self,
+        to: Uuid,
+        query: Option<EdgeQuery>,
+    ) -> Result<u64, Error> {
+        self.inner
+            .adapter
+            .count_reverse_edges(E::TYPE, to, query)
+            .await
     }
 
     // ==================== Advanced Query API ====================

@@ -1299,6 +1299,13 @@ pub trait Adapter: Send + Sync + 'static {
         plan: Option<EdgeQuery>,
     ) -> Result<u64, Error>;
 
+    async fn count_reverse_edges(
+        &self,
+        type_name: &'static str,
+        to: Uuid,
+        plan: Option<EdgeQuery>,
+    ) -> Result<u64, Error>;
+
     /* ---------------- SEQUENCE ---------------- */
     #[cfg(feature = "sequence")]
     async fn sequence_value(&self, sq: String) -> u64;
