@@ -269,7 +269,8 @@ impl SqliteAdapter {
                     let comparison = match query_search.comparison {
                         crate::query::Comparison::Equal => "=",
                         crate::query::Comparison::BeginsWith => "LIKE",
-                        crate::query::Comparison::Contains => {
+                        crate::query::Comparison::Contains
+                        | crate::query::Comparison::ContainsAll => {
                             if matches!(filter.value, IndexValue::Array(_)) {
                                 // For arrays, we'll use a custom check
                                 "ARRAY_CONTAINS"
@@ -337,7 +338,8 @@ impl SqliteAdapter {
                     let comparison = match query_search.comparison {
                         crate::query::Comparison::Equal => "=",
                         crate::query::Comparison::BeginsWith => "LIKE",
-                        crate::query::Comparison::Contains => {
+                        crate::query::Comparison::Contains
+                        | crate::query::Comparison::ContainsAll => {
                             if matches!(filter.value, IndexValue::Array(_)) {
                                 "ARRAY_CONTAINS"
                             } else {
@@ -405,7 +407,8 @@ impl SqliteAdapter {
                     let comparison = match query_search.comparison {
                         crate::query::Comparison::Equal => "=",
                         crate::query::Comparison::BeginsWith => "LIKE",
-                        crate::query::Comparison::Contains => {
+                        crate::query::Comparison::Contains
+                        | crate::query::Comparison::ContainsAll => {
                             if matches!(filter.value, IndexValue::Array(_)) {
                                 "ARRAY_CONTAINS"
                             } else {

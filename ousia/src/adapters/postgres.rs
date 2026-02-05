@@ -1,6 +1,6 @@
 use chrono::Utc;
 use sqlx::{
-    PgPool, Postgres, Row,
+    Execute, PgPool, Postgres, Row,
     postgres::{PgArguments, PgRow},
     query::{Query as PgQuery, QueryScalar},
 };
@@ -285,7 +285,7 @@ impl PostgresAdapter {
             let index_type = match &filter.value {
                 IndexValue::String(_) => "text",
                 IndexValue::Int(_) => "bigint",
-                IndexValue::Float(_) => "double",
+                IndexValue::Float(_) => "double precision",
                 IndexValue::Bool(_) => "boolean",
                 IndexValue::Timestamp(_) => "timestamptz",
                 IndexValue::Uuid(_) => "uuid",
@@ -310,7 +310,14 @@ impl PostgresAdapter {
                         crate::query::Comparison::BeginsWith => "ILIKE",
                         crate::query::Comparison::Contains => {
                             if matches!(filter.value, IndexValue::Array(_)) {
-                                "&&" // PostgreSQL array overlap
+                                "?|"
+                            } else {
+                                "ILIKE"
+                            }
+                        }
+                        crate::query::Comparison::ContainsAll => {
+                            if matches!(filter.value, IndexValue::Array(_)) {
+                                "?&"
                             } else {
                                 "ILIKE"
                             }
@@ -321,10 +328,18 @@ impl PostgresAdapter {
                         crate::query::Comparison::LessThanOrEqual => "<=",
                         crate::query::Comparison::NotEqual => "<>",
                     };
-                    let condition = format!(
-                        "(index_meta->>'{}')::{} {} ${}",
-                        filter.field.name, index_type, comparison, param_idx
-                    );
+                    let condition = if matches!(filter.value, IndexValue::Array(_)) {
+                        // For JSONB arrays, use JSONB operators
+                        format!(
+                            "index_meta->'{}' {} ${}",
+                            filter.field.name, comparison, param_idx
+                        )
+                    } else {
+                        format!(
+                            "(index_meta->>'{}')::{} {} ${}",
+                            filter.field.name, index_type, comparison, param_idx
+                        )
+                    };
 
                     let operator = match query_search.operator {
                         crate::query::Operator::And => "AND",
@@ -369,7 +384,7 @@ impl PostgresAdapter {
             let index_type = match &filter.value {
                 IndexValue::String(_) => "text",
                 IndexValue::Int(_) => "bigint",
-                IndexValue::Float(_) => "double",
+                IndexValue::Float(_) => "double precision",
                 IndexValue::Bool(_) => "boolean",
                 IndexValue::Timestamp(_) => "timestamptz",
                 IndexValue::Uuid(_) => "uuid",
@@ -394,7 +409,14 @@ impl PostgresAdapter {
                         crate::query::Comparison::BeginsWith => "ILIKE",
                         crate::query::Comparison::Contains => {
                             if matches!(filter.value, IndexValue::Array(_)) {
-                                "&&" // PostgreSQL array overlap
+                                "?|"
+                            } else {
+                                "ILIKE"
+                            }
+                        }
+                        crate::query::Comparison::ContainsAll => {
+                            if matches!(filter.value, IndexValue::Array(_)) {
+                                "?&"
                             } else {
                                 "ILIKE"
                             }
@@ -405,10 +427,18 @@ impl PostgresAdapter {
                         crate::query::Comparison::LessThanOrEqual => "<=",
                         crate::query::Comparison::NotEqual => "<>",
                     };
-                    let condition = format!(
-                        "(index_meta->>'{}')::{} {} ${}",
-                        filter.field.name, index_type, comparison, param_idx
-                    );
+                    let condition = if matches!(filter.value, IndexValue::Array(_)) {
+                        // For JSONB arrays, use JSONB operators
+                        format!(
+                            "index_meta->'{}' {} ${}",
+                            filter.field.name, comparison, param_idx
+                        )
+                    } else {
+                        format!(
+                            "(index_meta->>'{}')::{} {} ${}",
+                            filter.field.name, index_type, comparison, param_idx
+                        )
+                    };
 
                     let operator = match query_search.operator {
                         crate::query::Operator::And => "AND",
@@ -456,7 +486,7 @@ impl PostgresAdapter {
             let index_type = match &filter.value {
                 IndexValue::String(_) => "text",
                 IndexValue::Int(_) => "bigint",
-                IndexValue::Float(_) => "double",
+                IndexValue::Float(_) => "double precision",
                 IndexValue::Bool(_) => "boolean",
                 IndexValue::Timestamp(_) => "timestamptz",
                 IndexValue::Uuid(_) => "uuid",
@@ -481,7 +511,14 @@ impl PostgresAdapter {
                         crate::query::Comparison::BeginsWith => "ILIKE",
                         crate::query::Comparison::Contains => {
                             if matches!(filter.value, IndexValue::Array(_)) {
-                                "&&" // PostgreSQL array overlap
+                                "?|"
+                            } else {
+                                "ILIKE"
+                            }
+                        }
+                        crate::query::Comparison::ContainsAll => {
+                            if matches!(filter.value, IndexValue::Array(_)) {
+                                "?&"
                             } else {
                                 "ILIKE"
                             }
@@ -492,10 +529,18 @@ impl PostgresAdapter {
                         crate::query::Comparison::LessThanOrEqual => "<=",
                         crate::query::Comparison::NotEqual => "<>",
                     };
-                    let condition = format!(
-                        "(index_meta->>'{}')::{} {} ${}",
-                        filter.field.name, index_type, comparison, param_idx
-                    );
+                    let condition = if matches!(filter.value, IndexValue::Array(_)) {
+                        // For JSONB arrays, use JSONB operators
+                        format!(
+                            "index_meta->'{}' {} ${}",
+                            filter.field.name, comparison, param_idx
+                        )
+                    } else {
+                        format!(
+                            "(index_meta->>'{}')::{} {} ${}",
+                            filter.field.name, index_type, comparison, param_idx
+                        )
+                    };
 
                     let operator = match query_search.operator {
                         crate::query::Operator::And => "AND",
@@ -547,7 +592,7 @@ impl PostgresAdapter {
                 let index_type = match &s.value {
                     IndexValue::String(_) => "text",
                     IndexValue::Int(_) => "bigint",
-                    IndexValue::Float(_) => "double",
+                    IndexValue::Float(_) => "double precision",
                     IndexValue::Bool(_) => "boolean",
                     IndexValue::Timestamp(_) => "timestamptz",
                     _ => "text",
@@ -585,7 +630,7 @@ impl PostgresAdapter {
                 let index_type = match &s.value {
                     IndexValue::String(_) => "text",
                     IndexValue::Int(_) => "bigint",
-                    IndexValue::Float(_) => "double",
+                    IndexValue::Float(_) => "double precision",
                     IndexValue::Bool(_) => "boolean",
                     IndexValue::Uuid(_) => "uuid",
                     IndexValue::Timestamp(_) => "timestamptz",
@@ -626,18 +671,18 @@ impl PostgresAdapter {
                         match first {
                             IndexValueInner::String(_) => query.bind(
                                 arr.iter()
-                                    .map(|s| s.as_string().unwrap_or_default())
-                                    .collect::<Vec<&str>>(),
+                                    .map(|s| s.as_string().unwrap_or_default().to_string())
+                                    .collect::<Vec<String>>(),
                             ),
                             IndexValueInner::Int(_) => query.bind(
                                 arr.iter()
-                                    .map(|s| s.as_int().unwrap_or_default())
-                                    .collect::<Vec<i64>>(),
+                                    .map(|s| s.as_int().unwrap_or_default().to_string())
+                                    .collect::<Vec<String>>(),
                             ),
                             IndexValueInner::Float(_) => query.bind(
                                 arr.iter()
-                                    .map(|s| s.as_float().unwrap_or_default())
-                                    .collect::<Vec<f64>>(),
+                                    .map(|s| s.as_float().unwrap_or_default().to_string())
+                                    .collect::<Vec<String>>(),
                             ),
                         }
                     } else {
@@ -674,18 +719,18 @@ impl PostgresAdapter {
                         match first {
                             IndexValueInner::String(_) => query.bind(
                                 arr.iter()
-                                    .map(|s| s.as_string().unwrap_or_default())
-                                    .collect::<Vec<&str>>(),
+                                    .map(|s| s.as_string().unwrap_or_default().to_string())
+                                    .collect::<Vec<String>>(),
                             ),
                             IndexValueInner::Int(_) => query.bind(
                                 arr.iter()
-                                    .map(|s| s.as_int().unwrap_or_default())
-                                    .collect::<Vec<i64>>(),
+                                    .map(|s| s.as_int().unwrap_or_default().to_string())
+                                    .collect::<Vec<String>>(),
                             ),
                             IndexValueInner::Float(_) => query.bind(
                                 arr.iter()
-                                    .map(|s| s.as_float().unwrap_or_default())
-                                    .collect::<Vec<f64>>(),
+                                    .map(|s| s.as_float().unwrap_or_default().to_string())
+                                    .collect::<Vec<String>>(),
                             ),
                         }
                     } else {

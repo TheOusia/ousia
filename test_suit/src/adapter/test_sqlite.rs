@@ -1,3 +1,4 @@
+use super::*;
 #[allow(unused_imports)]
 use ousia::{
     EdgeMeta, Meta, Object, ObjectMeta, ObjectOwnership, OusiaDefault, OusiaEdge, OusiaObject,
@@ -15,71 +16,6 @@ use testcontainers_modules::postgres::Postgres;
 
 #[cfg(test)]
 use ousia::adapters::Adapter;
-use uuid::Uuid;
-
-/// Example: Blog Post object
-#[derive(OusiaObject, OusiaDefault, Debug)]
-#[ousia(
-    type_name = "Post",
-    index = "title:search+sort",
-    index = "status:search"
-)]
-pub struct Post {
-    _meta: Meta,
-
-    pub title: String,
-    pub content: String,
-    pub status: PostStatus,
-    pub published_at: Option<chrono::DateTime<chrono::Utc>>,
-    pub tags: Vec<String>,
-}
-
-#[derive(Debug, Serialize, Deserialize, PartialEq)]
-pub enum PostStatus {
-    Draft,
-    Published,
-    Archived,
-}
-
-impl Default for PostStatus {
-    fn default() -> Self {
-        PostStatus::Draft
-    }
-}
-
-// Implement ToIndexValue for custom enum
-impl ousia::query::ToIndexValue for PostStatus {
-    fn to_index_value(&self) -> ousia::query::IndexValue {
-        let s = match self {
-            PostStatus::Draft => "draft",
-            PostStatus::Published => "published",
-            PostStatus::Archived => "archived",
-        };
-        ousia::query::IndexValue::String(s.to_string())
-    }
-}
-
-/// Example: User object
-#[derive(OusiaObject, OusiaDefault, Debug, Clone)]
-#[ousia(
-    type_name = "User",
-    index = "email:search",
-    index = "username:search+sort"
-)]
-pub struct User {
-    _meta: Meta,
-
-    pub username: String,
-    pub email: String,
-    pub display_name: String,
-}
-
-#[derive(Debug, OusiaEdge, OusiaDefault)]
-#[ousia(type_name = "Follow", index = "notification:search")]
-struct Follow {
-    _meta: EdgeMeta,
-    notification: bool,
-}
 
 mod sqlite_adpater_test {
 
@@ -245,6 +181,25 @@ mod sqlite_adpater_test {
             .await
             .unwrap();
         assert_eq!(posts.len(), 0);
+
+        let mut post_with_tag = Post::default();
+        post_with_tag.set_owner(user.id());
+        post_with_tag.tags = vec!["tag1".to_string(), "tag2".to_string()];
+
+        adapter
+            .insert_object(ObjectRecord::from_object(&post_with_tag))
+            .await
+            .unwrap();
+
+        // adapter.insert_object()
+        let posts = adapter
+            .query_objects(
+                Post::TYPE,
+                Query::new(user.id()).where_contains(&Post::FIELDS.tags, vec!["tag1"]),
+            )
+            .await
+            .unwrap();
+        assert_eq!(posts.len(), 1);
     }
 }
 
@@ -269,6 +224,7 @@ mod sqlite_engine_test {
             username: "johndoe".to_string(),
             email: "john.doe@example.com".to_string(),
             display_name: "John Doe".to_string(),
+            balance: Wallet::default(),
         };
         assert!(!user.is_system_owned());
     }

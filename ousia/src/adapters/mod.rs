@@ -263,7 +263,7 @@ impl Query {
         consumed_self
     }
 
-    // Contains (for strings)
+    // Contains
     pub fn where_contains(self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
         let mut consumed_self = self;
         consumed_self.filters.push(QueryFilter {
@@ -271,6 +271,20 @@ impl Query {
             value: value.to_index_value(),
             mode: QueryMode::Search(QuerySearch {
                 comparison: Comparison::Contains,
+                operator: Operator::default(),
+            }),
+        });
+        consumed_self
+    }
+
+    // Contains All
+    pub fn where_contains_all(self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
+        let mut consumed_self = self;
+        consumed_self.filters.push(QueryFilter {
+            field,
+            value: value.to_index_value(),
+            mode: QueryMode::Search(QuerySearch {
+                comparison: Comparison::ContainsAll,
                 operator: Operator::default(),
             }),
         });
@@ -398,6 +412,19 @@ impl Query {
             value: value.to_index_value(),
             mode: QueryMode::Search(QuerySearch {
                 comparison: Comparison::Contains,
+                operator: Operator::Or,
+            }),
+        });
+        consumed_self
+    }
+
+    pub fn or_contains_all(self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
+        let mut consumed_self = self;
+        consumed_self.filters.push(QueryFilter {
+            field,
+            value: value.to_index_value(),
+            mode: QueryMode::Search(QuerySearch {
+                comparison: Comparison::ContainsAll,
                 operator: Operator::Or,
             }),
         });
@@ -590,13 +617,29 @@ impl<'a, E: Edge, O: Object> EdgeQueryContext<'a, E, O> {
         self
     }
 
-    /// Filter target objects where field contains value (string search)
+    /// Filter target objects where field contains value
     pub fn where_contains(mut self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
         self.filters.push(QueryFilter {
             field,
             value: value.to_index_value(),
             mode: QueryMode::Search(QuerySearch {
                 comparison: Comparison::Contains,
+                operator: Operator::default(),
+            }),
+        });
+        self
+    }
+
+    pub fn where_contains_all(
+        mut self,
+        field: &'static IndexField,
+        value: impl ToIndexValue,
+    ) -> Self {
+        self.filters.push(QueryFilter {
+            field,
+            value: value.to_index_value(),
+            mode: QueryMode::Search(QuerySearch {
+                comparison: Comparison::ContainsAll,
                 operator: Operator::default(),
             }),
         });
@@ -699,6 +742,18 @@ impl<'a, E: Edge, O: Object> EdgeQueryContext<'a, E, O> {
             value: value.to_index_value(),
             mode: QueryMode::Search(QuerySearch {
                 comparison: Comparison::Contains,
+                operator: Operator::Or,
+            }),
+        });
+        self
+    }
+
+    pub fn or_contains_all(mut self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
+        self.filters.push(QueryFilter {
+            field,
+            value: value.to_index_value(),
+            mode: QueryMode::Search(QuerySearch {
+                comparison: Comparison::ContainsAll,
                 operator: Operator::Or,
             }),
         });
@@ -814,13 +869,29 @@ impl<'a, E: Edge, O: Object> EdgeQueryContext<'a, E, O> {
         self
     }
 
-    /// Filter edges where field contains value (string search)
+    /// Filter edges where field contains value
     pub fn edge_contains(mut self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
         self.edge_filters.push(QueryFilter {
             field,
             value: value.to_index_value(),
             mode: QueryMode::Search(QuerySearch {
                 comparison: Comparison::Contains,
+                operator: Operator::default(),
+            }),
+        });
+        self
+    }
+
+    pub fn edge_contains_all(
+        mut self,
+        field: &'static IndexField,
+        value: impl ToIndexValue,
+    ) -> Self {
+        self.edge_filters.push(QueryFilter {
+            field,
+            value: value.to_index_value(),
+            mode: QueryMode::Search(QuerySearch {
+                comparison: Comparison::ContainsAll,
                 operator: Operator::default(),
             }),
         });
@@ -927,6 +998,22 @@ impl<'a, E: Edge, O: Object> EdgeQueryContext<'a, E, O> {
             value: value.to_index_value(),
             mode: QueryMode::Search(QuerySearch {
                 comparison: Comparison::Contains,
+                operator: Operator::Or,
+            }),
+        });
+        self
+    }
+
+    pub fn edge_or_contains_all(
+        mut self,
+        field: &'static IndexField,
+        value: impl ToIndexValue,
+    ) -> Self {
+        self.edge_filters.push(QueryFilter {
+            field,
+            value: value.to_index_value(),
+            mode: QueryMode::Search(QuerySearch {
+                comparison: Comparison::ContainsAll,
                 operator: Operator::Or,
             }),
         });
@@ -1108,14 +1195,33 @@ impl<'a, E: Edge, O: Object> EdgeQueryContext<'a, E, O> {
                 Comparison::Equal => actual == expected,
                 Comparison::NotEqual => actual != expected,
                 Comparison::Contains => {
-                    if let (
-                        crate::query::IndexValue::String(a),
-                        crate::query::IndexValue::String(e),
-                    ) = (actual, expected)
-                    {
-                        a.contains(e)
-                    } else {
-                        false
+                    use crate::query::IndexValue;
+                    match (actual, expected) {
+                        (IndexValue::String(a), IndexValue::String(e)) => a.contains(e),
+                        (IndexValue::Int(a), IndexValue::Int(e)) => a == e,
+                        (IndexValue::Float(a), IndexValue::Float(e)) => a == e,
+                        (IndexValue::Bool(a), IndexValue::Bool(e)) => a == e,
+                        (IndexValue::Uuid(a), IndexValue::Uuid(e)) => a == e,
+                        (IndexValue::Timestamp(a), IndexValue::Timestamp(e)) => a == e,
+                        (IndexValue::Array(a), IndexValue::Array(e)) => {
+                            e.iter().any(|inner| a.contains(inner))
+                        }
+                        _ => false, // Handle other cases or mismatched types
+                    }
+                }
+                Comparison::ContainsAll => {
+                    use crate::query::IndexValue;
+                    match (actual, expected) {
+                        (IndexValue::String(a), IndexValue::String(e)) => a == e,
+                        (IndexValue::Int(a), IndexValue::Int(e)) => a == e,
+                        (IndexValue::Float(a), IndexValue::Float(e)) => a == e,
+                        (IndexValue::Bool(a), IndexValue::Bool(e)) => a == e,
+                        (IndexValue::Uuid(a), IndexValue::Uuid(e)) => a == e,
+                        (IndexValue::Timestamp(a), IndexValue::Timestamp(e)) => a == e,
+                        (IndexValue::Array(a), IndexValue::Array(e)) => {
+                            e.iter().all(|inner| a.contains(inner))
+                        }
+                        _ => false, // Handle other cases or mismatched types
                     }
                 }
                 Comparison::BeginsWith => {

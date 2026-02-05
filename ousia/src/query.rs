@@ -54,6 +54,7 @@ pub enum IndexValue {
     Timestamp(chrono::DateTime<chrono::Utc>),
     Array(Vec<IndexValueInner>),
 }
+
 impl IndexValue {
     pub fn as_string(&self) -> Option<&str> {
         match self {
@@ -299,6 +300,7 @@ pub enum Comparison {
     Equal,
     BeginsWith,
     Contains,
+    ContainsAll,
     GreaterThan,
     LessThan,
     GreaterThanOrEqual,

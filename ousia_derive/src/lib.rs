@@ -131,6 +131,32 @@ fn is_private_field(field: &Field) -> bool {
     })
 }
 
+/// Check if meta field has #[ousia_meta(private)] attribute
+fn is_meta_private(field: &Field) -> bool {
+    field.attrs.iter().any(|attr| {
+        if !attr.path().is_ident("ousia_meta") {
+            return false;
+        }
+
+        if let Meta::List(meta_list) = &attr.meta {
+            let result = meta_list.parse_args_with(
+                syn::punctuated::Punctuated::<Meta, syn::Token![,]>::parse_terminated,
+            );
+
+            if let Ok(nested) = result {
+                return nested.iter().any(|meta| {
+                    if let Meta::Path(path) = meta {
+                        path.is_ident("private")
+                    } else {
+                        false
+                    }
+                });
+            }
+        }
+        false
+    })
+}
+
 /// Extract view names from #[ousia(view(name1), view(name2))] attributes
 fn extract_field_views(field: &Field) -> Vec<String> {
     let mut views = Vec::new();
@@ -230,7 +256,7 @@ fn is_valid_rust_identifier(name: &str) -> bool {
     chars.all(|c| c.is_alphanumeric() || c == '_')
 }
 
-/// Default meta fields when no explicit view(default="...") is specified
+/// Default meta fields when no explicit view(default="...") is specified and not private
 const DEFAULT_META_FIELDS: &[&str] = &["id", "created_at", "updated_at"];
 
 /// Generate view struct and conversion method
@@ -240,6 +266,14 @@ fn generate_view_code(
     meta_fields: &[String],
     data_fields: &[(syn::Ident, Type)],
 ) -> (proc_macro2::TokenStream, proc_macro2::TokenStream) {
+    // Validate that view has at least one field
+    if meta_fields.is_empty() && data_fields.is_empty() {
+        panic!(
+            "View '{}' must have at least one field. Views cannot be empty.",
+            view_name
+        );
+    }
+
     // Create PascalCase view name
     let view_pascal = view_name
         .split('_')
@@ -405,6 +439,7 @@ pub fn derive_ousia_object(input: TokenStream) -> TokenStream {
         .find(|f| f.ident.as_ref().unwrap() == meta_field_ident)
         .unwrap();
     let meta_views = parse_meta_views(meta_field);
+    let meta_is_private = is_meta_private(meta_field);
 
     // Collect all view names from meta
     for view_name in meta_views.keys() {
@@ -551,11 +586,15 @@ pub fn derive_ousia_object(input: TokenStream) -> TokenStream {
     });
 
     // --- generate Serialize implementation (default view) ---
-    // Get default meta fields
-    let default_meta_fields = meta_views
-        .get("default")
-        .cloned()
-        .unwrap_or_else(|| DEFAULT_META_FIELDS.iter().map(|s| s.to_string()).collect());
+    // Get default meta fields - empty if meta is private, otherwise use explicit or DEFAULT_META_FIELDS
+    let default_meta_fields = if meta_is_private {
+        Vec::new()
+    } else {
+        meta_views
+            .get("default")
+            .cloned()
+            .unwrap_or_else(|| DEFAULT_META_FIELDS.iter().map(|s| s.to_string()).collect())
+    };
 
     let serialize_meta_fields = default_meta_fields.iter().map(|field_name| {
         let meta_field = format_ident!("{}", field_name);
