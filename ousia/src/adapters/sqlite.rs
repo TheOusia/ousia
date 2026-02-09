@@ -7,7 +7,7 @@ use sqlx::{
 use uuid::Uuid;
 
 use crate::{
-    adapters::{Adapter, EdgeQuery, EdgeRecord, Error, ObjectRecord, Query},
+    adapters::{Adapter, EdgeQuery, EdgeRecord, Error, ObjectRecord, Query, UniquenessAdapter},
     query::{Cursor, IndexValue, IndexValueInner, QueryFilter},
 };
 
@@ -152,6 +152,41 @@ impl SqliteAdapter {
             r#"
             CREATE INDEX IF NOT EXISTS idx_edges_to ON edges("to", type)
             "#,
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| Error::Storage(e.to_string()))?;
+
+        sqlx::query(
+            r#"
+                    CREATE TABLE IF NOT EXISTS unique_constraints (
+                        id BLOB NOT NULL,
+                        type TEXT NOT NULL,
+                        key TEXT NOT NULL UNIQUE,
+                        field TEXT NOT NULL,
+                        PRIMARY KEY (type, key)
+                    )
+                    "#,
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| Error::Storage(e.to_string()))?;
+
+        sqlx::query(
+            r#"
+                    CREATE INDEX IF NOT EXISTS idx_unique_id
+                    ON unique_constraints(id)
+                    "#,
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| Error::Storage(e.to_string()))?;
+
+        sqlx::query(
+            r#"
+                    CREATE INDEX IF NOT EXISTS idx_unique_type_key
+                    ON unique_constraints(type, key)
+                    "#,
         )
         .execute(&mut *tx)
         .await
@@ -981,7 +1016,7 @@ impl Adapter for SqliteAdapter {
             r#"
             SELECT id, type, owner, created_at, updated_at, data, index_meta
             FROM objects
-            WHERE owner = ? AND (type = ? OR type = ?)
+            WHERE id = ? AND (type = ? OR type = ?)
             "#,
         )
         .bind(id)
@@ -1358,5 +1393,146 @@ impl Adapter for SqliteAdapter {
                 Ok(count as u64)
             }
         }
+    }
+}
+
+#[async_trait::async_trait]
+impl UniquenessAdapter for SqliteAdapter {
+    async fn insert_unique(
+        &self,
+        object_id: Uuid,
+        type_name: &str,
+        hash: &str,
+        field: &str,
+    ) -> Result<(), Error> {
+        sqlx::query(
+            r#"
+            INSERT INTO unique_constraints (id, type, key, field)
+            VALUES ($1, $2, $3, $4)
+            "#,
+        )
+        .bind(object_id)
+        .bind(type_name)
+        .bind(hash)
+        .bind(field)
+        .execute(&self.pool)
+        .await
+        .map_err(|err| {
+            // Check if it's a uniqueness violation
+            if err.to_string().contains("unique") {
+                Error::UniqueConstraintViolation(field.to_string())
+            } else {
+                Error::Storage(err.to_string())
+            }
+        })?;
+
+        Ok(())
+    }
+
+    async fn insert_unique_hashes(
+        &self,
+        object_id: Uuid,
+        type_name: &str,
+        hashes: Vec<(String, &str)>,
+    ) -> Result<(), Error> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|err| Error::Storage(err.to_string()))?;
+        for (hash, field) in hashes {
+            sqlx::query(
+                r#"
+                INSERT INTO unique_constraints (id, type, key, field)
+                VALUES ($1, $2, $3, $4)
+                "#,
+            )
+            .bind(object_id)
+            .bind(type_name)
+            .bind(hash)
+            .bind(&field)
+            .execute(&mut *tx)
+            .await
+            .map_err(|err| {
+                // Check if it's a uniqueness violation
+                if err.to_string().contains("unique") {
+                    Error::UniqueConstraintViolation(field.to_string())
+                } else {
+                    Error::Storage(err.to_string())
+                }
+            })?;
+        }
+
+        tx.commit()
+            .await
+            .map_err(|err| Error::Storage(err.to_string()))?;
+        Ok(())
+    }
+
+    async fn delete_unique(&self, hash: &str) -> Result<(), Error> {
+        sqlx::query(
+            r#"
+            DELETE FROM unique_constraints WHERE key = $1
+            "#,
+        )
+        .bind(hash)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| Error::Storage(e.to_string()))?;
+
+        Ok(())
+    }
+
+    async fn delete_unique_hashes(&self, hashes: Vec<String>) -> Result<(), Error> {
+        let pool = self.pool.clone();
+        let placeholders = hashes.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+
+        let sql = format!(
+            "DELETE FROM unique_constraints WHERE key IN ({})",
+            placeholders
+        );
+
+        let mut query = sqlx::query(&sql);
+        for id in hashes {
+            query = query.bind(id);
+        }
+
+        query
+            .execute(&pool)
+            .await
+            .map_err(|e| Error::Storage(e.to_string()))?;
+
+        Ok(())
+    }
+
+    async fn delete_all_for_object(&self, object_id: Uuid) -> Result<(), Error> {
+        sqlx::query(
+            r#"
+            DELETE FROM unique_constraints WHERE id = $1
+            "#,
+        )
+        .bind(object_id)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| Error::Storage(e.to_string()))?;
+
+        Ok(())
+    }
+
+    async fn get_hashes_for_object(&self, object_id: Uuid) -> Result<Vec<String>, Error> {
+        let rows = sqlx::query(
+            r#"
+            SELECT key FROM unique_constraints WHERE id = $1
+            "#,
+        )
+        .bind(object_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| Error::Storage(e.to_string()))?;
+
+        Ok(rows
+            .into_iter()
+            .map(|row| row.try_get("key").unwrap())
+            .collect())
     }
 }

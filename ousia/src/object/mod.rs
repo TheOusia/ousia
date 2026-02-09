@@ -14,3 +14,13 @@ pub const SYSTEM_OWNER: Uuid = Uuid::from_bytes([
 pub fn system_owner() -> Uuid {
     SYSTEM_OWNER
 }
+
+pub fn derive_unique_hash(type_name: &str, field_name: &str, value: &str) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(type_name.as_bytes());
+    hasher.update(b"::");
+    hasher.update(field_name.as_bytes());
+    hasher.update(b"::");
+    hasher.update(value.as_bytes());
+    hasher.finalize().to_hex().to_string()
+}

@@ -1290,7 +1290,32 @@ impl<'a, E: Edge, O: Object> EdgeQueryContext<'a, E, O> {
 /// -----------------------------
 
 #[async_trait]
-pub trait Adapter: Send + Sync + 'static {
+pub trait UniquenessAdapter {
+    async fn insert_unique(
+        &self,
+        object_id: Uuid,
+        type_name: &str,
+        hash: &str,
+        field: &str,
+    ) -> Result<(), Error>;
+
+    async fn insert_unique_hashes(
+        &self,
+        object_id: Uuid,
+        type_name: &str,
+        hashes: Vec<(String, &str)>,
+    ) -> Result<(), Error>;
+
+    async fn delete_unique(&self, hash: &str) -> Result<(), Error>;
+    async fn delete_unique_hashes(&self, hashes: Vec<String>) -> Result<(), Error>;
+
+    async fn delete_all_for_object(&self, object_id: Uuid) -> Result<(), Error>;
+
+    async fn get_hashes_for_object(&self, object_id: Uuid) -> Result<Vec<String>, Error>;
+}
+
+#[async_trait]
+pub trait Adapter: UniquenessAdapter + Send + Sync + 'static {
     /* ---------------- OBJECTS ---------------- */
     async fn insert_object(&self, record: ObjectRecord) -> Result<(), Error>;
     async fn fetch_object(&self, id: Uuid) -> Result<Option<ObjectRecord>, Error>;

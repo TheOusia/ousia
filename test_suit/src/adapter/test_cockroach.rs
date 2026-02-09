@@ -7,30 +7,18 @@ use super::*;
 use ousia::{
     EdgeMeta, EdgeMetaTrait, EdgeQuery, Engine, Error, Meta, Object, ObjectMeta, ObjectOwnership,
     Query, Union,
-    adapters::{ObjectRecord, cockroach::CockroachAdapter},
+    adapters::{ObjectRecord, postgres::PostgresAdapter},
     filter, system_owner,
 };
-
 #[cfg(test)]
 use sqlx::PgPool;
 #[cfg(test)]
 use testcontainers::ContainerAsync;
 #[cfg(test)]
-use testcontainers_modules::cockroach_db::CockroachDb;
+use testcontainers_modules::postgres::Postgres;
 
 #[cfg(test)]
 use ousia::adapters::Adapter;
-
-#[cfg(test)]
-pub(crate) async fn cockroach_test_client() -> (ContainerAsync<CockroachDb>, CockroachAdapter) {
-    let (_resource, pool) = setup_test_db().await;
-    let adapter = CockroachAdapter::from_pool(pool);
-    if let Err(err) = adapter.init_schema().await {
-        panic!("Error: {:#?}", err);
-    }
-
-    (_resource, adapter)
-}
 
 #[cfg(test)]
 pub(crate) async fn setup_test_db() -> (ContainerAsync<CockroachDb>, PgPool) {
@@ -63,7 +51,7 @@ pub(crate) async fn setup_test_db() -> (ContainerAsync<CockroachDb>, PgPool) {
 #[tokio::test]
 async fn test_adapter_insert() {
     let (_resource, pool) = setup_test_db().await;
-    let adapter = CockroachAdapter::from_pool(pool);
+    let adapter = PostgresAdapter::from_pool(pool);
 
     if let Err(err) = adapter.init_schema().await {
         panic!("Error: {:#?}", err);
@@ -81,7 +69,7 @@ async fn test_adapter_insert() {
 #[tokio::test]
 async fn test_adapter_get() {
     let (_resource, pool) = setup_test_db().await;
-    let adapter = CockroachAdapter::from_pool(pool);
+    let adapter = PostgresAdapter::from_pool(pool);
 
     if let Err(err) = adapter.init_schema().await {
         panic!("Error: {:#?}", err);
@@ -107,7 +95,7 @@ async fn test_adapter_get() {
 #[tokio::test]
 async fn test_adapter_update() {
     let (_resource, pool) = setup_test_db().await;
-    let adapter = CockroachAdapter::from_pool(pool);
+    let adapter = PostgresAdapter::from_pool(pool);
 
     if let Err(err) = adapter.init_schema().await {
         panic!("Error: {:#?}", err);
@@ -148,13 +136,11 @@ async fn test_adapter_update() {
 #[tokio::test]
 async fn test_adapter_query() {
     let (_resource, pool) = setup_test_db().await;
-    let adapter = CockroachAdapter::from_pool(pool);
+    let adapter = PostgresAdapter::from_pool(pool);
 
     if let Err(err) = adapter.init_schema().await {
         panic!("Error: {:#?}", err);
     }
-
-    let start_time = std::time::Instant::now();
 
     let mut user = User::default();
     user.username = "test_user".to_string();
@@ -245,7 +231,6 @@ async fn test_adapter_query() {
         .await
         .unwrap();
     assert_eq!(posts.len(), 1);
-    println!("Time taken: {:?}", start_time.elapsed());
 }
 
 #[test]
@@ -288,7 +273,8 @@ fn test_query_fields() {
 
 #[tokio::test]
 async fn test_engine_create_and_fetch() {
-    let (_resource, adapter) = cockroach_test_client().await;
+    let (_resource, pool) = setup_test_db().await;
+    let adapter = PostgresAdapter::from_pool(pool);
     adapter.init_schema().await.unwrap();
 
     let engine = Engine::new(Box::new(adapter));
@@ -311,7 +297,7 @@ async fn test_engine_create_and_fetch() {
 #[tokio::test]
 async fn test_engine_update() {
     let (_resource, pool) = setup_test_db().await;
-    let adapter = CockroachAdapter::from_pool(pool);
+    let adapter = PostgresAdapter::from_pool(pool);
     adapter.init_schema().await.unwrap();
 
     let engine = Engine::new(Box::new(adapter));
@@ -334,7 +320,7 @@ async fn test_engine_update() {
 #[tokio::test]
 async fn test_engine_delete() {
     let (_resource, pool) = setup_test_db().await;
-    let adapter = CockroachAdapter::from_pool(pool);
+    let adapter = PostgresAdapter::from_pool(pool);
     adapter.init_schema().await.unwrap();
 
     let engine = Engine::new(Box::new(adapter));
@@ -357,7 +343,7 @@ async fn test_engine_delete() {
 #[tokio::test]
 async fn test_engine_query() {
     let (_resource, pool) = setup_test_db().await;
-    let adapter = CockroachAdapter::from_pool(pool);
+    let adapter = PostgresAdapter::from_pool(pool);
     adapter.init_schema().await.unwrap();
 
     let engine = Engine::new(Box::new(adapter));
@@ -406,7 +392,7 @@ async fn test_engine_query() {
 #[tokio::test]
 async fn test_engine_ownership() {
     let (_resource, pool) = setup_test_db().await;
-    let adapter = CockroachAdapter::from_pool(pool);
+    let adapter = PostgresAdapter::from_pool(pool);
     adapter.init_schema().await.unwrap();
 
     let engine = Engine::new(Box::new(adapter));
@@ -436,7 +422,7 @@ async fn test_engine_ownership() {
 #[tokio::test]
 async fn test_engine_transfer_ownership() {
     let (_resource, pool) = setup_test_db().await;
-    let adapter = CockroachAdapter::from_pool(pool);
+    let adapter = PostgresAdapter::from_pool(pool);
     adapter.init_schema().await.unwrap();
 
     let engine = Engine::new(Box::new(adapter));
@@ -444,11 +430,13 @@ async fn test_engine_transfer_ownership() {
     // Create two users
     let mut alice = User::default();
     alice.display_name = "Alice".to_string();
+    alice.username = "alice".to_string();
     alice.email = "alice@example.com".to_string();
     engine.create_object(&alice).await.unwrap();
 
     let mut bob = User::default();
     bob.display_name = "Bob".to_string();
+    bob.username = "bob".to_string();
     bob.email = "bob@example.com".to_string();
     engine.create_object(&bob).await.unwrap();
 
@@ -471,7 +459,7 @@ async fn test_engine_transfer_ownership() {
 #[tokio::test]
 async fn test_engine_edges() {
     let (_resource, pool) = setup_test_db().await;
-    let adapter = CockroachAdapter::from_pool(pool);
+    let adapter = PostgresAdapter::from_pool(pool);
     adapter.init_schema().await.unwrap();
 
     let engine = Engine::new(Box::new(adapter));
@@ -479,11 +467,13 @@ async fn test_engine_edges() {
     // Create two users
     let mut alice = User::default();
     alice.display_name = "Alice".to_string();
+    alice.username = "alice".to_string();
     alice.email = "alice@example.com".to_string();
     engine.create_object(&alice).await.unwrap();
 
     let mut bob = User::default();
     bob.display_name = "Bob".to_string();
+    bob.username = "bob".to_string();
     bob.email = "bob@example.com".to_string();
     engine.create_object(&bob).await.unwrap();
 
@@ -522,7 +512,7 @@ async fn test_engine_edges() {
 #[tokio::test]
 async fn test_engine_count_objects() {
     let (_resource, pool) = setup_test_db().await;
-    let adapter = CockroachAdapter::from_pool(pool);
+    let adapter = PostgresAdapter::from_pool(pool);
     adapter.init_schema().await.unwrap();
 
     let engine = Engine::new(Box::new(adapter));
@@ -552,7 +542,7 @@ async fn test_engine_count_objects() {
 #[tokio::test]
 async fn test_engine_bulk_fetch() {
     let (_resource, pool) = setup_test_db().await;
-    let adapter = CockroachAdapter::from_pool(pool);
+    let adapter = PostgresAdapter::from_pool(pool);
     adapter.init_schema().await.unwrap();
 
     let engine = Engine::new(Box::new(adapter));
@@ -575,7 +565,7 @@ async fn test_engine_bulk_fetch() {
 #[tokio::test]
 async fn test_engine_complex_query() {
     let (_resource, pool) = setup_test_db().await;
-    let adapter = CockroachAdapter::from_pool(pool);
+    let adapter = PostgresAdapter::from_pool(pool);
     adapter.init_schema().await.unwrap();
 
     let engine = Engine::new(Box::new(adapter));
@@ -620,7 +610,7 @@ async fn test_engine_complex_query() {
 #[tokio::test]
 async fn test_engine_query_custom_field() {
     let (_resource, pool) = setup_test_db().await;
-    let adapter = CockroachAdapter::from_pool(pool);
+    let adapter = PostgresAdapter::from_pool(pool);
     adapter.init_schema().await.unwrap();
 
     let engine = Engine::new(Box::new(adapter));
@@ -643,7 +633,7 @@ async fn test_engine_query_custom_field() {
 #[tokio::test]
 async fn test_transfer_wrong_owner_fails() {
     let (_resource, pool) = setup_test_db().await;
-    let adapter = CockroachAdapter::from_pool(pool);
+    let adapter = PostgresAdapter::from_pool(pool);
     adapter.init_schema().await.unwrap();
 
     let engine = Engine::new(Box::new(adapter));
@@ -651,14 +641,17 @@ async fn test_transfer_wrong_owner_fails() {
     // Create users
     let mut alice = User::default();
     alice.display_name = "Alice".to_string();
+    alice.username = "alice".to_string();
     engine.create_object(&alice).await.unwrap();
 
     let mut bob = User::default();
     bob.display_name = "Bob".to_string();
+    bob.username = "bob".to_string();
     engine.create_object(&bob).await.unwrap();
 
     let mut charlie = User::default();
     charlie.display_name = "Charlie".to_string();
+    charlie.username = "charlie".to_string();
     engine.create_object(&charlie).await.unwrap();
 
     // Create object owned by Alice
@@ -678,7 +671,7 @@ async fn test_transfer_wrong_owner_fails() {
 #[tokio::test]
 async fn test_fetch_union_object() {
     let (_resource, pool) = setup_test_db().await;
-    let adapter = CockroachAdapter::from_pool(pool);
+    let adapter = PostgresAdapter::from_pool(pool);
     adapter.init_schema().await.unwrap();
 
     let mut alice = User::default();
@@ -704,7 +697,7 @@ async fn test_fetch_union_object() {
 #[tokio::test]
 async fn test_fetch_union_objects() {
     let (_resource, pool) = setup_test_db().await;
-    let adapter = CockroachAdapter::from_pool(pool);
+    let adapter = PostgresAdapter::from_pool(pool);
     adapter.init_schema().await.unwrap();
 
     let mut alice = User::default();
@@ -741,7 +734,7 @@ async fn test_fetch_union_objects() {
 #[tokio::test]
 async fn test_fetch_owned_union_object() {
     let (_resource, pool) = setup_test_db().await;
-    let adapter = CockroachAdapter::from_pool(pool);
+    let adapter = PostgresAdapter::from_pool(pool);
     adapter.init_schema().await.unwrap();
 
     let mut alice = User::default();
@@ -768,7 +761,7 @@ async fn test_fetch_owned_union_object() {
 #[tokio::test]
 async fn test_fetch_owned_union_objects() {
     let (_resource, pool) = setup_test_db().await;
-    let adapter = CockroachAdapter::from_pool(pool);
+    let adapter = PostgresAdapter::from_pool(pool);
     adapter.init_schema().await.unwrap();
 
     let mut alice = User::default();
@@ -805,7 +798,7 @@ async fn test_fetch_owned_union_objects() {
 #[tokio::test]
 async fn test_reverse_edges() {
     let (_resource, pool) = setup_test_db().await;
-    let adapter = CockroachAdapter::from_pool(pool);
+    let adapter = PostgresAdapter::from_pool(pool);
     adapter.init_schema().await.unwrap();
 
     let engine = Engine::new(Box::new(adapter));
@@ -814,18 +807,18 @@ async fn test_reverse_edges() {
     alice.username = "alice".into();
     alice.email = "alice@example.com".into();
     alice.display_name = "Alice".into();
+    engine.create_object(&alice).await.unwrap();
 
     let mut michael = User::default();
     michael.username = "michael".into();
     michael.email = "michael@example.com".into();
     michael.display_name = "Michael".into();
+    engine.create_object(&michael).await.unwrap();
 
     let mut bob = User::default();
     bob.username = "bob".into();
     bob.email = "bob@example.com".into();
     bob.display_name = "Bob".into();
-
-    engine.create_object(&alice).await.unwrap();
     engine.create_object(&bob).await.unwrap();
 
     engine
@@ -880,10 +873,73 @@ async fn test_reverse_edges() {
     assert_eq!(bob_followers_count, 2);
 }
 
+#[tokio::test]
+async fn test_unique_object() {
+    let (_resource, pool) = setup_test_db().await;
+    let adapter = PostgresAdapter::from_pool(pool);
+    adapter.init_schema().await.unwrap();
+
+    let engine = Engine::new(Box::new(adapter));
+
+    let mut alice = User::default();
+    alice.username = "alice".into();
+    alice.email = "alice@example.com".into();
+    alice.display_name = "Alice".into();
+    engine.create_object(&alice).await.unwrap();
+
+    let mut michael = User::default();
+    michael.username = "alice".into();
+    michael.email = "michael@example.com".into();
+    michael.display_name = "Michael".into();
+    let err = engine.create_object(&michael).await.unwrap_err();
+    assert_eq!(
+        err,
+        Error::UniqueConstraintViolation(String::from("username"))
+    );
+
+    use ousia::{Meta, OusiaDefault, OusiaObject, Unique};
+    #[derive(OusiaObject, OusiaDefault, Debug)]
+    #[ousia(
+        unique = "username+email",
+        index = "email:search",
+        index = "username:search+sort"
+    )]
+    pub struct CompositeUser {
+        _meta: Meta,
+
+        pub username: String,
+        pub email: String,
+        pub display_name: String,
+    }
+
+    let mut alice = CompositeUser::default();
+    alice.username = "alice".into();
+    alice.email = "alice@example.com".into();
+    alice.display_name = "Alice".into();
+    engine.create_object(&alice).await.unwrap();
+
+    let mut michael = CompositeUser::default();
+    michael.username = "alice".into();
+    michael.email = "michael@example.com".into();
+    michael.display_name = "Michael".into();
+    engine.create_object(&michael).await.unwrap();
+
+    let mut bob = CompositeUser::default();
+    bob.username = "alice".into();
+    bob.email = "alice@example.com".into();
+    bob.display_name = "Bob".into();
+    let err = engine.create_object(&bob).await.unwrap_err();
+
+    assert_eq!(
+        err,
+        Error::UniqueConstraintViolation(String::from("username+email"))
+    );
+}
+
 #[cfg(feature = "ledger")]
 mod ledger_tests {
     use super::*;
-    use ousia::adapters::postgres::CockroachAdapter;
+    use ousia::adapters::postgres::PostgresAdapter;
     use ousia::ledger::{
         Asset, Balance, LedgerAdapter, LedgerSystem, Money, MoneyError, Transaction,
     };
@@ -896,7 +952,7 @@ mod ledger_tests {
     #[tokio::test]
     async fn test_full_transaction_flow() {
         let (_container, pool) = setup_test_db().await;
-        let adapter = CockroachAdapter::from_pool(pool);
+        let adapter = PostgresAdapter::from_pool(pool);
         adapter.init_schema().await.unwrap();
 
         // Create asset
@@ -945,7 +1001,7 @@ mod ledger_tests {
     #[tokio::test]
     async fn test_idempotency() {
         let (_container, pool) = setup_test_db().await;
-        let adapter = CockroachAdapter::from_pool(pool);
+        let adapter = PostgresAdapter::from_pool(pool);
         adapter.init_schema().await.unwrap();
 
         let asset = Asset::new("EUR", 10_000);
@@ -976,7 +1032,7 @@ mod ledger_tests {
     #[tokio::test]
     async fn test_transaction_reversion() {
         let (_container, pool) = setup_test_db().await;
-        let adapter = CockroachAdapter::from_pool(pool);
+        let adapter = PostgresAdapter::from_pool(pool);
         adapter.init_schema().await.unwrap();
 
         let asset = Asset::new("GBP", 10_000);
@@ -1035,7 +1091,7 @@ mod ledger_tests {
     #[tokio::test]
     async fn test_create_assets() {
         let (_container, pool) = setup_test_db().await;
-        let adapter = CockroachAdapter::from_pool(pool);
+        let adapter = PostgresAdapter::from_pool(pool);
         adapter.init_schema().await.unwrap();
 
         let system = Arc::new(LedgerSystem::new(Box::new(adapter)));
@@ -1060,7 +1116,7 @@ mod ledger_tests {
     #[tokio::test]
     async fn test_mint_money() {
         let (_container, pool) = setup_test_db().await;
-        let adapter = CockroachAdapter::from_pool(pool);
+        let adapter = PostgresAdapter::from_pool(pool);
         adapter.init_schema().await.unwrap();
 
         let system = Arc::new(LedgerSystem::new(Box::new(adapter)));
@@ -1094,7 +1150,7 @@ mod ledger_tests {
     #[tokio::test]
     async fn test_transfer_money() {
         let (_container, pool) = setup_test_db().await;
-        let adapter = CockroachAdapter::from_pool(pool);
+        let adapter = PostgresAdapter::from_pool(pool);
         adapter.init_schema().await.unwrap();
 
         let system = Arc::new(LedgerSystem::new(Box::new(adapter)));
@@ -1137,7 +1193,7 @@ mod ledger_tests {
     #[tokio::test]
     async fn test_transfer_insufficient_funds() {
         let (_container, pool) = setup_test_db().await;
-        let adapter = CockroachAdapter::from_pool(pool);
+        let adapter = PostgresAdapter::from_pool(pool);
         adapter.init_schema().await.unwrap();
 
         let system = Arc::new(LedgerSystem::new(Box::new(adapter)));
@@ -1166,7 +1222,7 @@ mod ledger_tests {
     #[tokio::test]
     async fn test_reserve_money() {
         let (_container, pool) = setup_test_db().await;
-        let adapter = CockroachAdapter::from_pool(pool);
+        let adapter = PostgresAdapter::from_pool(pool);
         adapter.init_schema().await.unwrap();
 
         let system = Arc::new(LedgerSystem::new(Box::new(adapter)));
@@ -1207,7 +1263,7 @@ mod ledger_tests {
     #[tokio::test]
     async fn test_idempotent_minting() {
         let (_container, pool) = setup_test_db().await;
-        let adapter = CockroachAdapter::from_pool(pool);
+        let adapter = PostgresAdapter::from_pool(pool);
         adapter.init_schema().await.unwrap();
 
         let system = Arc::new(LedgerSystem::new(Box::new(adapter)));
@@ -1254,7 +1310,7 @@ mod ledger_tests {
     #[tokio::test]
     async fn test_burn_money() {
         let (_container, pool) = setup_test_db().await;
-        let adapter = CockroachAdapter::from_pool(pool);
+        let adapter = PostgresAdapter::from_pool(pool);
         adapter.init_schema().await.unwrap();
 
         let system = Arc::new(LedgerSystem::new(Box::new(adapter)));
@@ -1284,7 +1340,7 @@ mod ledger_tests {
     #[tokio::test]
     async fn test_multiple_transfers() {
         let (_container, pool) = setup_test_db().await;
-        let adapter = CockroachAdapter::from_pool(pool);
+        let adapter = PostgresAdapter::from_pool(pool);
         adapter.init_schema().await.unwrap();
 
         let system = Arc::new(LedgerSystem::new(Box::new(adapter)));
@@ -1339,7 +1395,7 @@ mod ledger_tests {
     #[tokio::test]
     async fn test_invalid_amount() {
         let (_container, pool) = setup_test_db().await;
-        let adapter = CockroachAdapter::from_pool(pool);
+        let adapter = PostgresAdapter::from_pool(pool);
         adapter.init_schema().await.unwrap();
 
         let system = Arc::new(LedgerSystem::new(Box::new(adapter)));
@@ -1364,7 +1420,7 @@ mod ledger_tests {
     #[tokio::test]
     async fn test_asset_not_found() {
         let (_container, pool) = setup_test_db().await;
-        let adapter = CockroachAdapter::from_pool(pool);
+        let adapter = PostgresAdapter::from_pool(pool);
         adapter.init_schema().await.unwrap();
 
         let system = Arc::new(LedgerSystem::new(Box::new(adapter)));
@@ -1381,7 +1437,7 @@ mod ledger_tests {
     #[tokio::test]
     async fn test_concurrent_transfers() {
         let (_container, pool) = setup_test_db().await;
-        let adapter = CockroachAdapter::from_pool(pool);
+        let adapter = PostgresAdapter::from_pool(pool);
         adapter.init_schema().await.unwrap();
 
         let system = Arc::new(LedgerSystem::new(Box::new(adapter)));
@@ -1432,7 +1488,7 @@ mod ledger_tests {
     #[tokio::test]
     async fn test_fragmentation() {
         let (_container, pool) = setup_test_db().await;
-        let adapter = CockroachAdapter::from_pool(pool);
+        let adapter = PostgresAdapter::from_pool(pool);
         adapter.init_schema().await.unwrap();
 
         let system = Arc::new(LedgerSystem::new(Box::new(adapter)));
@@ -1465,7 +1521,7 @@ mod ledger_tests {
     #[tokio::test]
     async fn test_balance_with_mixed_states() {
         let (_container, pool) = setup_test_db().await;
-        let adapter = CockroachAdapter::from_pool(pool);
+        let adapter = PostgresAdapter::from_pool(pool);
         adapter.init_schema().await.unwrap();
 
         let system = Arc::new(LedgerSystem::new(Box::new(adapter)));

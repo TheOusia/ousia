@@ -13,12 +13,18 @@ pub trait ObjectInternal {
     fn __serialize_internal(&self) -> serde_json::Value;
 }
 
+/// Provides unique fields for an object.
+pub trait Unique {
+    const HAS_UNIQUE_FIELDS: bool;
+    fn derive_unique_hashes(&self) -> Vec<(String, &'static str)>;
+}
+
 ///
 /// Derive macro is expected to produce
 /// const FIELDS: &'static TypeNameIndexes {field_name: crate::query::IndexField,...}
 ///
 pub trait Object:
-    ObjectInternal + Serialize + for<'de> Deserialize<'de> + Sized + Send + Sync + 'static
+    ObjectInternal + Unique + Serialize + for<'de> Deserialize<'de> + Sized + Send + Sync + 'static
 {
     /// Object type name
     const TYPE: &'static str;

@@ -6,7 +6,6 @@ pub mod query;
 
 #[cfg(feature = "ledger")]
 pub use ledger;
-use redis::AsyncTypedCommands;
 
 use std::sync::Arc;
 
@@ -47,13 +46,25 @@ impl Engine {
     }
 
     // ==================== Object CRUD ====================
-
     /// Create a new object in storage
     pub async fn create_object<T: Object>(&self, obj: &T) -> Result<(), Error> {
-        self.inner
-            .adapter
-            .insert_object(ObjectRecord::from_object(obj))
-            .await?;
+        if !T::HAS_UNIQUE_FIELDS {
+            self.inner
+                .adapter
+                .insert_object(ObjectRecord::from_object(obj))
+                .await?;
+        } else {
+            let unique_hashes = obj.derive_unique_hashes();
+
+            self.inner
+                .adapter
+                .insert_unique_hashes(obj.id(), obj.type_name(), unique_hashes)
+                .await?;
+            self.inner
+                .adapter
+                .insert_object(ObjectRecord::from_object(obj))
+                .await?;
+        }
 
         Ok(())
     }
@@ -78,11 +89,84 @@ impl Engine {
         let meta = obj.meta_mut();
         meta.updated_at = Utc::now();
 
-        let _ = self
-            .inner
-            .adapter
-            .update_object(ObjectRecord::from_object(obj))
-            .await?;
+        if !T::HAS_UNIQUE_FIELDS {
+            // No unique fields, just update the object
+            self.inner
+                .adapter
+                .update_object(ObjectRecord::from_object(obj))
+                .await?;
+        } else {
+            let object_id = obj.id();
+            let type_name = obj.type_name();
+
+            // Get current hashes from database
+            let old_hashes = self.inner.adapter.get_hashes_for_object(object_id).await?;
+
+            // Get new hashes from the updated object
+            let new_hashes = obj.derive_unique_hashes();
+
+            // Determine which hashes to add and remove
+            let hashes_to_add: Vec<_> = new_hashes
+                .iter()
+                .filter(|(hash, _)| !old_hashes.contains(hash))
+                .cloned()
+                .collect();
+
+            let hashes_to_remove: Vec<_> = old_hashes
+                .iter()
+                .filter(|hash| !new_hashes.iter().any(|(h, _)| h == *hash))
+                .cloned()
+                .collect();
+
+            // If nothing changed in unique fields, skip uniqueness operations
+            if hashes_to_add.is_empty() && hashes_to_remove.is_empty() {
+                // Just update the object
+                self.inner
+                    .adapter
+                    .update_object(ObjectRecord::from_object(obj))
+                    .await?;
+            } else {
+                // Try to insert new hashes (will fail if already taken)
+                if !hashes_to_add.is_empty() {
+                    self.inner
+                        .adapter
+                        .insert_unique_hashes(
+                            object_id,
+                            type_name,
+                            hashes_to_add.iter().cloned().collect(),
+                        )
+                        .await?;
+                }
+
+                // Update the object
+                match self
+                    .inner
+                    .adapter
+                    .update_object(ObjectRecord::from_object(obj))
+                    .await
+                {
+                    Ok(_) => (),
+                    Err(err) => {
+                        // Rollback the insertion of new hashes
+                        if !hashes_to_add.is_empty() {
+                            let hashes = hashes_to_add
+                                .into_iter()
+                                .map(|(hash, _)| hash)
+                                .collect::<Vec<String>>();
+                            self.inner.adapter.delete_unique_hashes(hashes).await?;
+                        }
+                        return Err(err);
+                    }
+                }
+
+                // Clean up old hashes (only after successful update)
+                if !hashes_to_remove.is_empty() {
+                    for hash in hashes_to_remove {
+                        self.inner.adapter.delete_unique(&hash).await?;
+                    }
+                }
+            }
+        }
 
         Ok(())
     }

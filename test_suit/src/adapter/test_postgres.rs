@@ -21,17 +21,6 @@ use testcontainers_modules::postgres::Postgres;
 use ousia::adapters::Adapter;
 
 #[cfg(test)]
-pub(crate) async fn postgres_test_client() -> (ContainerAsync<Postgres>, PostgresAdapter) {
-    let (_resource, pool) = setup_test_db().await;
-    let adapter = PostgresAdapter::from_pool(pool);
-    if let Err(err) = adapter.init_schema().await {
-        panic!("Error: {:#?}", err);
-    }
-
-    (_resource, adapter)
-}
-
-#[cfg(test)]
 pub(crate) async fn setup_test_db() -> (ContainerAsync<Postgres>, PgPool) {
     use sqlx::postgres::PgPoolOptions;
     use testcontainers::{ImageExt, runners::AsyncRunner as _};
@@ -290,7 +279,8 @@ fn test_query_fields() {
 
 #[tokio::test]
 async fn test_engine_create_and_fetch() {
-    let (_resource, adapter) = postgres_test_client().await;
+    let (_resource, pool) = setup_test_db().await;
+    let adapter = PostgresAdapter::from_pool(pool);
     adapter.init_schema().await.unwrap();
 
     let engine = Engine::new(Box::new(adapter));
@@ -446,11 +436,13 @@ async fn test_engine_transfer_ownership() {
     // Create two users
     let mut alice = User::default();
     alice.display_name = "Alice".to_string();
+    alice.username = "alice".to_string();
     alice.email = "alice@example.com".to_string();
     engine.create_object(&alice).await.unwrap();
 
     let mut bob = User::default();
     bob.display_name = "Bob".to_string();
+    bob.username = "bob".to_string();
     bob.email = "bob@example.com".to_string();
     engine.create_object(&bob).await.unwrap();
 
@@ -481,11 +473,13 @@ async fn test_engine_edges() {
     // Create two users
     let mut alice = User::default();
     alice.display_name = "Alice".to_string();
+    alice.username = "alice".to_string();
     alice.email = "alice@example.com".to_string();
     engine.create_object(&alice).await.unwrap();
 
     let mut bob = User::default();
     bob.display_name = "Bob".to_string();
+    bob.username = "bob".to_string();
     bob.email = "bob@example.com".to_string();
     engine.create_object(&bob).await.unwrap();
 
@@ -653,14 +647,17 @@ async fn test_transfer_wrong_owner_fails() {
     // Create users
     let mut alice = User::default();
     alice.display_name = "Alice".to_string();
+    alice.username = "alice".to_string();
     engine.create_object(&alice).await.unwrap();
 
     let mut bob = User::default();
     bob.display_name = "Bob".to_string();
+    bob.username = "bob".to_string();
     engine.create_object(&bob).await.unwrap();
 
     let mut charlie = User::default();
     charlie.display_name = "Charlie".to_string();
+    charlie.username = "charlie".to_string();
     engine.create_object(&charlie).await.unwrap();
 
     // Create object owned by Alice
@@ -816,18 +813,18 @@ async fn test_reverse_edges() {
     alice.username = "alice".into();
     alice.email = "alice@example.com".into();
     alice.display_name = "Alice".into();
+    engine.create_object(&alice).await.unwrap();
 
     let mut michael = User::default();
     michael.username = "michael".into();
     michael.email = "michael@example.com".into();
     michael.display_name = "Michael".into();
+    engine.create_object(&michael).await.unwrap();
 
     let mut bob = User::default();
     bob.username = "bob".into();
     bob.email = "bob@example.com".into();
     bob.display_name = "Bob".into();
-
-    engine.create_object(&alice).await.unwrap();
     engine.create_object(&bob).await.unwrap();
 
     engine
@@ -880,6 +877,69 @@ async fn test_reverse_edges() {
         .await
         .unwrap();
     assert_eq!(bob_followers_count, 2);
+}
+
+#[tokio::test]
+async fn test_unique_object() {
+    let (_resource, pool) = setup_test_db().await;
+    let adapter = PostgresAdapter::from_pool(pool);
+    adapter.init_schema().await.unwrap();
+
+    let engine = Engine::new(Box::new(adapter));
+
+    let mut alice = User::default();
+    alice.username = "alice".into();
+    alice.email = "alice@example.com".into();
+    alice.display_name = "Alice".into();
+    engine.create_object(&alice).await.unwrap();
+
+    let mut michael = User::default();
+    michael.username = "alice".into();
+    michael.email = "michael@example.com".into();
+    michael.display_name = "Michael".into();
+    let err = engine.create_object(&michael).await.unwrap_err();
+    assert_eq!(
+        err,
+        Error::UniqueConstraintViolation(String::from("username"))
+    );
+
+    use ousia::{Meta, OusiaDefault, OusiaObject};
+    #[derive(OusiaObject, OusiaDefault, Debug)]
+    #[ousia(
+        unique = "username+email",
+        index = "email:search",
+        index = "username:search+sort"
+    )]
+    pub struct CompositeUser {
+        _meta: Meta,
+
+        pub username: String,
+        pub email: String,
+        pub display_name: String,
+    }
+
+    let mut alice = CompositeUser::default();
+    alice.username = "alice".into();
+    alice.email = "alice@example.com".into();
+    alice.display_name = "Alice".into();
+    engine.create_object(&alice).await.unwrap();
+
+    let mut michael = CompositeUser::default();
+    michael.username = "alice".into();
+    michael.email = "michael@example.com".into();
+    michael.display_name = "Michael".into();
+    engine.create_object(&michael).await.unwrap();
+
+    let mut bob = CompositeUser::default();
+    bob.username = "alice".into();
+    bob.email = "alice@example.com".into();
+    bob.display_name = "Bob".into();
+    let err = engine.create_object(&bob).await.unwrap_err();
+
+    assert_eq!(
+        err,
+        Error::UniqueConstraintViolation(String::from("username+email"))
+    );
 }
 
 #[cfg(feature = "ledger")]

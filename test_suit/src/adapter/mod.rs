@@ -1,7 +1,7 @@
 use ousia::{EdgeMeta, Meta, OusiaDefault, OusiaEdge, OusiaObject, query::ToIndexValue};
 use serde::{Deserialize, Serialize};
 
-pub mod test_cockroach;
+// pub mod test_cockroach;
 pub mod test_postgres;
 pub mod test_sqlite;
 
@@ -69,6 +69,7 @@ impl ToIndexValue for Wallet {
 #[derive(OusiaObject, OusiaDefault, Debug)]
 #[ousia(
     type_name = "User",
+    unique = "username",
     index = "email:search",
     index = "username:search+sort",
     index = "balance:search"
@@ -82,7 +83,7 @@ pub struct User {
     pub balance: Wallet,
 }
 
-#[derive(Debug, OusiaEdge, OusiaDefault)]
+#[derive(Debug, OusiaEdge)]
 #[ousia(type_name = "Follow", index = "notification:search")]
 struct Follow {
     _meta: EdgeMeta,

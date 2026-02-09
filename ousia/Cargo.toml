@@ -4,12 +4,15 @@ version = "1.0.0"
 edition = "2024"
 
 [features]
-default = ["derive", "cockroach", "ledger"]
-full = ["derive", "cockroach", "postgres", "sqlite", "ledger"]
+default = ["derive", "postgres", "ledger"]
 derive = ["dep:ousia_derive"]
+
+full = ["derive", "cockroach", "postgres", "sqlite", "ledger"]
+
 cockroach = ["dep:sqlx"]
 postgres = ["dep:sqlx"]
 sqlite = ["dep:sqlx"]
+
 ledger = ["dep:ledger"]
 sequence = ["postgres","cockroach"]
 
@@ -34,6 +37,7 @@ redis = { version = "1", features = ["json", "tokio-comp"] }
 ousia_derive = { version = "1", path = "../ousia_derive", optional = true }
 ledger = { version = "1", path = "../ledger", optional = true }
 uuid = { version = "1", features = ["v7", "serde"] }
+blake3 = "1.8.3"
 
 [dev-dependencies]
 testcontainers = "0.25"
