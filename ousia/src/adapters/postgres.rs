@@ -1,13 +1,13 @@
 use chrono::Utc;
 use sqlx::{
-    Execute, PgPool, Postgres, Row,
+    PgPool, Postgres, Row,
     postgres::{PgArguments, PgRow},
     query::{Query as PgQuery, QueryScalar},
 };
 use uuid::Uuid;
 
 use crate::{
-    adapters::{Adapter, EdgeQuery, EdgeRecord, Error, ObjectRecord, Query, UniquenessAdapter},
+    adapters::{Adapter, EdgeQuery, EdgeRecord, Error, ObjectRecord, Query, UniqueAdapter},
     query::{Cursor, IndexValue, IndexValueInner, QueryFilter},
 };
 
@@ -1502,7 +1502,7 @@ impl Adapter for PostgresAdapter {
 }
 
 #[async_trait::async_trait]
-impl UniquenessAdapter for PostgresAdapter {
+impl UniqueAdapter for PostgresAdapter {
     async fn insert_unique(
         &self,
         object_id: Uuid,

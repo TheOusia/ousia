@@ -1290,7 +1290,7 @@ impl<'a, E: Edge, O: Object> EdgeQueryContext<'a, E, O> {
 /// -----------------------------
 
 #[async_trait]
-pub trait UniquenessAdapter {
+pub(crate) trait UniqueAdapter {
     async fn insert_unique(
         &self,
         object_id: Uuid,
@@ -1314,8 +1314,9 @@ pub trait UniquenessAdapter {
     async fn get_hashes_for_object(&self, object_id: Uuid) -> Result<Vec<String>, Error>;
 }
 
+#[allow(private_bounds)]
 #[async_trait]
-pub trait Adapter: UniquenessAdapter + Send + Sync + 'static {
+pub trait Adapter: UniqueAdapter + Send + Sync + 'static {
     /* ---------------- OBJECTS ---------------- */
     async fn insert_object(&self, record: ObjectRecord) -> Result<(), Error>;
     async fn fetch_object(&self, id: Uuid) -> Result<Option<ObjectRecord>, Error>;

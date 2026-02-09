@@ -7,7 +7,7 @@ use sqlx::{
 use uuid::Uuid;
 
 use crate::{
-    adapters::{Adapter, EdgeQuery, EdgeRecord, Error, ObjectRecord, Query, UniquenessAdapter},
+    adapters::{Adapter, EdgeQuery, EdgeRecord, Error, ObjectRecord, Query, UniqueAdapter},
     query::{Cursor, IndexValue, IndexValueInner, QueryFilter},
 };
 
@@ -1474,7 +1474,7 @@ impl Adapter for CockroachAdapter {
 }
 
 #[async_trait::async_trait]
-impl UniquenessAdapter for CockroachAdapter {
+impl UniqueAdapter for CockroachAdapter {
     async fn insert_unique(
         &self,
         object_id: Uuid,
