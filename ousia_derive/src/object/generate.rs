@@ -712,6 +712,8 @@ pub fn generate_object_impl(input: &DeriveInput) -> Result<TokenStream> {
                     #[serde(field_identifier, rename_all = "snake_case")]
                     enum Field {
                         #(#deserialize_field_variants,)*
+                        #[serde(other)]
+                         Unknown,
                     }
 
                     struct #visitor_name;
@@ -734,6 +736,9 @@ pub fn generate_object_impl(input: &DeriveInput) -> Result<TokenStream> {
                             while let Some(key) = map.next_key()? {
                                 match key {
                                     #(#match_arms)*
+                                    Field::Unknown => {
+                                        let _: serde::de::IgnoredAny = map.next_value()?;
+                                    }
                                 }
                             }
 
