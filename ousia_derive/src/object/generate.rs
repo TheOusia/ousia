@@ -5,8 +5,8 @@ use quote::{format_ident, quote};
 use syn::{Data, DeriveInput, Expr, ExprLit, Field, Fields, Lit, Meta, Result, Type};
 
 use crate::shared::{
-    get_ousia_attr, import_ousia, is_meta_field, is_private_field, parse_index_kinds,
-    parse_ousia_attr,
+    get_field_default_value, get_ousia_attr, import_ousia, is_meta_field, is_private_field,
+    parse_index_kinds, parse_ousia_attr,
 };
 
 const RESERVED_FIELDS: &[&str] = &["id", "owner", "type", "created_at", "updated_at"];
@@ -580,10 +580,56 @@ pub fn generate_object_impl(input: &DeriveInput) -> Result<TokenStream> {
             false
         }
 
-        // Check which fields are Option types
+        fn should_use_default(ty: &Type) -> bool {
+            // Check if type is Option (always uses default)
+            if is_option_type(ty) {
+                return true;
+            }
+
+            // Check for common types that implement Default
+            if let Type::Path(type_path) = ty {
+                if let Some(segment) = type_path.path.segments.last() {
+                    let type_name = segment.ident.to_string();
+
+                    // Common stdlib types that implement Default
+                    match type_name.as_str() {
+                                // Collections
+                                "Vec" | "HashMap" | "HashSet" | "BTreeMap" | "BTreeSet" |
+                                "VecDeque" | "LinkedList" | "BinaryHeap" |
+                                // Strings
+                                "String" |
+                                // Numbers (all primitive number types implement Default)
+                                "i8" | "i16" | "i32" | "i64" | "i128" | "isize" |
+                                "u8" | "u16" | "u32" | "u64" | "u128" | "usize" |
+                                "f32" | "f64" |
+                                // Other common types
+                                "bool" | "PathBuf" | "Duration" => return true,
+                                _ => {}
+                            }
+                }
+            }
+
+            // For other types (including custom enums), assume they implement Default
+            // The compiler will verify at compile time
+            true
+        }
+
+        // Check which fields are Option types (special handling)
         let field_is_optional: Vec<bool> = non_meta_fields
             .iter()
             .map(|f| is_option_type(&f.ty))
+            .collect();
+
+        // Check which fields should use Default::default()
+        let field_uses_default: Vec<bool> = non_meta_fields
+            .iter()
+            .map(|f| should_use_default(&f.ty))
+            .collect();
+
+        // Extract explicit default values from #[ousia(default = "value")]
+        let field_default_values: Vec<Option<String>> = non_meta_fields
+            .iter()
+            .map(|f| get_field_default_value(f))
             .collect();
 
         // Generate match arms - handle Option<T> fields differently
@@ -617,20 +663,39 @@ pub fn generate_object_impl(input: &DeriveInput) -> Result<TokenStream> {
                 }
             });
 
-        // Generate field initialization
+        // Generate field initialization - now handles four cases:
+        // 1. Option<T> fields
+        // 2. Fields with explicit #[ousia(default = "value")]
+        // 3. Fields that implement Default
+        // 4. Required fields
         let field_inits = deserialize_field_idents
             .iter()
             .zip(deserialize_field_names.iter())
             .zip(field_is_optional.iter())
-            .map(|((ident, name), is_opt)| {
+            .zip(field_uses_default.iter())
+            .zip(field_default_values.iter())
+            .map(|((((ident, name), is_opt), uses_default), default_value)| {
                 if *is_opt {
                     // For Option<T>: unwrap outer Option, inner Option becomes the field value
                     // Variable is Option<Option<T>>, we want Option<T>
                     quote! {
                         #ident: #ident.unwrap_or(None)
                     }
+                } else if let Some(default_expr) = default_value {
+                    // For fields with explicit default value: parse and use the expression
+                    let default_tokens: proc_macro2::TokenStream = default_expr
+                        .parse()
+                        .expect("Failed to parse default value expression");
+                    quote! {
+                        #ident: #ident.unwrap_or_else(|| #default_tokens)
+                    }
+                } else if *uses_default {
+                    // For types that implement Default: use Default::default() if missing
+                    quote! {
+                        #ident: #ident.unwrap_or_else(|| Default::default())
+                    }
                 } else {
-                    // For T: error if missing
+                    // For required fields: error if missing
                     quote! {
                         #ident: #ident.ok_or_else(|| serde::de::Error::missing_field(#name))?
                     }

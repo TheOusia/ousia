@@ -46,6 +46,37 @@ pub fn is_meta_field(field: &Field) -> bool {
     })
 }
 
+/// Extract default value from #[ousia(default = "value")] attribute
+pub fn get_field_default_value(field: &Field) -> Option<String> {
+    for attr in &field.attrs {
+        if !attr.path().is_ident("ousia") {
+            continue;
+        }
+
+        if let Meta::List(meta_list) = &attr.meta {
+            let result = meta_list.parse_args_with(
+                syn::punctuated::Punctuated::<Meta, syn::Token![,]>::parse_terminated,
+            );
+
+            if let Ok(nested) = result {
+                for meta in nested {
+                    if let Meta::NameValue(nv) = meta {
+                        if nv.path.is_ident("default") {
+                            if let Expr::Lit(ExprLit {
+                                lit: Lit::Str(s), ..
+                            }) = &nv.value
+                            {
+                                return Some(s.value());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Parse type and index list from `#[ousia(...)]` using updated syn API
 pub fn parse_ousia_attr(attr: Option<&Attribute>) -> (Option<String>, Vec<(String, String)>) {
     let mut type_name = None;
