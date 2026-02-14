@@ -942,6 +942,24 @@ async fn test_unique_object() {
     );
 }
 
+#[tokio::test]
+async fn test_sequence() {
+    let (_resource, pool) = setup_test_db().await;
+    let adapter = PostgresAdapter::from_pool(pool);
+    adapter.init_schema().await.unwrap();
+
+    let engine = Engine::new(Box::new(adapter));
+
+    let value = engine.counter_value("my-key".to_string()).await;
+    assert_eq!(value, 1);
+
+    let value = engine.counter_next_value("my-key".to_string()).await;
+    assert_eq!(value, 2);
+
+    let value = engine.counter_value("my-key".to_string()).await;
+    assert_eq!(value, 2);
+}
+
 #[cfg(feature = "ledger")]
 mod ledger_tests {
     use super::*;

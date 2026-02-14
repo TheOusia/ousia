@@ -878,3 +878,21 @@ async fn test_unique_object() {
         Error::UniqueConstraintViolation(String::from("username+email"))
     );
 }
+
+
+#[tokio::test]
+async fn test_sequence() {
+    let adapter = SqliteAdapter::new_memory().await.unwrap();
+    adapter.init_schema().await.unwrap();
+
+    let engine = Engine::new(Box::new(adapter));
+
+    let value = engine.counter_value("my-key".to_string()).await;
+    assert_eq!(value, 1);
+
+    let value = engine.counter_next_value("my-key".to_string()).await;
+    assert_eq!(value, 2);
+
+    let value = engine.counter_value("my-key".to_string()).await;
+    assert_eq!(value, 2);
+}

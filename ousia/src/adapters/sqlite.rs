@@ -199,6 +199,29 @@ impl SqliteAdapter {
         Ok(())
     }
 
+    async fn ensure_sequence_exists(&self, sq: String) {
+        // Create the sequences table if it doesn't exist
+        let _ = sqlx::query(
+            "CREATE TABLE IF NOT EXISTS sequences (
+            name TEXT PRIMARY KEY,
+            value INTEGER NOT NULL DEFAULT 1
+        )",
+        )
+        .execute(&self.pool.clone())
+        .await
+        .unwrap();
+
+        // Insert the sequence if it doesn't exist
+        let sql = format!(
+            "INSERT OR IGNORE INTO sequences (name, value) VALUES ('{}', 1)",
+            sq
+        );
+
+        let _ = sqlx::query(&sql).execute(&self.pool.clone()).await.unwrap();
+    }
+}
+
+impl SqliteAdapter {
     fn map_row_to_object_record(row: SqliteRow) -> Result<ObjectRecord, Error> {
         let data_str: String = row
             .try_get("data")
@@ -1393,6 +1416,46 @@ impl Adapter for SqliteAdapter {
                 Ok(count as u64)
             }
         }
+    }
+
+    async fn sequence_value(&self, sq: String) -> u64 {
+        self.ensure_sequence_exists(sq.clone()).await;
+
+        let current_val: i64 = sqlx::query_scalar("SELECT value FROM sequences WHERE name = ?")
+            .bind(sq)
+            .fetch_one(&self.pool.clone())
+            .await
+            .expect("Failed to fetch the current sequence value");
+
+        current_val as u64
+    }
+
+    async fn sequence_next_value(&self, sq: String) -> u64 {
+        self.ensure_sequence_exists(sq.clone()).await;
+
+        // SQLite doesn't support RETURNING in UPDATE until version 3.35.0
+        // So we'll do it in a transaction for atomicity
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .expect("Failed to begin transaction");
+
+        sqlx::query("UPDATE sequences SET value = value + 1 WHERE name = ?")
+            .bind(&sq)
+            .execute(&mut *tx)
+            .await
+            .expect("Failed to increment sequence");
+
+        let next_val: i64 = sqlx::query_scalar("SELECT value FROM sequences WHERE name = ?")
+            .bind(sq)
+            .fetch_one(&mut *tx)
+            .await
+            .expect("Failed to fetch the next sequence value");
+
+        tx.commit().await.expect("Failed to commit transaction");
+
+        next_val as u64
     }
 }
 

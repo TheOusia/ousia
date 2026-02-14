@@ -406,12 +406,10 @@ impl Engine {
     }
 
     // ==================== Sequence ====================
-    #[cfg(feature = "sequence")]
     pub async fn counter_value(&self, key: String) -> u64 {
         self.inner.adapter.sequence_value(key).await
     }
 
-    #[cfg(feature = "sequence")]
     pub async fn counter_next_value(&self, key: String) -> u64 {
         self.inner.adapter.sequence_next_value(key).await
     }

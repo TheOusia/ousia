@@ -3,6 +3,7 @@ use std::time::Duration;
 
 #[cfg(test)]
 use super::*;
+use ousia::adapters::cockroach::CockroachAdapter;
 #[cfg(test)]
 use ousia::{
     EdgeMeta, EdgeMetaTrait, EdgeQuery, Engine, Error, Meta, Object, ObjectMeta, ObjectOwnership,
@@ -934,4 +935,22 @@ async fn test_unique_object() {
         err,
         Error::UniqueConstraintViolation(String::from("username+email"))
     );
+}
+
+#[tokio::test]
+async fn test_sequence() {
+    let (_resource, pool) = setup_test_db().await;
+    let adapter = CockroachAdapter::from_pool(pool);
+    adapter.init_schema().await.unwrap();
+
+    let engine = Engine::new(Box::new(adapter));
+
+    let value = engine.counter_value("my-key".to_string()).await;
+    assert_eq!(value, 1);
+
+    let value = engine.counter_next_value("my-key".to_string()).await;
+    assert_eq!(value, 2);
+
+    let value = engine.counter_value("my-key".to_string()).await;
+    assert_eq!(value, 2);
 }

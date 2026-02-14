@@ -181,22 +181,12 @@ impl CockroachAdapter {
     }
 
     async fn ensure_sequence_exists(&self, sq: String) {
-        let _ = sqlx::query(
-            "DO $$
-            BEGIN
-                IF NOT EXISTS (
-                    SELECT 1
-                    FROM pg_catalog.pg_sequence
-                    WHERE sequencename = $1
-                ) THEN
-                    CREATE SEQUENCE $1;
-                END IF;
-            END $$;",
-        )
-        .bind(sq)
-        .execute(&self.pool.clone())
-        .await
-        .unwrap();
+        // Escape double quotes and wrap in quotes
+        let quoted_sq = format!("\"{}\"", sq.replace("\"", "\"\""));
+
+        let sql = format!("CREATE SEQUENCE IF NOT EXISTS {}", quoted_sq);
+
+        let _ = sqlx::query(&sql).execute(&self.pool.clone()).await.unwrap();
     }
 }
 
@@ -1446,29 +1436,32 @@ impl Adapter for CockroachAdapter {
         }
     }
 
-    #[cfg(feature = "sequence")]
     async fn sequence_value(&self, sq: String) -> u64 {
         self.ensure_sequence_exists(sq.clone()).await;
+        let quoted_sq = format!("\"{}\"", sq.replace("\"", "\"\""));
 
-        let next_val: i64 = sqlx::query_scalar("SELECT currval($1);")
-            .bind(sq)
+        // Get last_value
+        let query = format!("SELECT last_value FROM {}", quoted_sq);
+        let current_val: i64 = sqlx::query_scalar(&query)
             .fetch_one(&self.pool.clone())
             .await
-            .expect("Failed to fetch the next sequence value");
+            .expect("Failed to fetch the current sequence value");
 
-        next_val as u64
+        // CockroachDB returns 0 before first nextval(), adjust to 1
+        if current_val == 0 {
+            return self.sequence_next_value(sq).await;
+        }
+
+        current_val as u64
     }
 
-    #[cfg(feature = "sequence")]
     async fn sequence_next_value(&self, sq: String) -> u64 {
         self.ensure_sequence_exists(sq.clone()).await;
-
         let next_val: i64 = sqlx::query_scalar("SELECT nextval($1);")
             .bind(sq)
             .fetch_one(&self.pool.clone())
             .await
             .expect("Failed to fetch the next sequence value");
-
         next_val as u64
     }
 }
