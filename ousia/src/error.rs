@@ -26,3 +26,12 @@ impl Display for Error {
 }
 
 impl std::error::Error for Error {}
+
+impl Error {
+    pub fn is_unique_constraint_violation(&self) -> bool {
+        match self {
+            Error::UniqueConstraintViolation(_) => true,
+            _ => false,
+        }
+    }
+}
