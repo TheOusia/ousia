@@ -38,24 +38,39 @@ pub fn generate_uniqueness_impl(input: &DeriveInput) -> Result<TokenStream> {
         .iter()
         .map(|constraint| match constraint {
             UniqueConstraint::Single(field) => {
-                let field_ident = syn::Ident::new(field, proc_macro2::Span::call_site());
-                quote! {
-                    {
-                        let value = ::std::format!("{}", &self.#field_ident);
-                        let hash = #ousia::derive_unique_hash(
-                            #type_name_str,
-                            #field,
-                            &value
-                        );
-                        hashes.push((hash, #field));
+                if field == "owner" {
+                    // Handle owner from meta field
+                    quote! {
+                        {
+                            let value = ::std::format!("{}", &self._meta.owner);
+                            let hash = #ousia::derive_unique_hash(
+                                #type_name_str,
+                                "owner",
+                                &value
+                            );
+                            hashes.push((hash, "owner"));
+                        }
+                    }
+                } else {
+                    // Handle regular data field
+                    let field_ident = syn::Ident::new(field, proc_macro2::Span::call_site());
+                    quote! {
+                        {
+                            let value = ::std::format!("{}", &self.#field_ident);
+                            let hash = #ousia::derive_unique_hash(
+                                #type_name_str,
+                                #field,
+                                &value
+                            );
+                            hashes.push((hash, #field));
+                        }
                     }
                 }
             }
             UniqueConstraint::Composite(fields) => {
-                let field_idents: Vec<_> = fields
-                    .iter()
-                    .map(|f| syn::Ident::new(f, proc_macro2::Span::call_site()))
-                    .collect();
+                // Separate owner field from data fields
+                let (owner_refs, field_refs): (Vec<_>, Vec<_>) =
+                    fields.iter().partition(|f| *f == "owner");
 
                 let composite_key = fields.join("+");
 
@@ -63,13 +78,23 @@ pub fn generate_uniqueness_impl(input: &DeriveInput) -> Result<TokenStream> {
                 let format_parts: Vec<_> = fields.iter().map(|f| format!("{}:{{}}", f)).collect();
                 let format_str = format_parts.join(":");
 
+                // Build value references
+                let value_refs = fields.iter().map(|f| {
+                    if f == "owner" {
+                        quote! { &self._meta.owner }
+                    } else {
+                        let field_ident = syn::Ident::new(f, proc_macro2::Span::call_site());
+                        quote! { &self.#field_ident }
+                    }
+                });
+
                 quote! {
                     {
                         let value = ::std::format!(
                             #format_str,
-                            #(&self.#field_idents),*
+                            #(#value_refs),*
                         );
-                        let hash = ::ousia::derive_unique_hash(
+                        let hash = #ousia::derive_unique_hash(
                             #type_name_str,
                             #composite_key,
                             &value

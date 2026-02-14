@@ -2,8 +2,8 @@ use syn::{Attribute, Error, Expr, ExprLit, Lit, Meta, Result};
 
 #[derive(Debug, Clone)]
 pub enum UniqueConstraint {
-    Single(String),         // #[ousia(unique = "phone")]
-    Composite(Vec<String>), // #[ousia(unique = "phone+email")]
+    Single(String),         // #[ousia(unique = "phone")] or #[ousia(unique = "owner")]
+    Composite(Vec<String>), // #[ousia(unique = "owner+type")]
 }
 
 #[derive(Debug, Default)]
@@ -55,8 +55,14 @@ impl UniqueConfig {
                                         ));
                                     }
 
+                                    // Validate fields
+                                    Self::validate_unique_fields(&fields, lit_str)?;
+
                                     config.constraints.push(UniqueConstraint::Composite(fields));
                                 } else {
+                                    // Validate single field
+                                    Self::validate_unique_fields(&[unique_str.clone()], lit_str)?;
+
                                     config
                                         .constraints
                                         .push(UniqueConstraint::Single(unique_str));
@@ -74,6 +80,24 @@ impl UniqueConfig {
         }
 
         Ok(config)
+    }
+
+    fn validate_unique_fields(fields: &[String], span: &syn::LitStr) -> Result<()> {
+        for field in fields {
+            let field = field.trim();
+            // Check if it's a reserved meta field that's not allowed
+            if ["id", "created_at", "updated_at", "type"].contains(&field) {
+                return Err(Error::new_spanned(
+                    span,
+                    format!(
+                        "Field '{}' cannot be used in unique constraints (reserved meta field)",
+                        field
+                    ),
+                ));
+            }
+            // 'owner' and data fields are allowed (no need to validate further here)
+        }
+        Ok(())
     }
 
     pub fn has_constraints(&self) -> bool {
