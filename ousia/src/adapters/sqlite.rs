@@ -720,7 +720,13 @@ impl Adapter for SqliteAdapter {
         )
         .execute(&pool)
         .await
-        .map_err(|err| Error::Storage(err.to_string()))?;
+        .map_err(|err| {
+            if err.to_string().contains("unique") {
+                Error::UniqueConstraintViolation("id".to_string())
+            } else {
+                Error::Storage(err.to_string())
+            }
+        })?;
         Ok(())
     }
 
