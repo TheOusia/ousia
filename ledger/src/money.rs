@@ -1,201 +1,425 @@
-// ousia/src/ledger/money.rs
-use super::{Balance, LedgerSystem, MoneyError, Transaction, TransactionHandle, ValueObject};
-use std::sync::Arc;
+// ledger/src/money.rs
+use super::{Asset, Balance, LedgerAdapter, MoneyError, Transaction, ValueObject};
+use std::sync::{Arc, Mutex};
 use uuid::Uuid;
 
-/// Money is a capability handle for (asset, owner)
-/// It does not hold state or balance
-#[derive(Clone)]
-pub struct Money {
-    asset_code: String,
-    owner: Uuid,
-    system: Arc<LedgerSystem>,
-}
-
-impl Money {
-    /// Create a new Money capability handle
-    pub fn new(system: Arc<LedgerSystem>, asset_code: impl Into<String>, owner: Uuid) -> Self {
-        Self {
-            asset_code: asset_code.into(),
-            owner,
-            system,
-        }
-    }
-
-    /// Execute an atomic money operation
-    pub async fn atomic<F, R>(f: F) -> Result<(R, TransactionHandle), MoneyError>
-    where
-        F: FnOnce() -> Result<R, MoneyError>,
-    {
-        // Begin transaction
-        // Execute closure
-        // Validate all slices consumed
-        // Commit
-        todo!("Atomic execution context")
-    }
-
-    /// Mint new money (deposit authority)
-    pub async fn mint(
-        asset_code: impl Into<String>,
+#[derive(Debug, Clone)]
+pub enum Operation {
+    Mint {
+        asset_id: Uuid,
         owner: Uuid,
         amount: i64,
         metadata: String,
-        system: Arc<LedgerSystem>,
-    ) -> Result<TransactionHandle, MoneyError> {
-        Self::mint_internal(asset_code.into(), owner, amount, metadata, system, None).await
-    }
-
-    /// Mint with idempotency key (for webhook handling)
-    pub async fn mint_idempotent(
-        idempotency_key: String,
-        asset_code: impl Into<String>,
+    },
+    Burn {
+        asset_id: Uuid,
         owner: Uuid,
         amount: i64,
         metadata: String,
-        system: Arc<LedgerSystem>,
-    ) -> Result<TransactionHandle, MoneyError> {
-        Self::mint_internal(
-            asset_code.into(),
-            owner,
-            amount,
-            metadata,
-            system,
-            Some(idempotency_key),
-        )
-        .await
-    }
-
-    async fn mint_internal(
-        asset_code: String,
-        owner: Uuid,
+    },
+    Transfer {
+        asset_id: Uuid,
+        from: Uuid,
+        to: Uuid,
         amount: i64,
         metadata: String,
-        system: Arc<LedgerSystem>,
-        idempotency_key: Option<String>,
-    ) -> Result<TransactionHandle, MoneyError> {
-        if amount <= 0 {
-            return Err(MoneyError::InvalidAmount);
-        }
-
-        let adapter = system.adapter();
-        let asset = adapter.get_asset(&asset_code).await?;
-
-        // Mint ValueObjects
-        adapter
-            .mint_value_objects(asset.id, owner, amount, format!("mint:{}", metadata))
-            .await?;
-
-        // Record transaction
-        let transaction = Transaction::new(asset.id, None, Some(owner), 0, amount, metadata);
-
-        let tx_id = adapter.record_transaction(transaction.clone()).await?;
-
-        Ok(TransactionHandle::new(&transaction))
-    }
-
-    /// Reserve money (escrow authority)
-    pub async fn reserve(
-        asset_code: impl Into<String>,
+    },
+    Reserve {
+        asset_id: Uuid,
         from: Uuid,
         for_authority: Uuid,
         amount: i64,
         metadata: String,
-        system: Arc<LedgerSystem>,
-    ) -> Result<TransactionHandle, MoneyError> {
+    },
+    RecordTransaction {
+        transaction: Transaction,
+    },
+}
+
+#[derive(Clone)]
+pub struct ExecutionPlan {
+    operations: Vec<Operation>,
+}
+
+impl ExecutionPlan {
+    fn new() -> Self {
+        Self {
+            operations: Vec::new(),
+        }
+    }
+
+    fn add(&mut self, op: Operation) {
+        self.operations.push(op);
+    }
+
+    pub fn operations(&self) -> &[Operation] {
+        &self.operations
+    }
+
+    pub fn calculate_locks(&self) -> Vec<(Uuid, Uuid, i64)> {
+        use std::collections::HashMap;
+        let mut locks: HashMap<(Uuid, Uuid), i64> = HashMap::new();
+
+        for op in &self.operations {
+            match op {
+                Operation::Burn {
+                    asset_id,
+                    owner,
+                    amount,
+                    ..
+                } => {
+                    *locks.entry((*asset_id, *owner)).or_insert(0) += amount;
+                }
+                Operation::Transfer {
+                    asset_id,
+                    from,
+                    amount,
+                    ..
+                } => {
+                    *locks.entry((*asset_id, *from)).or_insert(0) += amount;
+                }
+                Operation::Reserve {
+                    asset_id,
+                    from,
+                    amount,
+                    ..
+                } => {
+                    *locks.entry((*asset_id, *from)).or_insert(0) += amount;
+                }
+                _ => {}
+            }
+        }
+
+        locks
+            .into_iter()
+            .map(|((asset, owner), amount)| (asset, owner, amount))
+            .collect()
+    }
+}
+
+pub struct LedgerContext {
+    adapter: Arc<dyn LedgerAdapter>,
+}
+
+impl LedgerContext {
+    pub fn new(adapter: Arc<dyn LedgerAdapter>) -> Self {
+        Self { adapter }
+    }
+
+    pub fn adapter(&self) -> &dyn LedgerAdapter {
+        self.adapter.as_ref()
+    }
+}
+
+struct MoneyState {
+    asset_id: Uuid,
+    asset_code: String,
+    owner: Uuid,
+    amount: i64,
+    sliced_amount: i64,
+}
+
+impl MoneyState {
+    fn remaining(&self) -> i64 {
+        self.amount - self.sliced_amount
+    }
+}
+
+struct SliceState {
+    id: Uuid,
+    amount: i64,
+    consumed: bool,
+}
+
+#[derive(Clone)]
+pub struct TransactionContext {
+    ctx: Arc<LedgerContext>,
+    money_states: Arc<Mutex<Vec<MoneyState>>>,
+    slice_states: Arc<Mutex<Vec<SliceState>>>,
+    plan: Arc<Mutex<ExecutionPlan>>,
+}
+
+impl TransactionContext {
+    fn new(adapter: Arc<dyn LedgerAdapter>) -> Self {
+        Self {
+            ctx: Arc::new(LedgerContext::new(adapter)),
+            money_states: Arc::new(Mutex::new(Vec::new())),
+            slice_states: Arc::new(Mutex::new(Vec::new())),
+            plan: Arc::new(Mutex::new(ExecutionPlan::new())),
+        }
+    }
+
+    pub async fn get_balance(&self, asset: &str, owner: Uuid) -> Result<Balance, MoneyError> {
+        let adapter = self.ctx.adapter();
+        let asset_obj = adapter.get_asset(asset).await?;
+        adapter.get_balance(asset_obj.id, owner).await
+    }
+
+    pub async fn money(
+        &self,
+        asset: impl Into<String>,
+        owner: Uuid,
+        amount: i64,
+    ) -> Result<Money, MoneyError> {
         if amount <= 0 {
             return Err(MoneyError::InvalidAmount);
         }
 
-        let adapter = system.adapter();
-        let asset = adapter.get_asset(&asset_code.into()).await?;
+        let asset_code = asset.into();
+        let adapter = self.ctx.adapter();
+        let asset_obj = adapter.get_asset(&asset_code).await?;
 
-        // Burn from sender
-        let to_burn = adapter.select_for_burn(asset.id, from, amount).await?;
-        let burn_ids: Vec<Uuid> = to_burn.iter().map(|vo| vo.id).collect();
-
-        if to_burn.iter().map(|vo| vo.amount).sum::<i64>() < amount {
+        let balance = adapter.get_balance(asset_obj.id, owner).await?;
+        if balance.available < amount {
             return Err(MoneyError::InsufficientFunds);
         }
 
-        adapter
-            .burn_value_objects(burn_ids, format!("reserve:{}", metadata))
-            .await?;
-
-        adapter
-            .mint_value_objects(
-                asset.id,
-                for_authority,
-                amount,
-                format!("reserve:{}", metadata),
-            )
-            .await?;
-
-        // Record transaction
-        let transaction = Transaction::new(
-            asset.id,
-            Some(from),
-            Some(for_authority),
+        let state = MoneyState {
+            asset_id: asset_obj.id,
+            asset_code: asset_code.clone(),
+            owner,
             amount,
-            amount,
-            format!("reserve:{}", metadata),
-        );
+            sliced_amount: 0,
+        };
 
-        adapter.record_transaction(transaction.clone()).await?;
+        let state_id = {
+            let mut states = self.money_states.lock().unwrap();
+            states.push(state);
+            states.len() - 1
+        };
 
-        Ok(TransactionHandle::new(&transaction))
+        Ok(Money {
+            state_id,
+            asset_code,
+            owner,
+            money_states: Arc::clone(&self.money_states),
+            slice_states: Arc::clone(&self.slice_states),
+            plan: Arc::clone(&self.plan),
+            ctx: Arc::clone(&self.ctx),
+        })
     }
 
-    /// Create a slice for planning (ephemeral)
+    pub async fn mint(
+        &self,
+        asset: &str,
+        owner: Uuid,
+        amount: i64,
+        metadata: String,
+    ) -> Result<(), MoneyError> {
+        if amount <= 0 {
+            return Err(MoneyError::InvalidAmount);
+        }
+
+        let adapter = self.ctx.adapter();
+        let asset_obj = adapter.get_asset(asset).await?;
+
+        let mut plan = self.plan.lock().unwrap();
+        plan.add(Operation::Mint {
+            asset_id: asset_obj.id,
+            owner,
+            amount,
+            metadata: metadata.clone(),
+        });
+
+        plan.add(Operation::RecordTransaction {
+            transaction: Transaction::new(asset_obj.id, None, Some(owner), 0, amount, metadata),
+        });
+
+        Ok(())
+    }
+
+    pub async fn burn(
+        &self,
+        asset: &str,
+        owner: Uuid,
+        amount: i64,
+        metadata: String,
+    ) -> Result<(), MoneyError> {
+        if amount <= 0 {
+            return Err(MoneyError::InvalidAmount);
+        }
+
+        let adapter = self.ctx.adapter();
+        let asset_obj = adapter.get_asset(asset).await?;
+
+        let mut plan = self.plan.lock().unwrap();
+        plan.add(Operation::Burn {
+            asset_id: asset_obj.id,
+            owner,
+            amount,
+            metadata: metadata.clone(),
+        });
+
+        plan.add(Operation::RecordTransaction {
+            transaction: Transaction::new(asset_obj.id, Some(owner), None, amount, 0, metadata),
+        });
+
+        Ok(())
+    }
+
+    pub async fn reserve(
+        &self,
+        asset: &str,
+        from: Uuid,
+        for_authority: Uuid,
+        amount: i64,
+        metadata: String,
+    ) -> Result<(), MoneyError> {
+        if amount <= 0 {
+            return Err(MoneyError::InvalidAmount);
+        }
+
+        let adapter = self.ctx.adapter();
+        let asset_obj = adapter.get_asset(asset).await?;
+
+        let mut plan = self.plan.lock().unwrap();
+        plan.add(Operation::Reserve {
+            asset_id: asset_obj.id,
+            from,
+            for_authority,
+            amount,
+            metadata: metadata.clone(),
+        });
+
+        plan.add(Operation::RecordTransaction {
+            transaction: Transaction::new(
+                asset_obj.id,
+                Some(from),
+                Some(for_authority),
+                amount,
+                amount,
+                metadata,
+            ),
+        });
+
+        Ok(())
+    }
+
+    fn validate(&self) -> Result<(), MoneyError> {
+        let states = self.money_states.lock().unwrap();
+        for state in states.iter() {
+            if state.sliced_amount == 0 {
+                return Err(MoneyError::Storage(
+                    "Money created but never sliced".to_string(),
+                ));
+            }
+            if state.sliced_amount > state.amount {
+                return Err(MoneyError::InvalidAmount);
+            }
+        }
+
+        let slices = self.slice_states.lock().unwrap();
+        let unconsumed: Vec<_> = slices
+            .iter()
+            .filter(|s| !s.consumed && s.amount > 0)
+            .collect();
+
+        if !unconsumed.is_empty() {
+            return Err(MoneyError::UnconsumedSlice);
+        }
+
+        Ok(())
+    }
+}
+
+#[derive(Clone)]
+pub struct Money {
+    state_id: usize,
+    asset_code: String,
+    owner: Uuid,
+    money_states: Arc<Mutex<Vec<MoneyState>>>,
+    slice_states: Arc<Mutex<Vec<SliceState>>>,
+    plan: Arc<Mutex<ExecutionPlan>>,
+    ctx: Arc<LedgerContext>,
+}
+
+impl Money {
+    pub async fn atomic<F, Fut>(ledger_ctx: &LedgerContext, f: F) -> Result<(), MoneyError>
+    where
+        F: FnOnce(TransactionContext) -> Fut,
+        Fut: std::future::Future<Output = Result<(), MoneyError>>,
+    {
+        let tx_ctx = TransactionContext::new(Arc::clone(&ledger_ctx.adapter));
+
+        let result = f(tx_ctx.clone()).await;
+        if let Err(e) = result {
+            return Err(e);
+        }
+
+        tx_ctx.validate()?;
+
+        let plan = tx_ctx.plan.lock().unwrap().clone();
+        let locks = plan.calculate_locks();
+
+        ledger_ctx.adapter().begin_transaction().await?;
+
+        let execution_result = ledger_ctx.adapter().execute_plan(&plan, &locks).await;
+
+        match execution_result {
+            Ok(_) => {
+                ledger_ctx.adapter().commit_transaction().await?;
+                Ok(())
+            }
+            Err(e) => {
+                ledger_ctx.adapter().rollback_transaction().await?;
+                Err(e)
+            }
+        }
+    }
+
     pub fn slice(&self, amount: i64) -> Result<MoneySlice, MoneyError> {
         if amount <= 0 {
             return Err(MoneyError::InvalidAmount);
         }
 
-        Ok(MoneySlice {
-            parent: self.clone(),
+        let mut states = self.money_states.lock().unwrap();
+        let state = &mut states[self.state_id];
+
+        if state.remaining() < amount {
+            return Err(MoneyError::InvalidAmount);
+        }
+
+        state.sliced_amount += amount;
+        drop(states);
+
+        let slice_id = Uuid::now_v7();
+        let mut slices = self.slice_states.lock().unwrap();
+        slices.push(SliceState {
+            id: slice_id,
             amount,
             consumed: false,
+        });
+        drop(slices);
+
+        Ok(MoneySlice {
+            id: slice_id,
+            state_id: self.state_id,
+            asset_code: self.asset_code.clone(),
+            owner: self.owner,
+            amount,
+            consumed: false,
+            money_states: Arc::clone(&self.money_states),
+            slice_states: Arc::clone(&self.slice_states),
+            plan: Arc::clone(&self.plan),
+            ctx: Arc::clone(&self.ctx),
         })
     }
-
-    // /// Fragment amount into ValueObjects
-    // fn fragment_amount(
-    //     amount: i64,
-    //     unit: i64,
-    //     asset_id: Uuid,
-    //     owner: Uuid,
-    //     reserved_for: Option<Uuid>,
-    // ) -> Result<Vec<ValueObject>, MoneyError> {
-    //     let mut fragments = Vec::new();
-    //     let mut remaining = amount;
-
-    //     while remaining > 0 {
-    //         let chunk = remaining.min(unit);
-
-    //         let vo = if let Some(authority) = reserved_for {
-    //             ValueObject::new_reserved(asset_id, owner, chunk, authority)
-    //         } else {
-    //             ValueObject::new_alive(asset_id, owner, chunk)
-    //         };
-
-    //         fragments.push(vo);
-    //         remaining -= chunk;
-    //     }
-
-    //     Ok(fragments)
-    // }
 }
 
-/// MoneySlice - ephemeral planning construct
-/// Only exists inside Money::atomic blocks
 pub struct MoneySlice {
-    parent: Money,
+    id: Uuid,
+    state_id: usize,
+    asset_code: String,
+    owner: Uuid,
     amount: i64,
     consumed: bool,
+    money_states: Arc<Mutex<Vec<MoneyState>>>,
+    slice_states: Arc<Mutex<Vec<SliceState>>>,
+    plan: Arc<Mutex<ExecutionPlan>>,
+    ctx: Arc<LedgerContext>,
 }
 
 impl MoneySlice {
-    /// Create a sub-slice from this slice
     pub fn slice(&mut self, amount: i64) -> Result<MoneySlice, MoneyError> {
         if amount <= 0 || amount > self.amount {
             return Err(MoneyError::InvalidAmount);
@@ -203,14 +427,35 @@ impl MoneySlice {
 
         self.amount -= amount;
 
-        Ok(MoneySlice {
-            parent: self.parent.clone(),
+        let mut slices = self.slice_states.lock().unwrap();
+        if let Some(slice) = slices.iter_mut().find(|s| s.id == self.id) {
+            slice.amount = self.amount;
+        }
+        drop(slices);
+
+        let slice_id = Uuid::now_v7();
+        let mut slices = self.slice_states.lock().unwrap();
+        slices.push(SliceState {
+            id: slice_id,
             amount,
             consumed: false,
+        });
+        drop(slices);
+
+        Ok(MoneySlice {
+            id: slice_id,
+            state_id: self.state_id,
+            asset_code: self.asset_code.clone(),
+            owner: self.owner,
+            amount,
+            consumed: false,
+            money_states: Arc::clone(&self.money_states),
+            slice_states: Arc::clone(&self.slice_states),
+            plan: Arc::clone(&self.plan),
+            ctx: Arc::clone(&self.ctx),
         })
     }
 
-    /// Transfer this slice to a recipient
     pub async fn transfer_to(
         mut self,
         recipient: Uuid,
@@ -220,236 +465,99 @@ impl MoneySlice {
             return Err(MoneyError::UnconsumedSlice);
         }
 
-        let adapter = self.parent.system.adapter();
-        let asset = adapter.get_asset(&self.parent.asset_code).await?;
+        let adapter = self.ctx.adapter();
+        let asset = adapter.get_asset(&self.asset_code).await?;
 
-        // Burn from sender
-        let to_burn = adapter
-            .select_for_burn(asset.id, self.parent.owner, self.amount)
-            .await?;
-        let burn_ids: Vec<Uuid> = to_burn.iter().map(|vo| vo.id).collect();
+        let mut plan = self.plan.lock().unwrap();
+        plan.add(Operation::Transfer {
+            asset_id: asset.id,
+            from: self.owner,
+            to: recipient,
+            amount: self.amount,
+            metadata: metadata.clone(),
+        });
 
-        if to_burn.iter().map(|vo| vo.amount).sum::<i64>() < self.amount {
-            return Err(MoneyError::InsufficientFunds);
-        }
-
-        adapter
-            .burn_value_objects(burn_ids, format!("transfer:{}", metadata))
-            .await?;
-
-        // Mint to receiver
-        adapter
-            .mint_value_objects(
+        plan.add(Operation::RecordTransaction {
+            transaction: Transaction::new(
                 asset.id,
-                recipient,
+                Some(self.owner),
+                Some(recipient),
                 self.amount,
-                format!("transfer:{}", metadata),
-            )
-            .await?;
-
-        // Calculate change
-        let burned_total: i64 = to_burn.iter().map(|vo| vo.amount).sum();
-        let change = burned_total - self.amount;
-
-        if change > 0 {
-            // Mint change back to sender
-            adapter
-                .mint_value_objects(
-                    asset.id,
-                    self.parent.owner,
-                    change,
-                    format!("change:{}", metadata),
-                )
-                .await?;
-        }
-
-        // Record transaction
-        let transaction = Transaction::new(
-            asset.id,
-            Some(self.parent.owner),
-            Some(recipient),
-            burned_total,
-            self.amount,
-            metadata,
-        );
-
-        adapter.record_transaction(transaction).await?;
+                self.amount,
+                metadata,
+            ),
+        });
 
         self.consumed = true;
+        let mut slices = self.slice_states.lock().unwrap();
+        if let Some(slice) = slices.iter_mut().find(|s| s.id == self.id) {
+            slice.consumed = true;
+        }
+
         Ok(())
     }
 
-    /// Burn this slice (no recipient)
     pub async fn burn(mut self, metadata: String) -> Result<(), MoneyError> {
         if self.consumed {
             return Err(MoneyError::UnconsumedSlice);
         }
 
-        let adapter = self.parent.system.adapter();
-        let asset = adapter.get_asset(&self.parent.asset_code).await?;
+        let adapter = self.ctx.adapter();
+        let asset = adapter.get_asset(&self.asset_code).await?;
 
-        // Select and burn
-        let to_burn = adapter
-            .select_for_burn(asset.id, self.parent.owner, self.amount)
-            .await?;
-        let burn_ids: Vec<Uuid> = to_burn.iter().map(|vo| vo.id).collect();
+        let mut plan = self.plan.lock().unwrap();
+        plan.add(Operation::Burn {
+            asset_id: asset.id,
+            owner: self.owner,
+            amount: self.amount,
+            metadata: metadata.clone(),
+        });
 
-        if to_burn.iter().map(|vo| vo.amount).sum::<i64>() < self.amount {
-            return Err(MoneyError::InsufficientFunds);
-        }
-
-        adapter
-            .burn_value_objects(burn_ids, format!("burn:{}", metadata))
-            .await?;
-
-        // Record transaction
-        let transaction = Transaction::new(
-            asset.id,
-            Some(self.parent.owner),
-            None,
-            self.amount,
-            0,
-            metadata,
-        );
-
-        adapter.record_transaction(transaction).await?;
+        plan.add(Operation::RecordTransaction {
+            transaction: Transaction::new(
+                asset.id,
+                Some(self.owner),
+                None,
+                self.amount,
+                0,
+                metadata,
+            ),
+        });
 
         self.consumed = true;
+        let mut slices = self.slice_states.lock().unwrap();
+        if let Some(slice) = slices.iter_mut().find(|s| s.id == self.id) {
+            slice.consumed = true;
+        }
+
         Ok(())
     }
 
-    /// Check if consumed
     pub fn is_consumed(&self) -> bool {
         self.consumed
     }
 }
 
 impl Drop for MoneySlice {
-    #[cfg(test)]
     fn drop(&mut self) {
         if !self.consumed && self.amount > 0 {
-            println!("MoneySlice dropped without being consumed")
-        }
-    }
-
-    #[cfg(not(test))]
-    fn drop(&mut self) {
-        if !self.consumed && self.amount > 0 {
-            // This should cause atomic block to fail
+            #[cfg(not(test))]
             panic!("MoneySlice dropped without being consumed");
+
+            #[cfg(test)]
+            println!("WARNING: MoneySlice dropped without being consumed");
         }
     }
 }
 
-/// Balance query (read-only)
 impl Balance {
     pub async fn get(
         asset_code: impl Into<String>,
         owner: Uuid,
-        system: Arc<LedgerSystem>,
+        ctx: &LedgerContext,
     ) -> Result<Balance, MoneyError> {
-        let adapter = system.adapter();
+        let adapter = ctx.adapter();
         let asset = adapter.get_asset(&asset_code.into()).await?;
         adapter.get_balance(asset.id, owner).await
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use crate::{Asset, LedgerAdapter, ValueObjectState};
-
-    use super::*;
-
-    #[test]
-    fn test_money_slice_amount_validation() {
-        // Test that invalid amounts are rejected
-        let system = Arc::new(LedgerSystem::new(Box::new(MockAdapter)));
-        let money = Money::new(system, "USD", uuid::Uuid::now_v7());
-
-        assert!(money.slice(0).is_err());
-        assert!(money.slice(-100).is_err());
-        assert!(money.slice(100).is_ok());
-    }
-
-    struct MockAdapter;
-
-    #[async_trait::async_trait]
-    impl LedgerAdapter for MockAdapter {
-        async fn mint_value_objects(
-            &self,
-            _asset_id: Uuid,
-            _owner: Uuid,
-            _amount: i64,
-            _metadata: String,
-        ) -> Result<Vec<ValueObject>, MoneyError> {
-            Ok(vec![])
-        }
-
-        async fn burn_value_objects(
-            &self,
-            _ids: Vec<Uuid>,
-            _metadata: String,
-        ) -> Result<(), MoneyError> {
-            Ok(())
-        }
-
-        async fn select_for_burn(
-            &self,
-            _asset_id: Uuid,
-            _owner: Uuid,
-            _amount: i64,
-        ) -> Result<Vec<ValueObject>, MoneyError> {
-            Ok(vec![])
-        }
-
-        async fn select_reserved(
-            &self,
-            _asset_id: Uuid,
-            _owner: Uuid,
-            _authority: Uuid,
-            _amount: i64,
-        ) -> Result<Vec<ValueObject>, MoneyError> {
-            Ok(vec![])
-        }
-
-        async fn change_state(
-            &self,
-            _ids: Vec<Uuid>,
-            _new_state: ValueObjectState,
-        ) -> Result<(), MoneyError> {
-            Ok(())
-        }
-
-        async fn get_balance(&self, _asset_id: Uuid, _owner: Uuid) -> Result<Balance, MoneyError> {
-            Ok(Balance::new(uuid::Uuid::now_v7(), uuid::Uuid::now_v7()))
-        }
-
-        async fn record_transaction(&self, _transaction: Transaction) -> Result<Uuid, MoneyError> {
-            Ok(uuid::Uuid::now_v7())
-        }
-
-        async fn get_transaction(&self, _tx_id: Uuid) -> Result<Transaction, MoneyError> {
-            Err(MoneyError::TransactionNotFound)
-        }
-
-        async fn get_asset(&self, _code: &str) -> Result<Asset, MoneyError> {
-            Ok(Asset::new("USD", 10_000))
-        }
-
-        async fn create_asset(&self, _asset: Asset) -> Result<(), MoneyError> {
-            Ok(())
-        }
-
-        async fn begin_transaction(&self) -> Result<(), MoneyError> {
-            Ok(())
-        }
-
-        async fn commit_transaction(&self) -> Result<(), MoneyError> {
-            Ok(())
-        }
-
-        async fn rollback_transaction(&self) -> Result<(), MoneyError> {
-            Ok(())
-        }
     }
 }

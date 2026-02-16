@@ -1,4 +1,4 @@
-// ousia/src/ledger/error.rs
+// ledger/src/error.rs
 use std::fmt;
 
 #[derive(Debug)]
@@ -25,9 +25,7 @@ impl fmt::Display for MoneyError {
             Self::ReservationNotFound => write!(f, "Reservation not found"),
             Self::InvalidAuthority => write!(f, "Invalid authority"),
             Self::TransactionNotFound => write!(f, "Transaction not found"),
-            Self::DuplicateIdempotencyKey(id) => {
-                write!(f, "Duplicate idempotency key: {}", id)
-            }
+            Self::DuplicateIdempotencyKey(id) => write!(f, "Duplicate idempotency key: {}", id),
             Self::Storage(msg) => write!(f, "Storage error: {}", msg),
             Self::Conflict(msg) => write!(f, "Conflict: {}", msg),
         }

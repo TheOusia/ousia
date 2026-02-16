@@ -1,4 +1,4 @@
-// ousia/src/ledger/transaction.rs
+// ledger/src/transaction.rs
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -37,7 +37,6 @@ impl Transaction {
     }
 }
 
-/// Handle returned from Money operations for potential reversion
 #[derive(Debug, Clone)]
 pub struct TransactionHandle {
     pub transaction_id: Uuid,
@@ -56,13 +55,5 @@ impl TransactionHandle {
             receiver: transaction.receiver,
             amount: transaction.minted_amount,
         }
-    }
-
-    /// Revert the transaction by creating a compensating transaction
-    /// Burns from receiver, mints back to sender
-    pub async fn revert(self, _reason: String) -> Result<Uuid, crate::MoneyError> {
-        // This will be implemented in the Money module
-        // which has access to the LedgerSystem
-        todo!("Revert implementation requires Money context")
     }
 }
