@@ -1,4 +1,5 @@
 // ledger/src/lib.rs
+pub mod adapters;
 pub mod asset;
 pub mod balance;
 pub mod error;
