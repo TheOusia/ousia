@@ -1,3 +1,6 @@
+#[cfg(feature = "ledger")]
+pub mod ledger;
+
 #[cfg(feature = "cockroach")]
 pub mod cockroach;
 

@@ -538,18 +538,6 @@ impl MoneySlice {
     }
 }
 
-impl Drop for MoneySlice {
-    fn drop(&mut self) {
-        if !self.consumed && self.amount > 0 {
-            #[cfg(not(test))]
-            panic!("MoneySlice dropped without being consumed");
-
-            #[cfg(test)]
-            println!("WARNING: MoneySlice dropped without being consumed");
-        }
-    }
-}
-
 impl Balance {
     pub async fn get(
         asset_code: impl Into<String>,
