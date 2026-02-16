@@ -9,8 +9,8 @@ pub struct Transaction {
     pub asset: Uuid,
     pub sender: Option<Uuid>,
     pub receiver: Option<Uuid>,
-    pub burned_amount: i64,
-    pub minted_amount: i64,
+    pub burned_amount: u64,
+    pub minted_amount: u64,
     pub metadata: String,
     pub created_at: DateTime<Utc>,
 }
@@ -20,8 +20,8 @@ impl Transaction {
         asset_id: Uuid,
         sender: Option<Uuid>,
         receiver: Option<Uuid>,
-        burned_amount: i64,
-        minted_amount: i64,
+        burned_amount: u64,
+        minted_amount: u64,
         metadata: String,
     ) -> Self {
         Self {
@@ -43,7 +43,7 @@ pub struct TransactionHandle {
     pub asset_id: Uuid,
     pub sender: Option<Uuid>,
     pub receiver: Option<Uuid>,
-    pub amount: i64,
+    pub amount: u64,
 }
 
 impl TransactionHandle {

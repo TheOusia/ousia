@@ -8,27 +8,27 @@ pub enum Operation {
     Mint {
         asset_id: Uuid,
         owner: Uuid,
-        amount: i64,
+        amount: u64,
         metadata: String,
     },
     Burn {
         asset_id: Uuid,
         owner: Uuid,
-        amount: i64,
+        amount: u64,
         metadata: String,
     },
     Transfer {
         asset_id: Uuid,
         from: Uuid,
         to: Uuid,
-        amount: i64,
+        amount: u64,
         metadata: String,
     },
     Reserve {
         asset_id: Uuid,
         from: Uuid,
         for_authority: Uuid,
-        amount: i64,
+        amount: u64,
         metadata: String,
     },
     RecordTransaction {
@@ -56,9 +56,9 @@ impl ExecutionPlan {
         &self.operations
     }
 
-    pub fn calculate_locks(&self) -> Vec<(Uuid, Uuid, i64)> {
+    pub fn calculate_locks(&self) -> Vec<(Uuid, Uuid, u64)> {
         use std::collections::HashMap;
-        let mut locks: HashMap<(Uuid, Uuid), i64> = HashMap::new();
+        let mut locks: HashMap<(Uuid, Uuid), u64> = HashMap::new();
 
         for op in &self.operations {
             match op {
@@ -115,19 +115,19 @@ struct MoneyState {
     asset_id: Uuid,
     asset_code: String,
     owner: Uuid,
-    amount: i64,
-    sliced_amount: i64,
+    amount: u64,
+    sliced_amount: u64,
 }
 
 impl MoneyState {
-    fn remaining(&self) -> i64 {
+    fn remaining(&self) -> u64 {
         self.amount - self.sliced_amount
     }
 }
 
 struct SliceState {
     id: Uuid,
-    amount: i64,
+    amount: u64,
     consumed: bool,
 }
 
@@ -159,9 +159,9 @@ impl TransactionContext {
         &self,
         asset: impl Into<String>,
         owner: Uuid,
-        amount: i64,
+        amount: u64,
     ) -> Result<Money, MoneyError> {
-        if amount <= 0 {
+        if amount == 0 {
             return Err(MoneyError::InvalidAmount);
         }
 
@@ -203,10 +203,10 @@ impl TransactionContext {
         &self,
         asset: &str,
         owner: Uuid,
-        amount: i64,
+        amount: u64,
         metadata: String,
     ) -> Result<(), MoneyError> {
-        if amount <= 0 {
+        if amount == 0 {
             return Err(MoneyError::InvalidAmount);
         }
 
@@ -232,10 +232,10 @@ impl TransactionContext {
         &self,
         asset: &str,
         owner: Uuid,
-        amount: i64,
+        amount: u64,
         metadata: String,
     ) -> Result<(), MoneyError> {
-        if amount <= 0 {
+        if amount == 0 {
             return Err(MoneyError::InvalidAmount);
         }
 
@@ -262,10 +262,10 @@ impl TransactionContext {
         asset: &str,
         from: Uuid,
         for_authority: Uuid,
-        amount: i64,
+        amount: u64,
         metadata: String,
     ) -> Result<(), MoneyError> {
-        if amount <= 0 {
+        if amount == 0 {
             return Err(MoneyError::InvalidAmount);
         }
 
@@ -367,8 +367,8 @@ impl Money {
         }
     }
 
-    pub fn slice(&self, amount: i64) -> Result<MoneySlice, MoneyError> {
-        if amount <= 0 {
+    pub fn slice(&self, amount: u64) -> Result<MoneySlice, MoneyError> {
+        if amount == 0 {
             return Err(MoneyError::InvalidAmount);
         }
 
@@ -411,7 +411,7 @@ pub struct MoneySlice {
     state_id: usize,
     asset_code: String,
     owner: Uuid,
-    amount: i64,
+    amount: u64,
     consumed: bool,
     money_states: Arc<Mutex<Vec<MoneyState>>>,
     slice_states: Arc<Mutex<Vec<SliceState>>>,
@@ -420,8 +420,8 @@ pub struct MoneySlice {
 }
 
 impl MoneySlice {
-    pub fn slice(&mut self, amount: i64) -> Result<MoneySlice, MoneyError> {
-        if amount <= 0 || amount > self.amount {
+    pub fn slice(&mut self, amount: u64) -> Result<MoneySlice, MoneyError> {
+        if amount == 0 || amount > self.amount {
             return Err(MoneyError::InvalidAmount);
         }
 

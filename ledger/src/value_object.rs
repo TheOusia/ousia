@@ -45,14 +45,14 @@ pub struct ValueObject {
     pub id: Uuid,
     pub asset: Uuid,
     pub owner: Uuid,
-    pub amount: i64,
+    pub amount: u64,
     pub state: ValueObjectState,
     pub reserved_for: Option<Uuid>,
     pub created_at: DateTime<Utc>,
 }
 
 impl ValueObject {
-    pub fn new_alive(asset_id: Uuid, owner: Uuid, amount: i64) -> Self {
+    pub fn new_alive(asset_id: Uuid, owner: Uuid, amount: u64) -> Self {
         Self {
             id: uuid::Uuid::now_v7(),
             asset: asset_id,
@@ -64,7 +64,7 @@ impl ValueObject {
         }
     }
 
-    pub fn new_reserved(asset_id: Uuid, owner: Uuid, amount: i64, reserved_for: Uuid) -> Self {
+    pub fn new_reserved(asset_id: Uuid, owner: Uuid, amount: u64, reserved_for: Uuid) -> Self {
         Self {
             id: uuid::Uuid::now_v7(),
             asset: asset_id,
