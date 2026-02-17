@@ -1,3 +1,4 @@
+use chrono::{Days, Utc};
 // ledger/tests/integration_tests.rs
 use ledger::{
     Asset, Balance, LedgerContext, LedgerSystem, Money, MoneyError, adapters::MemoryAdapter,
@@ -565,9 +566,15 @@ async fn test_fetch_transactions() {
 
     let transactions = system
         .adapter()
-        .get_transactions_for_owner(user)
+        .get_transactions_for_owner(
+            user,
+            &[
+                Utc::now().checked_sub_days(Days::new(1)).unwrap(),
+                Utc::now(),
+            ],
+        )
         .await
         .unwrap();
 
-    println!("{:#?}", transactions);
+    assert_eq!(transactions.len(), 2);
 }

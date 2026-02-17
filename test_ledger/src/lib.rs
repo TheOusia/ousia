@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use chrono::{Days, Utc};
 use ousia::{
     Engine,
     adapters::postgres::PostgresAdapter,
@@ -44,14 +45,14 @@ pub(crate) async fn setup_test_db() -> (ContainerAsync<Postgres>, PgPool) {
 }
 
 async fn setup() -> (ContainerAsync<Postgres>, Engine, Uuid) {
-    let (resource, pool) = setup_test_db().await;
+    let (_resource, pool) = setup_test_db().await;
     let adapter = PostgresAdapter::from_pool(pool);
     adapter.init_schema().await.unwrap();
 
     let engine = Engine::new(Box::new(adapter));
 
     let user = Uuid::now_v7();
-    (resource, engine, user)
+    (_resource, engine, user)
 }
 
 async fn create_usd_asset(system: &Arc<dyn LedgerAdapter>) -> Asset {
@@ -62,7 +63,7 @@ async fn create_usd_asset(system: &Arc<dyn LedgerAdapter>) -> Asset {
 
 #[tokio::test]
 async fn test_mint_creates_balance() {
-    let (resource, engine, user) = setup().await;
+    let (_resource, engine, user) = setup().await;
     let _ = create_usd_asset(&engine.ledger()).await;
 
     let ctx = engine.ledger_ctx();
@@ -82,7 +83,7 @@ async fn test_mint_creates_balance() {
 
 #[tokio::test]
 async fn test_simple_transfer() {
-    let (resource, engine, user) = setup().await;
+    let (_resource, engine, user) = setup().await;
     let merchant = Uuid::now_v7();
     let usd = create_usd_asset(&engine.ledger()).await;
 
@@ -115,7 +116,7 @@ async fn test_simple_transfer() {
 
 #[tokio::test]
 async fn test_transfer_with_change() {
-    let (resource, engine, user) = setup().await;
+    let (_resource, engine, user) = setup().await;
     let merchant = Uuid::now_v7();
     create_usd_asset(&engine.ledger()).await;
 
@@ -145,7 +146,7 @@ async fn test_transfer_with_change() {
 
 #[tokio::test]
 async fn test_multiple_slices_from_money() {
-    let (resource, engine, user) = setup().await;
+    let (_resource, engine, user) = setup().await;
     let merchant1 = Uuid::now_v7();
     let merchant2 = Uuid::now_v7();
     create_usd_asset(&engine.ledger()).await;
@@ -186,7 +187,7 @@ async fn test_multiple_slices_from_money() {
 
 #[tokio::test]
 async fn test_slice_can_be_split() {
-    let (resource, engine, user) = setup().await;
+    let (_resource, engine, user) = setup().await;
     let merchant1 = Uuid::now_v7();
     let merchant2 = Uuid::now_v7();
     create_usd_asset(&engine.ledger()).await;
@@ -227,7 +228,7 @@ async fn test_slice_can_be_split() {
 
 #[tokio::test]
 async fn test_burn_operation() {
-    let (resource, engine, user) = setup().await;
+    let (_resource, engine, user) = setup().await;
     create_usd_asset(&engine.ledger()).await;
 
     let ctx = engine.ledger_ctx();
@@ -254,7 +255,7 @@ async fn test_burn_operation() {
 
 #[tokio::test]
 async fn test_reserve_operation() {
-    let (resource, engine, user) = setup().await;
+    let (_resource, engine, user) = setup().await;
     let authority = Uuid::now_v7();
     create_usd_asset(&engine.ledger()).await;
 
@@ -284,7 +285,7 @@ async fn test_reserve_operation() {
 
 #[tokio::test]
 async fn test_insufficient_funds() {
-    let (resource, engine, user) = setup().await;
+    let (_resource, engine, user) = setup().await;
     create_usd_asset(&engine.ledger()).await;
 
     let ctx = engine.ledger_ctx();
@@ -311,7 +312,7 @@ async fn test_insufficient_funds() {
 
 #[tokio::test]
 async fn test_unconsumed_slice_error() {
-    let (resource, engine, user) = setup().await;
+    let (_resource, engine, user) = setup().await;
     create_usd_asset(&engine.ledger()).await;
 
     let ctx = engine.ledger_ctx();
@@ -335,7 +336,7 @@ async fn test_unconsumed_slice_error() {
 
 #[tokio::test]
 async fn test_money_not_sliced_error() {
-    let (resource, engine, user) = setup().await;
+    let (_resource, engine, user) = setup().await;
     create_usd_asset(&engine.ledger()).await;
 
     let ctx = engine.ledger_ctx();
@@ -361,7 +362,7 @@ async fn test_money_not_sliced_error() {
 
 #[tokio::test]
 async fn test_over_slice_error() {
-    let (resource, engine, user) = setup().await;
+    let (_resource, engine, user) = setup().await;
     create_usd_asset(&engine.ledger()).await;
 
     let ctx = engine.ledger_ctx();
@@ -386,7 +387,7 @@ async fn test_over_slice_error() {
 
 #[tokio::test]
 async fn test_concurrent_transfers_double_spend_protection() {
-    let (resource, engine, user) = setup().await;
+    let (_resource, engine, user) = setup().await;
     let merchant1 = Uuid::now_v7();
     let merchant2 = Uuid::now_v7();
     create_usd_asset(&engine.ledger()).await;
@@ -467,7 +468,7 @@ async fn test_asset_decimals_conversion() {
 
 #[tokio::test]
 async fn test_fragmentation() {
-    let (resource, engine, user) = setup().await;
+    let (_resource, engine, user) = setup().await;
     create_usd_asset(&engine.ledger()).await; // unit = 10_000 ($100)
 
     // Mint $250 should create 3 fragments: $100, $100, $50
@@ -485,7 +486,7 @@ async fn test_fragmentation() {
 
 #[tokio::test]
 async fn test_complex_multi_recipient_payment() {
-    let (resource, engine, user) = setup().await;
+    let (_resource, engine, user) = setup().await;
     let merchant = Uuid::now_v7();
     let platform = Uuid::now_v7();
     let charity = Uuid::now_v7();
@@ -537,7 +538,7 @@ async fn test_complex_multi_recipient_payment() {
 
 #[tokio::test]
 async fn test_rollback_on_error() {
-    let (resource, engine, user) = setup().await;
+    let (_resource, engine, user) = setup().await;
     let merchant = Uuid::now_v7();
     create_usd_asset(&engine.ledger()).await;
 
@@ -580,7 +581,7 @@ async fn test_rollback_on_error() {
 
 #[tokio::test]
 async fn test_multiple_assets() {
-    let (resource, engine, user) = setup().await;
+    let (_resource, engine, user) = setup().await;
     create_usd_asset(&engine.ledger()).await;
 
     let ngn = Asset::new("NGN", 500_000, 2); // ₦5,000 unit
@@ -602,4 +603,51 @@ async fn test_multiple_assets() {
 
     assert_eq!(usd_balance.available, 100_00);
     assert_eq!(ngn_balance.available, 50_000_00);
+}
+
+#[tokio::test]
+async fn test_fetch_transactions() {
+    let (_resource, engine, user) = setup().await;
+    create_usd_asset(&engine.ledger()).await;
+
+    let usd = Asset::new("USD", 500_000, 2); // ₦5,000 unit
+    engine.ledger().create_asset(usd).await.unwrap();
+
+    let ctx = engine.ledger_ctx();
+    let authority = Uuid::now_v7();
+
+    Money::atomic(&ctx, |tx| async move {
+        tx.mint("USD", user, 100_00, "deposit".to_string()).await?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+
+    Money::atomic(&ctx, |tx| async move {
+        tx.reserve("USD", user, authority, 60_00, "escrow".to_string())
+            .await?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+
+    let user_balance = Balance::get("USD", user, &ctx).await.unwrap();
+    let authority_balance = Balance::get("USD", authority, &ctx).await.unwrap();
+
+    assert_eq!(user_balance.available, 40_00);
+    assert_eq!(authority_balance.reserved, 60_00);
+
+    let transactions = engine
+        .ledger()
+        .get_transactions_for_owner(
+            user,
+            &[
+                Utc::now().checked_sub_days(Days::new(1)).unwrap(),
+                Utc::now(),
+            ],
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(transactions.len(), 2);
 }

@@ -11,12 +11,14 @@ pub enum Operation {
         owner: Uuid,
         amount: u64,
         metadata: String,
+        idempotency_key: Option<String>,
     },
     Burn {
         asset_id: Uuid,
         owner: Uuid,
         amount: u64,
         metadata: String,
+        idempotency_key: Option<String>,
     },
     Transfer {
         asset_id: Uuid,
@@ -221,6 +223,7 @@ impl TransactionContext {
             owner,
             amount,
             metadata: metadata.clone(),
+            idempotency_key: None,
         });
 
         plan.add(Operation::RecordTransaction {
@@ -232,6 +235,47 @@ impl TransactionContext {
                 0,
                 amount,
                 metadata,
+                None,
+            ),
+        });
+
+        Ok(())
+    }
+
+    pub async fn mint_idempotent(
+        &self,
+        asset: &str,
+        owner: Uuid,
+        amount: u64,
+        metadata: String,
+        idempotency_key: String,
+    ) -> Result<(), MoneyError> {
+        if amount == 0 {
+            return Err(MoneyError::InvalidAmount);
+        }
+
+        let adapter = self.ctx.adapter();
+        let asset_obj = adapter.get_asset(asset).await?;
+
+        let mut plan = self.plan.lock().unwrap();
+        plan.add(Operation::Mint {
+            asset_id: asset_obj.id,
+            owner,
+            amount,
+            metadata: metadata.clone(),
+            idempotency_key: Some(idempotency_key.clone()),
+        });
+
+        plan.add(Operation::RecordTransaction {
+            transaction: Transaction::new(
+                asset_obj.id,
+                asset_obj.code,
+                None,
+                Some(owner),
+                0,
+                amount,
+                metadata,
+                Some(idempotency_key),
             ),
         });
 
@@ -258,6 +302,7 @@ impl TransactionContext {
             owner,
             amount,
             metadata: metadata.clone(),
+            idempotency_key: None,
         });
 
         plan.add(Operation::RecordTransaction {
@@ -269,6 +314,47 @@ impl TransactionContext {
                 amount,
                 0,
                 metadata,
+                None,
+            ),
+        });
+
+        Ok(())
+    }
+
+    pub async fn burn_idempotent(
+        &self,
+        asset: &str,
+        owner: Uuid,
+        amount: u64,
+        metadata: String,
+        idempotency_key: String,
+    ) -> Result<(), MoneyError> {
+        if amount == 0 {
+            return Err(MoneyError::InvalidAmount);
+        }
+
+        let adapter = self.ctx.adapter();
+        let asset_obj = adapter.get_asset(asset).await?;
+
+        let mut plan = self.plan.lock().unwrap();
+        plan.add(Operation::Burn {
+            asset_id: asset_obj.id,
+            owner,
+            amount,
+            metadata: metadata.clone(),
+            idempotency_key: Some(idempotency_key.clone()),
+        });
+
+        plan.add(Operation::RecordTransaction {
+            transaction: Transaction::new(
+                asset_obj.id,
+                asset_obj.code,
+                Some(owner),
+                None,
+                amount,
+                0,
+                metadata,
+                Some(idempotency_key),
             ),
         });
 
@@ -308,6 +394,7 @@ impl TransactionContext {
                 amount,
                 amount,
                 metadata,
+                None,
             ),
         });
 
@@ -513,6 +600,7 @@ impl MoneySlice {
                 self.amount,
                 self.amount,
                 metadata,
+                None,
             ),
         });
 
@@ -539,6 +627,7 @@ impl MoneySlice {
             owner: self.owner,
             amount: self.amount,
             metadata: metadata.clone(),
+            idempotency_key: None,
         });
 
         plan.add(Operation::RecordTransaction {
@@ -550,6 +639,50 @@ impl MoneySlice {
                 self.amount,
                 0,
                 metadata,
+                None,
+            ),
+        });
+
+        self.consumed = true;
+        let mut slices = self.slice_states.lock().unwrap();
+        if let Some(slice) = slices.iter_mut().find(|s| s.id == self.id) {
+            slice.consumed = true;
+        }
+
+        Ok(())
+    }
+
+    pub async fn burn_idempotent(
+        mut self,
+        metadata: String,
+        idempotency_key: String,
+    ) -> Result<(), MoneyError> {
+        if self.consumed {
+            return Err(MoneyError::UnconsumedSlice);
+        }
+
+        let adapter = self.ctx.adapter();
+        let asset = adapter.get_asset(&self.asset_code).await?;
+
+        let mut plan = self.plan.lock().unwrap();
+        plan.add(Operation::Burn {
+            asset_id: asset.id,
+            owner: self.owner,
+            amount: self.amount,
+            metadata: metadata.clone(),
+            idempotency_key: Some(idempotency_key.clone()),
+        });
+
+        plan.add(Operation::RecordTransaction {
+            transaction: Transaction::new(
+                asset.id,
+                asset.code,
+                Some(self.owner),
+                None,
+                self.amount,
+                0,
+                metadata,
+                Some(idempotency_key),
             ),
         });
 

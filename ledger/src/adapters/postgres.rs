@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use crate::{
     Asset, Balance, ExecutionPlan, LedgerAdapter, MoneyError, Operation, Transaction, ValueObject,
 };
+use chrono::{DateTime, Utc};
 use sqlx::Row;
 use uuid::Uuid;
 
@@ -147,11 +148,21 @@ where
         // Transaction idempotency table
         sqlx::query(
             r#"
-            CREATE TABLE IF NOT EXISTS ledger_transaction_idempotencies (
+            CREATE TABLE IF NOT EXISTS ledger_transaction_idempotency_keys (
                 key TEXT NOT NULL PRIMARY KEY,
                 transaction_id UUID NOT NULL REFERENCES ledger_transactions(id),
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             )
+            "#,
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| MoneyError::Storage(e.to_string()))?;
+
+        sqlx::query(
+            r#"
+            CREATE INDEX IF NOT EXISTS idx_ledger_transaction_idempotency_keys_transaction_id
+            ON ledger_transaction_idempotency_keys(transaction_id)
             "#,
         )
         .execute(&mut *tx)
@@ -543,9 +554,10 @@ where
     async fn get_transaction(&self, tx_id: Uuid) -> Result<Transaction, MoneyError> {
         let row = sqlx::query(
             r#"
-            SELECT lt.id, lt.asset, a.code, lt.sender, lt.receiver, lt.burned_amount, lt.minted_amount, lt.metadata, lt.created_at
+            SELECT lt.id, ik.key as idempotency_key, lt.asset, a.code, lt.sender, lt.receiver, lt.burned_amount, lt.minted_amount, lt.metadata, lt.created_at
             FROM ledger_transactions lt
             LEFT JOIN assets a ON lt.asset = a.id
+            LEFT JOIN ledger_transaction_idempotency_keys ik ON ik.transaction_id = lt.id
             WHERE lt.id = $1
             "#,
         )
@@ -583,22 +595,29 @@ where
             created_at: row
                 .try_get("created_at")
                 .map_err(|e| MoneyError::Storage(e.to_string()))?,
+            idempotency_key: row
+                .try_get("idempotency_key")
+                .map_err(|e| MoneyError::Storage(e.to_string()))?,
         })
     }
 
     async fn get_transactions_for_owner(
         &self,
         owner: Uuid,
+        timespan: &[DateTime<Utc>; 2],
     ) -> Result<Vec<Transaction>, MoneyError> {
         let rows = sqlx::query(
             r#"
-            SELECT lt.id, lt.asset, a.code, lt.sender, lt.receiver, lt.burned_amount, lt.minted_amount, lt.metadata, lt.created_at
+            SELECT lt.id, ik.key as idempotency_key, lt.asset, a.code, lt.sender, lt.receiver, lt.burned_amount, lt.minted_amount, lt.metadata, lt.created_at
             FROM ledger_transactions lt
-            LEFT JOIN assets a ON lt.asset = a.id
-            WHERE lt.sender = $1 OR lt.receiver = $1
+            LEFT JOIN ledger_assets a ON lt.asset = a.id
+            LEFT JOIN ledger_transaction_idempotency_keys ik ON ik.transaction_id = lt.id
+            WHERE lt.sender = $1 OR lt.receiver = $1 AND lt.created_at BETWEEN $2 AND $3
             "#,
         )
         .bind(owner)
+        .bind(timespan[0])
+        .bind(timespan[1])
         .fetch_all(&self.get_pool())
         .await
         .map_err(|e| MoneyError::Storage(e.to_string()))?;
@@ -634,8 +653,13 @@ where
                 .try_get("created_at")
                 .map_err(|e| MoneyError::Storage(e.to_string()))?;
 
+            let idempotency_key = row
+                .try_get("idempotency_key")
+                .map_err(|e| MoneyError::Storage(e.to_string()))?;
+
             transactions.push(Transaction {
                 id,
+                idempotency_key,
                 asset,
                 code,
                 sender,

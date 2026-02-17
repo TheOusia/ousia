@@ -6,6 +6,7 @@ use uuid::Uuid;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Transaction {
     pub id: Uuid,
+    pub idempotency_key: Option<String>,
     pub asset: Uuid,
     pub code: String,
     pub sender: Option<Uuid>,
@@ -25,9 +26,11 @@ impl Transaction {
         burned_amount: u64,
         minted_amount: u64,
         metadata: String,
+        idempotency_key: Option<String>,
     ) -> Self {
         Self {
             id: uuid::Uuid::now_v7(),
+            idempotency_key,
             asset: asset_id,
             code: asset_name,
             sender,

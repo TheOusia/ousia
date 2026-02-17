@@ -9,6 +9,7 @@ pub mod value_object;
 
 pub use asset::Asset;
 pub use balance::Balance;
+use chrono::{DateTime, Utc};
 pub use error::MoneyError;
 pub use money::{ExecutionPlan, LedgerContext, Money, MoneySlice, Operation, TransactionContext};
 pub use transaction::Transaction;
@@ -37,8 +38,11 @@ pub trait LedgerAdapter: Send + Sync {
     // READ OPERATIONS
     async fn get_balance(&self, asset_id: Uuid, owner: Uuid) -> Result<Balance, MoneyError>;
     async fn get_transaction(&self, tx_id: Uuid) -> Result<Transaction, MoneyError>;
-    async fn get_transactions_for_owner(&self, owner: Uuid)
-    -> Result<Vec<Transaction>, MoneyError>;
+    async fn get_transactions_for_owner(
+        &self,
+        owner: Uuid,
+        timespan: &[DateTime<Utc>; 2],
+    ) -> Result<Vec<Transaction>, MoneyError>;
     async fn get_asset(&self, code: &str) -> Result<Asset, MoneyError>;
     async fn create_asset(&self, asset: Asset) -> Result<(), MoneyError>;
 }

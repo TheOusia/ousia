@@ -4,6 +4,7 @@ use crate::{
     ValueObjectState,
 };
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use uuid::Uuid;
@@ -241,13 +242,16 @@ impl LedgerAdapter for MemoryAdapter {
     async fn get_transactions_for_owner(
         &self,
         owner: Uuid,
+        timespan: &[DateTime<Utc>; 2],
     ) -> Result<Vec<Transaction>, MoneyError> {
         let txs = self.store.transactions.lock().unwrap();
         Ok(txs
             .values()
             .filter(|tx| {
-                (tx.sender.is_some() && tx.sender.unwrap() == owner)
-                    || (tx.receiver.is_some() && tx.receiver.unwrap() == owner)
+                ((tx.sender.is_some() && tx.sender.unwrap() == owner)
+                    || (tx.receiver.is_some() && tx.receiver.unwrap() == owner))
+                    && tx.created_at.timestamp() >= timespan[0].timestamp()
+                    && tx.created_at.timestamp() <= timespan[1].timestamp()
             })
             .cloned()
             .collect::<Vec<_>>())
