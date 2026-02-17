@@ -68,10 +68,6 @@ pub fn generate_uniqueness_impl(input: &DeriveInput) -> Result<TokenStream> {
                 }
             }
             UniqueConstraint::Composite(fields) => {
-                // Separate owner field from data fields
-                let (owner_refs, field_refs): (Vec<_>, Vec<_>) =
-                    fields.iter().partition(|f| *f == "owner");
-
                 let composite_key = fields.join("+");
 
                 // Build format string properly: "field1:{}:field2:{}"
