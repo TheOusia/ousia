@@ -1,7 +1,11 @@
 [package]
-name = "ousia_derive"
+name = "ousia-derive"
 version = "1.0.0"
 edition = "2024"
+description = "Derive macros for the ousia library"
+license = "MIT"
+repository = "https://github.com/theousia/ousia"
+documentation = "https://docs.rs/ousia-derive"
 exclude = ["Cargo.lock"]
 
 [lib]
