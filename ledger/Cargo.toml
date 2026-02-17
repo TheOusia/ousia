@@ -1,5 +1,5 @@
 [package]
-name = "ousia_ledger"
+name = "ousia-ledger"
 version = "1.0.0-alpha1"
 edition = "2024"
 description = "A high-performance double-entry ledger system for Rust"
