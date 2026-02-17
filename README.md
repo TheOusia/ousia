@@ -419,6 +419,18 @@ let users: Vec<User> = engine
 
 Ousia includes a full double-entry ledger. See [`ledger/README.md`](ledger/README.md) for the complete API. Here's the shape:
 
+#### Installation
+
+```bash
+cargo add ousia --features ledger
+```
+
+or
+
+```toml
+ousia = { version = "1", features = ["derive", "postgres"] }
+```
+
 ```rust
 use ousia::ledger::{Asset, LedgerContext, LedgerSystem, Money, Balance};
 
