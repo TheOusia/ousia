@@ -98,6 +98,7 @@ impl ExecutionPlan {
     }
 }
 
+#[derive(Clone)]
 pub struct LedgerContext {
     adapter: Arc<dyn LedgerAdapter>,
 }

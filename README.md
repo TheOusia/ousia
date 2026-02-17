@@ -1,527 +1,488 @@
 # Ousia
 
-**Ousia** is a lightweight, type-safe domain modeling framework for Rust that provides elegant object persistence, relationships, and controlled data visibility through a powerful view system.
+A graph-relational ORM with built-in double-entry ledger for Rust. Zero migrations, compile-time safety, and atomic payment splits — all in one framework.
 
-<!--[![Crates.io](https://img.shields.io/crates/v/ousia.svg)](https://crates.io/crates/ousia)-->
-<!--[![Documentation](https://docs.rs/ousia/badge.svg)](https://docs.rs/ousia)-->
-<!--[![License](https://img.shields.io/crates/l/ousia.svg)](LICENSE)-->
+> Powers [Mealgro](https://mealgro.com) in production: 10k+ users, real NGN money transfers, complex payment splits, zero data loss.
 
-## Features
+---
 
-- 🎯 **Type-Safe Domain Objects** - Define your domain models with derive macros
-- 🔍 **Flexible Indexing** - Built-in support for searchable and sortable fields
-- 🔐 **View System** - Control data visibility with compile-time guarantees
-- 🗄️ **Multiple Backends** - PostgreSQL and SQLite adapters included
-- 🔗 **Graph Relationships** - First-class support for edges and traversals
-- ⚡ **Zero Overhead** - Minimal runtime cost, maximum type safety
-- 🎨 **Clean API** - Intuitive builder patterns and async-first design
+## Table of Contents
 
-## Quick Start
+- [Why Ousia?](#why-ousia)
+- [Architecture Overview](#architecture-overview)
+- [Installation](#installation)
+- [Quickstart](#quickstart)
+- [Objects](#objects)
+  - [Defining Objects](#defining-objects)
+  - [CRUD Operations](#crud-operations)
+  - [Type-Safe Queries](#type-safe-queries)
+  - [Uniqueness Constraints](#uniqueness-constraints)
+  - [View System](#view-system)
+  - [Owner-Based Multitenancy](#owner-based-multitenancy)
+- [Edges (Graph Relationships)](#edges-graph-relationships)
+  - [Defining Edges](#defining-edges)
+  - [Creating and Querying Edges](#creating-and-querying-edges)
+  - [Reverse Edges](#reverse-edges)
+  - [Edge Filtering](#edge-filtering)
+- [Graph Traversal: `preload_object`](#graph-traversal-preload_object)
+- [Ledger (Money)](#ledger-money)
+- [Design Philosophy](#design-philosophy)
+- [Production Status](#production-status)
+- [Roadmap](#roadmap)
 
-Add Ousia to your `Cargo.toml`:
+---
+
+## Why Ousia?
+
+Most Rust ORMs give you tables and rows. Ousia gives you a typed graph with money semantics baked in.
+
+|                               | Ousia               | SeaORM / Diesel | SQLx        |
+| ----------------------------- | ------------------- | --------------- | ----------- |
+| Graph edges with properties   | ✅ First-class      | ❌ Manual joins | ❌ Raw SQL  |
+| No migrations                 | ✅ Struct IS schema | ❌ Required     | ❌ Required |
+| Compile-time query validation | ✅ `const FIELDS`   | Partial         | ❌          |
+| Owner-based multitenancy      | ✅ Built-in         | ❌ Manual       | ❌ Manual   |
+| Atomic payment splits         | ✅ Built-in ledger  | ❌ External     | ❌ External |
+| View system                   | ✅ Derive macro     | ❌              | ❌          |
+
+---
+
+## Architecture Overview
+
+```
+┌─────────────────────────────────────────────┐
+│                  Engine                     │
+│   (type-safe interface for all operations)  │
+├─────────────────┬───────────────────────────┤
+│   Object Store  │      Edge Store           │
+│   (JSONB data   │  (typed graph with        │
+│    + indexes)   │   index meta)             │
+├─────────────────┴───────────────────────────┤
+│             Adapter (Postgres / Memory)     │
+├─────────────────────────────────────────────┤
+│           Ledger (optional feature)         │
+│  (double-entry, two-phase, value objects)   │
+└─────────────────────────────────────────────┘
+```
+
+**Objects** hold structured data. Each has a `Meta` (id, owner, created_at, updated_at) plus your fields serialized as JSONB. Indexes are declared with `#[ousia(...)]` and validated at compile time.
+
+**Edges** are first-class typed relationships between objects. They carry their own data fields and indexes, and support both forward and reverse traversal.
+
+**The Ledger** handles money as immutable `ValueObject` fragments. Transfers are two-phase: a pure-memory planning stage followed by a single atomic execution with microsecond locks.
+
+---
+
+## Installation
 
 ```toml
 [dependencies]
-ousia = { version = "1.0", features = ["derive", "postgres"] }
-tokio = { version = "1", features = ["full"] }
-serde_json = "1"
+// ousia = "1.0" -- enables "derive", "postgres" and "ledger"
+ousia = { version = "1.0", features = ["derive", "ledger"] }
 ```
 
-## Basic Usage
+The `derive` feature enables `#[derive(OusiaObject, OusiaEdge)]`. The `ledger` feature re-exports the `ledger` crate under `ousia::ledger`.
 
-### Defining Objects
+---
+
+## Quickstart
 
 ```rust
-use ousia::{OusiaObject, OusiaDefault, Meta};
+use ousia::{Engine, Meta, OusiaDefault, OusiaObject, ObjectMeta, ObjectOwnership, Query};
+use ousia::adapters::postgres::PostgresAdapter;
 
-#[derive(OusiaObject, OusiaDefault, Debug, Clone)]
+// 1. Define your type
+#[derive(OusiaObject, OusiaDefault, Debug)]
 #[ousia(
-    type_name = "User",
-    index = "email:search",
-    index = "username:search+sort"
+    unique = "username",
+    index = "username:search+sort",
+    index = "email:search"
 )]
 pub struct User {
-    #[ousia(meta)]
     _meta: Meta,
-
     pub username: String,
     pub email: String,
     pub display_name: String,
-    
-    #[ousia(private)]
-    password: String,
 }
-```
-
-### Creating and Querying Objects
-
-```rust
-use ousia::{Engine, Query};
-use ousia::adapters::postgres::PostgresAdapter;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Initialize database adapter
-    let pool = sqlx::PgPool::connect("postgresql://localhost/mydb").await?;
-    let adapter = PostgresAdapter::from_pool(pool);
+    // 2. Connect
+    let adapter = PostgresAdapter::from_url("postgres://localhost/mydb").await?;
     adapter.init_schema().await?;
-    
-    // Create engine
     let engine = Engine::new(Box::new(adapter));
-    
-    // Create a user
-    let mut user = User {
-        username: "alice".to_string(),
-        email: "alice@example.com".to_string(),
-        display_name: "Alice".to_string(),
-        password: "secret123".to_string(),
-        ..Default::default()
-    };
-    
+
+    // 3. Create
+    let mut user = User::default();
+    user.username = "alice".to_string();
+    user.email = "alice@example.com".to_string();
+    user.display_name = "Alice".to_string();
     engine.create_object(&user).await?;
-    
-    // Query users
-    let query = Query::new(user.owner())
-        .where_eq(&User::FIELDS.username, "alice")
-        .with_limit(10);
-    
-    let users: Vec<User> = engine.query_objects(query).await?;
-    
+
+    // 4. Fetch
+    let fetched: Option<User> = engine.fetch_object(user.id()).await?;
+
+    // 5. Query
+    let users: Vec<User> = engine
+        .query_objects(Query::default().where_eq(&User::FIELDS.username, "alice"))
+        .await?;
+
     Ok(())
 }
 ```
 
-## View System
+---
 
-The view system allows you to control which fields are visible in different contexts, providing compile-time safety against accidental data leaks.
+## Objects
 
-### Three Visibility Levels
+### Defining Objects
 
-1. **Internal** - Engine-only view that includes ALL fields (used for persistence)
-2. **Default** - Safe user-facing view (excludes private fields, owner hidden by default)
-3. **Custom Views** - Explicitly defined projections for specific use cases
-
-### Defining Views
+Every object has a `Meta` field (by convention `_meta`) that holds `id`, `owner`, `created_at`, and `updated_at`. All other fields are yours.
 
 ```rust
-#[derive(OusiaObject, OusiaDefault, Debug, Clone)]
-#[ousia(type_name = "User")]
-pub struct User {
-    // Control meta field visibility per view
-    #[ousia_meta(view(default="id, created_at, updated_at"))]
-    #[ousia_meta(view(dashboard="id, owner, created_at, updated_at"))]
-    #[ousia_meta(view(api="id, created_at"))]
-    _meta: Meta,
+use ousia::{Meta, OusiaDefault, OusiaObject};
 
-    #[ousia(view(dashboard))]
-    pub username: String,
-    
-    #[ousia(view(dashboard))]
-    pub email: String,
-    
-    #[ousia(view(dashboard), view(api))]
-    pub display_name: String,
-    
-    #[ousia(view(dashboard))]
-    pub status: String,
-    
-    // Private field - only visible internally
-    #[ousia(private)]
-    password: String,
-}
-```
-
-### Using Views
-
-```rust
-// Default serialization (excludes private fields)
-let json = serde_json::to_value(&user)?;
-// Output: { "id": "...", "created_at": "...", "username": "...", "email": "...", "display_name": "...", "status": "..." }
-// Note: password is NOT included
-
-// Use custom view
-let api_view = user._api();
-let json = serde_json::to_value(&api_view)?;
-// Output: { "id": "...", "created_at": "...", "display_name": "..." }
-
-// Use dashboard view
-let dashboard_view = user._dashboard();
-let json = serde_json::to_value(&dashboard_view)?;
-// Output: { "id": "...", "owner": "...", "created_at": "...", "updated_at": "...", "username": "...", "email": "...", "display_name": "...", "status": "..." }
-```
-
-### View Benefits
-
-- ✅ **Compile-time safety** - Invalid views won't compile
-- ✅ **Zero runtime overhead** - Views are generated at compile time
-- ✅ **No DTOs needed** - One object definition, multiple projections
-- ✅ **Explicit over implicit** - Views must be explicitly selected
-- ✅ **Prevents data leaks** - Private fields never exposed accidentally
-
-## Edges and Relationships
-
-Model relationships between objects using edges:
-
-```rust
-use ousia::{OusiaEdge, OusiaDefault, EdgeMeta};
-
-#[derive(OusiaEdge, OusiaDefault, Debug, Clone)]
+#[derive(OusiaObject, OusiaDefault, Debug)]
 #[ousia(
-    type_name = "Follow",
-    index = "created_at:sort"
-)]
-pub struct Follow {
-    #[ousia(meta)]
-    _meta: EdgeMeta,
-    
-    pub created_at: chrono::DateTime<chrono::Utc>,
-}
-
-// Create a follow relationship
-let follow = Follow {
-    _meta: EdgeMeta::new(alice_id, bob_id),
-    created_at: chrono::Utc::now(),
-};
-
-engine.create_edge(&follow).await?;
-
-// Query followers
-let followers: Vec<User> = engine
-    .preload_object::<User>(bob_id)
-    .await
-    .edge::<Follow, User>()
-    .collect()
-    .await?;
-```
-
-## Indexing
-
-Define indexes for efficient querying:
-
-```rust
-#[derive(OusiaObject, OusiaDefault)]
-#[ousia(
-    type_name = "Post",
-    index = "title:search",           // Searchable
-    index = "created_at:sort",         // Sortable
-    index = "tags:search+sort"         // Both
+    type_name = "Post",          // optional — defaults to struct name
+    index = "status:search",
+    index = "created_at:sort",
+    index = "tags:search"        // Vec<String> supports contains queries
 )]
 pub struct Post {
-    #[ousia(meta)]
     _meta: Meta,
-    
     pub title: String,
     pub content: String,
-    pub tags: String,
+    pub status: PostStatus,
+    pub tags: Vec<String>,
 }
 
-// Search posts
-let query = Query::new(owner)
-    .filter(
-        &Post::FIELDS.title,
-        "rust",
-        QueryMode::search(Comparison::Contains, None)
-    )
-    .with_limit(20);
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub enum PostStatus { #[default] Draft, Published, Archived }
 
-let posts: Vec<Post> = engine.query_objects(query).await?;
-```
-
-## Advanced Queries
-
-### Complex Filtering
-
-```rust
-use ousia::query::{Comparison, Operator, QueryMode};
-
-let query = Query::new(owner)
-    .filter(
-        &User::FIELDS.username,
-        "alice",
-        QueryMode::search(Comparison::BeginsWith, Some(Operator::Or))
-    )
-    .filter(
-        &User::FIELDS.email,
-        "@example.com",
-        QueryMode::search(Comparison::Contains, None)
-    )
-    .with_limit(50)
-    .with_offset(0);
-
-let users: Vec<User> = engine.query_objects(query).await?;
-```
-
-### Sorting
-
-```rust
-let query = Query::new(owner)
-    .filter(
-        &Post::FIELDS.created_at,
-        chrono::Utc::now(),
-        QueryMode::sort(false) // descending
-    );
-
-let posts: Vec<Post> = engine.query_objects(query).await?;
-```
-
-### Edge Traversal
-
-```rust
-// Get all posts by users that alice follows
-let posts: Vec<Post> = engine
-    .preload_object::<User>(alice_id)
-    .await
-    .edge::<Follow, User>()
-    .edge::<AuthorOf, Post>()
-    .with_limit(20)
-    .collect()
-    .await?;
-```
-
-## Ownership Model
-
-Ousia has a built-in ownership model where every object has an owner:
-
-```rust
-use ousia::object::SYSTEM_OWNER;
-
-// System-owned object
-let mut config = Config {
-    _meta: Meta::default(), // Uses SYSTEM_OWNER
-    key: "app.version".to_string(),
-    value: "1.0.0".to_string(),
-};
-
-// User-owned object
-let mut post = Post {
-    _meta: Meta::new_with_owner(user_id),
-    title: "Hello World".to_string(),
-    content: "...".to_string(),
-};
-
-// Transfer ownership
-let transferred = engine.transfer_object::<Post>(
-    post_id,
-    old_owner_id,
-    new_owner_id
-).await?;
-```
-
-## Database Adapters
-
-### PostgreSQL
-
-```rust
-use ousia::adapters::postgres::PostgresAdapter;
-
-let pool = sqlx::PgPool::connect("postgresql://localhost/mydb").await?;
-let adapter = PostgresAdapter::from_pool(pool);
-adapter.init_schema().await?;
-
-let engine = Engine::new(Box::new(adapter));
-```
-
-### SQLite
-
-```rust
-use ousia::adapters::sqlite::SqliteAdapter;
-
-let adapter = SqliteAdapter::new_file("./data.db").await?;
-// or in-memory:
-// let adapter = SqliteAdapter::new_memory().await?;
-
-adapter.init_schema().await?;
-let engine = Engine::new(Box::new(adapter));
-```
-
-## Architecture
-
-Ousia follows a clean architecture pattern:
-
-```
-┌─────────────────────────────────────────┐
-│          Domain Layer                   │
-│  (Your Objects & Edges with derive)    │
-└─────────────────────────────────────────┘
-                  ↓
-┌─────────────────────────────────────────┐
-│          Engine Layer                   │
-│  (Type-safe CRUD & Query API)          │
-└─────────────────────────────────────────┘
-                  ↓
-┌─────────────────────────────────────────┐
-│          Adapter Layer                  │
-│  (PostgreSQL / SQLite / Custom)        │
-└─────────────────────────────────────────┘
-```
-
-### Key Concepts
-
-- **Objects** - Domain entities with metadata, indexes, and views
-- **Edges** - Typed relationships between objects
-- **Engine** - High-level API for object operations
-- **Adapters** - Storage backend implementations
-- **Views** - Compile-time projections for controlled visibility
-- **Meta** - Built-in metadata (id, owner, timestamps)
-
-## Best Practices
-
-### 1. Use Private Fields for Sensitive Data
-
-```rust
-#[derive(OusiaObject, OusiaDefault)]
-pub struct User {
-    #[ousia(meta)]
-    _meta: Meta,
-    
-    pub email: String,
-    
-    #[ousia(private)]
-    password_hash: String, // Never exposed in default serialization
-    
-    #[ousia(private)]
-    api_key: String,
-}
-```
-
-### 2. Define Views for Different Contexts
-
-```rust
-// Public API view - minimal data
-#[ousia_meta(view(api="id, created_at"))]
-
-// Admin dashboard view - more data
-#[ousia_meta(view(admin="id, owner, created_at, updated_at"))]
-
-// Internal processing view - everything
-// (automatically available via ObjectInternal trait)
-```
-
-### 3. Index Fields You Query
-
-```rust
-#[ousia(
-    index = "email:search",      // For WHERE email = ?
-    index = "created_at:sort",   // For ORDER BY created_at
-    index = "status:search+sort" // For both
-)]
-```
-
-### 4. Use Edges for Relationships
-
-```rust
-// Instead of storing foreign keys in objects, use edges:
-
-#[derive(OusiaEdge)]
-#[ousia(type_name = "Member")]
-pub struct Member {
-    #[ousia(meta)]
-    _meta: EdgeMeta, // from = user_id, to = team_id
-    
-    pub role: String,
-    pub joined_at: chrono::DateTime<chrono::Utc>,
-}
-```
-
-### 5. Leverage Type Safety
-
-```rust
-// The engine enforces type safety at compile time
-engine.create_object(&user).await?;   // ✅ User implements ObjectInternal
-engine.create_object(&"string").await?; // ❌ Compile error
-
-// Queries return the correct type
-let users: Vec<User> = engine.query_objects(query).await?;
-let posts: Vec<Post> = engine.query_objects(query).await?; // Different type
-```
-
-## Performance
-
-Ousia is designed for performance:
-
-- **Zero-cost abstractions** - No runtime overhead for type safety
-- **Efficient serialization** - Direct JSON mapping via serde
-- **Optimized queries** - SQL generation with proper indexing
-- **Minimal allocations** - Careful use of references and moves
-- **Async-first** - Built on tokio for high concurrency
-
-### Profiling
-
-Enable the `profiling` feature to measure query performance:
-
-```toml
-[dependencies]
-ousia = { version = "1.0", features = ["profiling"] }
-```
-
-```rust
-#[cfg(feature = "profiling")]
-{
-    let (users, profile) = adapter.query_objects_profiled::<User>(
-        User::TYPE,
-        query
-    ).await?;
-    
-    println!("Query time: {:?}", profile.query_ms);
-    println!("Serialization time: {:?}", profile.serialize_ms);
-}
-```
-
-## Testing
-
-Ousia includes utilities for testing:
-
-```rust
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use ousia::adapters::sqlite::SqliteAdapter;
-
-    #[tokio::test]
-    async fn test_user_creation() -> Result<(), Box<dyn std::error::Error>> {
-        // Use in-memory SQLite for tests
-        let adapter = SqliteAdapter::new_memory().await?;
-        adapter.init_schema().await?;
-        let engine = Engine::new(Box::new(adapter));
-        
-        let user = User {
-            username: "test".to_string(),
-            email: "test@example.com".to_string(),
-            ..Default::default()
-        };
-        
-        engine.create_object(&user).await?;
-        
-        let found = engine.fetch_object::<User>(user.id()).await?;
-        assert!(found.is_some());
-        
-        Ok(())
+// Implement ToIndexValue for PostStatus to enable indexing for custom types
+impl ToIndexValue for PostStatus {
+    fn to_index_value(&self) -> IndexValue {
+        match self {
+            PostStatus::Draft => IndexValue::String("draft".to_string()),
+            PostStatus::Published => IndexValue::String("published".to_string()),
+            PostStatus::Archived => IndexValue::String("archived".to_string()),
+        }
     }
 }
 ```
 
-## Contributing
+The `OusiaObject` derive generates:
 
-Contributions are welcome! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
+- `impl Object` — type name, meta accessors, index metadata
+- `impl Unique` — uniqueness hash derivation
+- `const FIELDS` — a `PostFields` struct with one `IndexField` per indexed field, used in query builder calls
+- Custom `Serialize`/`Deserialize` that respects private fields and views
 
-## License
+The `OusiaDefault` derive generates `impl Default` with a fresh `Meta`.
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+**Reserved field names** (used by Meta — don't declare these yourself): `id`, `owner`, `type`, `created_at`, `updated_at`.
 
-## Acknowledgments
+### CRUD Operations
 
-Ousia draws inspiration from:
-- **GraphQL** - Field-level visibility and type safety
-- **DynamoDB** - Flexible indexing patterns
-- **Datomic** - Immutable data and temporal queries
-- **Entity Framework** - Clean domain modeling
+```rust
+// Create
+engine.create_object(&post).await?;
 
-## Support
+// Fetch by ID
+let post: Option<Post> = engine.fetch_object(post_id).await?;
 
-- 📚 [Documentation](https://docs.rs/ousia)
-- 💬 [Discussions](https://github.com/theousia/ousia/discussions)
-- 🐛 [Issue Tracker](https://github.com/theousia/ousia/issues)
+// Fetch multiple by IDs
+let posts: Vec<Post> = engine.fetch_objects(vec![id1, id2, id3]).await?;
+
+// Update (sets updated_at automatically)
+post.title = "New Title".to_string();
+engine.update_object(&mut post).await?;
+
+// Delete (owner must match)
+let deleted: Option<Post> = engine.delete_object(post_id, owner_id).await?;
+
+// Transfer ownership
+let post: Post = engine.transfer_object(post_id, from_owner, to_owner).await?;
+```
+
+### Type-Safe Queries
+
+Queries are built using `const FIELDS` references — the field names are validated at compile time.
+
+```rust
+use ousia::Query;
+
+// All users named "alice"
+let users: Vec<User> = engine
+    .query_objects(Query::default().where_eq(&User::FIELDS.username, "alice"))
+    .await?;
+
+// Posts by owner, filtered and paginated
+let posts: Vec<Post> = engine
+    .query_objects(
+        Query::new(owner_id)
+            .where_eq(&Post::FIELDS.status, PostStatus::Published)
+            .sort_desc(&Post::FIELDS.created_at)
+            .with_limit(20)
+            .with_cursor(last_seen_id)  // cursor-based pagination
+    )
+    .await?;
+
+// Contains query on array field
+let tagged: Vec<Post> = engine
+    .query_objects(
+        Query::new(owner_id).where_contains(&Post::FIELDS.tags, vec!["rust"])
+    )
+    .await?;
+
+// Count
+let total: u64 = engine.count_objects::<Post>(None).await?;
+let published: u64 = engine
+    .count_objects::<Post>(Some(Query::new(owner_id).where_eq(&Post::FIELDS.status, PostStatus::Published)))
+    .await?;
+```
+
+Available comparisons: `where_eq`, `where_ne`, `where_gt`, `where_gte`, `where_lt`, `where_lte`, `where_contains`, `where_begins_with`. Each has an `or_` variant for OR conditions. Sort with `sort_asc` / `sort_desc`.
+
+### Uniqueness Constraints
+
+```rust
+// Single field unique globally
+#[ousia(unique = "username")]
+
+// Composite unique (both fields together must be unique)
+#[ousia(unique = "username+email")]
+
+// Singleton per owner (e.g., one profile per user)
+#[ousia(unique = "owner")]
+```
+
+On violation, `create_object` or `update_object` returns `Err(Error::UniqueConstraintViolation(field_name))`. Updates are handled cleanly: old hashes are removed, new ones checked, and rollback happens if the new hash is already taken.
+
+### View System
+
+Views let you generate multiple serialization shapes from one struct without duplicating types. Ideal for public vs. admin API responses.
+
+```rust
+#[derive(OusiaObject, OusiaDefault)]
+pub struct User {
+	#[ousia_meta(view(public = "id,created_at"))]        // meta fields in "public" view
+	#[ousia_meta(view(admin = "id,owner,created_at"))]   // meta fields in "admin" view
+    _meta: Meta,
+
+    #[ousia(view(public))]   // included in public view
+    #[ousia(view(admin))]    // included in admin view
+    pub username: String,
+
+    #[ousia(view(admin))]    // admin only
+    pub email: String,
+
+    #[ousia(private)]        // never serialized (e.g. password hash)
+    pub password_hash: String,
+}
+
+// Usage — auto-generated structs and methods:
+let public_view: UserPublicView = user._public();   // { id, created_at, username }
+let admin_view: UserAdminView  = user._admin();     // { id, owner, created_at, username, email }
+```
+
+Private fields are excluded from all serialization (including the default `Serialize` impl) but are included in the internal database representation via `__serialize_internal`.
+
+### Owner-Based Multitenancy
+
+Every object has an `owner` UUID in its Meta. The `SYSTEM_OWNER` constant (`00000000-0000-7000-8000-000000000001`) is the default for unowned objects.
+
+```rust
+use ousia::{ObjectMeta, ObjectOwnership, system_owner};
+
+// Set owner at creation
+post.set_owner(user.id());
+
+// Check ownership
+assert!(post.is_owned_by(&user));
+assert!(!post.is_system_owned());
+
+// Fetch everything owned by a user
+let posts: Vec<Post> = engine.fetch_owned_objects(user.id()).await?;
+
+// Fetch single owned object (useful for one-to-one, e.g., user profile)
+let profile: Option<Profile> = engine.fetch_owned_object(user.id()).await?;
+```
+
+Delete and transfer operations require the correct owner — mismatched owner returns `Err(Error::NotFound)`.
 
 ---
 
-**Built with ❤️ in Rust**
+## Edges (Graph Relationships)
+
+### Defining Edges
+
+```rust
+use ousia::{EdgeMeta, OusiaDefault, OusiaEdge};
+
+#[derive(OusiaEdge, OusiaDefault, Debug)]
+#[ousia(
+    type_name = "Follow",
+    index = "status:search",
+    index = "created_at:sort"
+)]
+pub struct Follow {
+    _meta: EdgeMeta,            // holds `from` and `to` UUIDs
+    pub status: String,         // "pending" | "accepted"
+    pub notifications: bool,
+}
+```
+
+`EdgeMeta` stores the `from` and `to` object IDs. The `OusiaEdge` derive generates `impl Edge`, `const FIELDS`, and custom serde that keeps `_meta` out of the serialized data payload.
+
+`from` and `to` are always available as indexed fields (no need to declare them).
+
+### Creating and Querying Edges
+
+```rust
+// Create
+let follow = Follow {
+    _meta: EdgeMeta::new(alice.id(), bob.id()),
+    status: "accepted".to_string(),
+    notifications: true,
+};
+engine.create_edge(&follow).await?;
+
+// Query forward edges (Alice's follows)
+let follows: Vec<Follow> = engine
+    .query_edges(alice.id(), EdgeQuery::default())
+    .await?;
+
+// Update (optionally change the `to` target)
+engine.update_edge(&mut follow, None).await?;
+
+// Delete
+engine.delete_edge::<Follow>(alice.id(), bob.id()).await?;
+
+// Delete all edges from a node
+engine.delete_object_edge::<Follow>(alice.id()).await?;
+
+// Count
+let count: u64 = engine.count_edges::<Follow>(alice.id(), None).await?;
+```
+
+### Reverse Edges
+
+```rust
+// Who follows Bob? (reverse direction)
+let followers: Vec<Follow> = engine
+    .query_reverse_edges(bob.id(), EdgeQuery::default())
+    .await?;
+
+let follower_count: u64 = engine
+    .count_reverse_edges::<Follow>(bob.id(), None)
+    .await?;
+```
+
+### Edge Filtering
+
+```rust
+use ousia::EdgeQuery;
+
+let accepted: Vec<Follow> = engine
+    .query_edges(
+        alice.id(),
+        EdgeQuery::default()
+            .where_eq(&Follow::FIELDS.status, "accepted")
+            .sort_desc(&Follow::FIELDS.created_at)
+            .with_limit(50),
+    )
+    .await?;
+```
+
+---
+
+## Graph Traversal: `preload_object`
+
+For complex multi-hop traversals, `preload_object` provides a fluent builder that can filter both the edge properties and the target object's properties in a single query:
+
+```rust
+// Users that Alice follows, created after last month, where the Follow edge is accepted
+let users: Vec<User> = engine
+    .preload_object::<User>(alice.id())
+    .edge::<Follow, User>()
+    .where_gt(&User::FIELDS.created_at, last_month)     // filter target objects
+    .edge_eq(&Follow::FIELDS.status, "accepted")        // filter edges
+    .collect()
+    .await?;
+```
+
+---
+
+## Ledger (Money)
+
+Ousia includes a full double-entry ledger. See [`ledger/README.md`](ledger/README.md) for the complete API. Here's the shape:
+
+```rust
+use ousia::ledger::{Asset, LedgerContext, LedgerSystem, Money, Balance};
+
+// Setup
+let system = Arc::new(LedgerSystem::new(Box::new(adapter)));
+let ctx = LedgerContext::new(system.adapter_arc());
+
+// Create an asset
+let usd = Asset::new("USD", 10_000, 2);   // unit = $100, 2 decimals
+system.adapter().create_asset(usd).await?;
+
+// Atomic payment split: buyer pays $100, splits to seller/platform/charity
+Money::atomic(&ctx, |tx| async move {
+    let money = tx.money("USD", buyer_id, 100_00).await?;
+    let mut slice = money.slice(100_00)?;
+
+    let seller_cut   = slice.slice(70_00)?;
+    let platform_fee = slice.slice(20_00)?;
+    let charity      = slice.slice(10_00)?;
+
+    seller_cut.transfer_to(seller_id, "sale".to_string()).await?;
+    platform_fee.transfer_to(platform_id, "fee".to_string()).await?;
+    charity.transfer_to(charity_id, "donation".to_string()).await?;
+
+    Ok(())
+}).await?;
+
+// Check balance
+let balance = Balance::get("USD", seller_id, &ctx).await?;
+println!("Seller balance: {}", balance.available);
+```
+
+---
+
+## Design Philosophy
+
+**What Ousia does:**
+
+- Type safety enforced at compile time via `const FIELDS` and derive macros
+- Typed graph edges with indexed properties
+- Atomic money transfers with double-entry guarantees
+- Owner-based multitenancy as a first-class concept
+- Automatic change handling — over-selection in payments returns the diff
+
+**Idempotency:** Keys stored permanently. Only used for external deposit/withdrawal webhooks — not every internal transaction needs a key.
+
+**What Ousia deliberately rejects:**
+
+- **Explicit transactions** — the two-phase ledger handles it; locks held for microseconds only
+- **ORM-layer validation** — belongs in your service layer, not your ORM
+- **Soft deletes** — application-specific; implement in your domain if needed
+- **Schema migrations** — the struct is the schema; add and remove fields freely
+- **Early locking** — planning phase is pure memory; execution phase is atomic
+
+---
+
+## Metrics
+
+- Query duration histogram
+- Transaction amount histogram
+- Transaction success rate histogram
+
+---
+
+## License
+
+MIT

@@ -1268,6 +1268,7 @@ dependencies = [
  "chrono",
  "metrics",
  "serde",
+ "sqlx",
  "tokio",
  "uuid",
 ]
@@ -1576,6 +1577,23 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "ousia_test_ledger"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "ousia",
+ "rand 0.9.2",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tempfile",
+ "testcontainers",
+ "testcontainers-modules",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]

@@ -1,4 +1,11 @@
+#[cfg(feature = "ledger")]
+use std::sync::Arc;
+
 use chrono::Utc;
+
+#[cfg(feature = "ledger")]
+use ledger::adapters::postgres::PostgresLedgerAdapter;
+
 use sqlx::{
     PgPool, Postgres, Row,
     postgres::{PgArguments, PgRow},
@@ -36,6 +43,16 @@ use crate::{
 /// ```
 pub struct PostgresAdapter {
     pub(crate) pool: PgPool,
+}
+
+#[cfg(feature = "ledger")]
+impl PostgresLedgerAdapter for PostgresAdapter
+where
+    PostgresAdapter: Send + Sync,
+{
+    fn get_pool(&self) -> sqlx::PgPool {
+        self.pool.clone()
+    }
 }
 
 impl PostgresAdapter {
@@ -205,6 +222,8 @@ impl PostgresAdapter {
 
         #[cfg(feature = "ledger")]
         {
+            use ledger::adapters::postgres::PostgresSchemaLedgerAdapter;
+
             self.init_ledger_schema().await.map_err(|me| match me {
                 ledger::MoneyError::Storage(e) => Error::Storage(e),
                 _ => Error::Storage(me.to_string()),
@@ -1502,6 +1521,11 @@ impl Adapter for PostgresAdapter {
             .await
             .expect("Failed to fetch the next sequence value");
         next_val as u64
+    }
+
+    #[cfg(feature = "ledger")]
+    fn ledger_adapter(&self) -> Option<Arc<dyn ledger::LedgerAdapter>> {
+        Some(Arc::new(PostgresAdapter::from_pool(self.pool.clone())))
     }
 }
 

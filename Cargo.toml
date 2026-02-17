@@ -1,5 +1,5 @@
 [workspace]
-members = ["ledger","ousia","ousia_derive", "test_suit"]
+members = ["ledger","ousia","ousia_derive", "test_ledger", "test_suit"]
 resolver = "2"
 
 [patch.crates-io]

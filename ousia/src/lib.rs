@@ -6,6 +6,8 @@ pub mod query;
 
 #[cfg(feature = "ledger")]
 pub use ledger;
+#[cfg(feature = "ledger")]
+use ledger::LedgerContext;
 use metrics::histogram;
 
 use std::sync::Arc;
@@ -38,12 +40,21 @@ pub struct Engine {
 
 pub struct Ousia {
     adapter: Box<dyn Adapter>,
+    #[cfg(feature = "ledger")]
+    ledger: Option<Arc<dyn ledger::LedgerAdapter>>,
 }
 
 impl Engine {
     pub fn new(adapter: Box<dyn Adapter>) -> Self {
+        #[cfg(feature = "ledger")]
+        let ledger = adapter.ledger_adapter();
+
         Self {
-            inner: Arc::new(Ousia { adapter: adapter }),
+            inner: Arc::new(Ousia {
+                adapter: adapter,
+                #[cfg(feature = "ledger")]
+                ledger,
+            }),
         }
     }
 
@@ -388,11 +399,16 @@ impl Engine {
         to: Uuid,
         query: EdgeQuery,
     ) -> Result<Vec<E>, Error> {
+        let start = Instant::now();
         let records = self
             .inner
             .adapter
             .query_reverse_edges(E::TYPE, to, query)
             .await?;
+        histogram!("ousia.query_edges.duration_ms",
+            "type" => E::TYPE
+        )
+        .record(start.elapsed().as_millis() as f64);
         records.into_iter().map(|r| r.to_edge()).collect()
     }
 
@@ -431,5 +447,27 @@ impl Engine {
     /// Start a query context for complex traversals
     pub fn preload_object<'a, T: Object>(&'a self, id: Uuid) -> QueryContext<'a, T> {
         self.inner.adapter.preload_object(id)
+    }
+
+    #[cfg(feature = "ledger")]
+    pub fn ledger(&self) -> &Arc<dyn ledger::LedgerAdapter> {
+        let ledger = self
+            .inner
+            .ledger
+            .as_ref()
+            .expect("This adapter does not support the ledger. Use PostgresAdapter.");
+
+        ledger
+    }
+
+    #[cfg(feature = "ledger")]
+    pub fn ledger_ctx(&self) -> ledger::LedgerContext {
+        let arc = self
+            .inner
+            .ledger
+            .as_ref()
+            .expect("This adapter does not support the ledger. Use PostgresAdapter.");
+
+        ledger::LedgerContext::new(Arc::clone(arc))
     }
 }
