@@ -13,7 +13,6 @@ struct MemoryStore {
     assets: Arc<Mutex<HashMap<String, Asset>>>,
     value_objects: Arc<Mutex<HashMap<Uuid, ValueObject>>>,
     transactions: Arc<Mutex<HashMap<Uuid, Transaction>>>,
-    in_transaction: Arc<Mutex<bool>>,
 }
 
 impl MemoryStore {
@@ -22,40 +21,7 @@ impl MemoryStore {
             assets: Arc::new(Mutex::new(HashMap::new())),
             value_objects: Arc::new(Mutex::new(HashMap::new())),
             transactions: Arc::new(Mutex::new(HashMap::new())),
-            in_transaction: Arc::new(Mutex::new(false)),
         }
-    }
-
-    fn fragment_amount(
-        &self,
-        amount: u64,
-        unit: u64,
-        asset_id: Uuid,
-        owner: Uuid,
-        state: ValueObjectState,
-        reserved_for: Option<Uuid>,
-    ) -> Vec<ValueObject> {
-        let mut fragments = Vec::new();
-        let mut remaining = amount;
-
-        while remaining > 0 {
-            let chunk = remaining.min(unit);
-
-            let mut vo = if state == ValueObjectState::Reserved {
-                ValueObject::new_reserved(asset_id, owner, chunk, reserved_for.unwrap())
-            } else {
-                ValueObject::new_alive(asset_id, owner, chunk)
-            };
-
-            if state == ValueObjectState::Burned {
-                vo.state = ValueObjectState::Burned;
-            }
-
-            fragments.push(vo);
-            remaining -= chunk;
-        }
-
-        fragments
     }
 }
 
@@ -272,6 +238,21 @@ impl LedgerAdapter for MemoryAdapter {
             .ok_or(MoneyError::TransactionNotFound)
     }
 
+    async fn get_transactions_for_owner(
+        &self,
+        owner: Uuid,
+    ) -> Result<Vec<Transaction>, MoneyError> {
+        let txs = self.store.transactions.lock().unwrap();
+        Ok(txs
+            .values()
+            .filter(|tx| {
+                (tx.sender.is_some() && tx.sender.unwrap() == owner)
+                    || (tx.receiver.is_some() && tx.receiver.unwrap() == owner)
+            })
+            .cloned()
+            .collect::<Vec<_>>())
+    }
+
     async fn get_asset(&self, code: &str) -> Result<Asset, MoneyError> {
         let assets = self.store.assets.lock().unwrap();
         assets
@@ -283,92 +264,6 @@ impl LedgerAdapter for MemoryAdapter {
     async fn create_asset(&self, asset: Asset) -> Result<(), MoneyError> {
         let mut assets = self.store.assets.lock().unwrap();
         assets.insert(asset.code.clone(), asset);
-        Ok(())
-    }
-}
-
-impl MemoryAdapter {
-    fn select_for_burn_internal(
-        &self,
-        asset_id: Uuid,
-        owner: Uuid,
-        amount: u64,
-    ) -> Result<Vec<ValueObject>, MoneyError> {
-        let vos = self.store.value_objects.lock().unwrap();
-
-        let mut available: Vec<ValueObject> = vos
-            .values()
-            .filter(|vo| vo.asset == asset_id && vo.owner == owner && vo.state.is_alive())
-            .cloned()
-            .collect();
-
-        available.sort_by_key(|vo| vo.amount);
-
-        let mut selected = Vec::new();
-        let mut total = 0u64;
-
-        for vo in available {
-            selected.push(vo.clone());
-            total += vo.amount;
-            if total >= amount {
-                break;
-            }
-        }
-
-        Ok(selected)
-    }
-
-    fn mint_internal(&self, asset_id: Uuid, owner: Uuid, amount: u64) -> Result<(), MoneyError> {
-        let assets = self.store.assets.lock().unwrap();
-        let asset = assets
-            .values()
-            .find(|a| a.id == asset_id)
-            .ok_or(MoneyError::AssetNotFound(asset_id.to_string()))?;
-
-        let fragments = self.store.fragment_amount(
-            amount,
-            asset.unit,
-            asset_id,
-            owner,
-            ValueObjectState::Alive,
-            None,
-        );
-
-        let mut vos = self.store.value_objects.lock().unwrap();
-        for fragment in fragments {
-            vos.insert(fragment.id, fragment);
-        }
-
-        Ok(())
-    }
-
-    fn mint_reserved_internal(
-        &self,
-        asset_id: Uuid,
-        owner: Uuid,
-        amount: u64,
-        authority: Uuid,
-    ) -> Result<(), MoneyError> {
-        let assets = self.store.assets.lock().unwrap();
-        let asset = assets
-            .values()
-            .find(|a| a.id == asset_id)
-            .ok_or(MoneyError::AssetNotFound(asset_id.to_string()))?;
-
-        let fragments = self.store.fragment_amount(
-            amount,
-            asset.unit,
-            asset_id,
-            owner,
-            ValueObjectState::Reserved,
-            Some(authority),
-        );
-
-        let mut vos = self.store.value_objects.lock().unwrap();
-        for fragment in fragments {
-            vos.insert(fragment.id, fragment);
-        }
-
         Ok(())
     }
 }

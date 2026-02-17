@@ -2,7 +2,6 @@ use std::collections::HashMap;
 
 use crate::{
     Asset, Balance, ExecutionPlan, LedgerAdapter, MoneyError, Operation, Transaction, ValueObject,
-    ValueObjectState,
 };
 use sqlx::Row;
 use uuid::Uuid;
@@ -78,6 +77,16 @@ where
 
         sqlx::query(
             r#"
+            CREATE INDEX IF NOT EXISTS idx_value_objects_owner_state
+            ON ledger_value_objects(owner, state)
+            "#,
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| MoneyError::Storage(e.to_string()))?;
+
+        sqlx::query(
+            r#"
             CREATE INDEX IF NOT EXISTS idx_value_objects_owner
             ON ledger_value_objects(owner)
             "#,
@@ -135,6 +144,20 @@ where
         .await
         .map_err(|e| MoneyError::Storage(e.to_string()))?;
 
+        // Transaction idempotency table
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS ledger_transaction_idempotencies (
+                key TEXT NOT NULL PRIMARY KEY,
+                transaction_id UUID NOT NULL REFERENCES ledger_transactions(id),
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+            "#,
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| MoneyError::Storage(e.to_string()))?;
+
         tx.commit()
             .await
             .map_err(|e| MoneyError::Storage(e.to_string()))?;
@@ -145,14 +168,6 @@ where
 
 #[async_trait::async_trait]
 trait PostgresInternalLedgerAdapter {
-    async fn select_for_burn_internal_tx(
-        &self,
-        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-        asset_id: Uuid,
-        owner: Uuid,
-        amount: u64,
-    ) -> Result<Vec<ValueObject>, MoneyError>;
-
     async fn mint_internal_tx(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
@@ -168,12 +183,6 @@ trait PostgresInternalLedgerAdapter {
         owner: Uuid,
         amount: u64,
         authority: Uuid,
-    ) -> Result<(), MoneyError>;
-
-    async fn burn_value_objects_internal_tx(
-        &self,
-        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-        ids: Vec<Uuid>,
     ) -> Result<(), MoneyError>;
 
     async fn record_transaction_internal_tx(
@@ -199,65 +208,6 @@ impl<T> PostgresInternalLedgerAdapter for T
 where
     T: PostgresLedgerAdapter + Send + Sync,
 {
-    async fn select_for_burn_internal_tx(
-        &self,
-        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-        asset_id: Uuid,
-        owner: Uuid,
-        amount: u64,
-    ) -> Result<Vec<ValueObject>, MoneyError> {
-        let rows = sqlx::query(
-            r#"
-            SELECT id, asset, owner, amount, state, reserved_for, created_at
-            FROM ledger_value_objects
-            WHERE asset = $1 AND owner = $2 AND state = 'alive'
-            ORDER BY amount ASC
-            FOR UPDATE SKIP LOCKED
-            "#,
-        )
-        .bind(asset_id)
-        .bind(owner)
-        .fetch_all(&mut **tx)
-        .await
-        .map_err(|e| MoneyError::Storage(e.to_string()))?;
-
-        let mut selected = Vec::new();
-        let mut total = 0u64;
-
-        for row in rows {
-            let vo_amount =
-                row.try_get::<i64, _>("amount")
-                    .map_err(|e| MoneyError::Storage(e.to_string()))? as u64;
-
-            let vo = ValueObject {
-                id: row
-                    .try_get("id")
-                    .map_err(|e| MoneyError::Storage(e.to_string()))?,
-                asset: row
-                    .try_get("asset")
-                    .map_err(|e| MoneyError::Storage(e.to_string()))?,
-                owner: row
-                    .try_get("owner")
-                    .map_err(|e| MoneyError::Storage(e.to_string()))?,
-                amount: vo_amount,
-                state: ValueObjectState::Alive,
-                reserved_for: None,
-                created_at: row
-                    .try_get("created_at")
-                    .map_err(|e| MoneyError::Storage(e.to_string()))?,
-            };
-
-            selected.push(vo);
-            total += vo_amount;
-
-            if total >= amount {
-                break;
-            }
-        }
-
-        Ok(selected)
-    }
-
     async fn mint_internal_tx(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
@@ -314,28 +264,6 @@ where
             .bind(fragment.owner)
             .bind(fragment.amount as i64)
             .bind(authority)
-            .execute(&mut **tx)
-            .await
-            .map_err(|e| MoneyError::Storage(e.to_string()))?;
-        }
-
-        Ok(())
-    }
-
-    async fn burn_value_objects_internal_tx(
-        &self,
-        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-        ids: Vec<Uuid>,
-    ) -> Result<(), MoneyError> {
-        for id in ids {
-            sqlx::query(
-                r#"
-                UPDATE ledger_value_objects
-                SET state = 'burned'
-                WHERE id = $1
-                "#,
-            )
-            .bind(id)
             .execute(&mut **tx)
             .await
             .map_err(|e| MoneyError::Storage(e.to_string()))?;
@@ -656,6 +584,70 @@ where
                 .try_get("created_at")
                 .map_err(|e| MoneyError::Storage(e.to_string()))?,
         })
+    }
+
+    async fn get_transactions_for_owner(
+        &self,
+        owner: Uuid,
+    ) -> Result<Vec<Transaction>, MoneyError> {
+        let rows = sqlx::query(
+            r#"
+            SELECT lt.id, lt.asset, a.code, lt.sender, lt.receiver, lt.burned_amount, lt.minted_amount, lt.metadata, lt.created_at
+            FROM ledger_transactions lt
+            LEFT JOIN assets a ON lt.asset = a.id
+            WHERE lt.sender = $1 OR lt.receiver = $1
+            "#,
+        )
+        .bind(owner)
+        .fetch_all(&self.get_pool())
+        .await
+        .map_err(|e| MoneyError::Storage(e.to_string()))?;
+
+        let mut transactions = Vec::new();
+        for row in rows {
+            let id = row
+                .try_get("id")
+                .map_err(|e| MoneyError::Storage(e.to_string()))?;
+            let asset = row
+                .try_get("asset")
+                .map_err(|e| MoneyError::Storage(e.to_string()))?;
+            let code = row
+                .try_get("code")
+                .map_err(|e| MoneyError::Storage(e.to_string()))?;
+            let sender = row
+                .try_get("sender")
+                .map_err(|e| MoneyError::Storage(e.to_string()))?;
+            let receiver = row
+                .try_get("receiver")
+                .map_err(|e| MoneyError::Storage(e.to_string()))?;
+
+            let burned_amount =
+                row.try_get::<i64, _>("burned_amount")
+                    .map_err(|e| MoneyError::Storage(e.to_string()))? as u64;
+            let minted_amount =
+                row.try_get::<i64, _>("minted_amount")
+                    .map_err(|e| MoneyError::Storage(e.to_string()))? as u64;
+            let metadata = row
+                .try_get("metadata")
+                .map_err(|e| MoneyError::Storage(e.to_string()))?;
+            let created_at = row
+                .try_get("created_at")
+                .map_err(|e| MoneyError::Storage(e.to_string()))?;
+
+            transactions.push(Transaction {
+                id,
+                asset,
+                code,
+                sender,
+                receiver,
+                burned_amount,
+                minted_amount,
+                metadata,
+                created_at,
+            });
+        }
+
+        Ok(transactions)
     }
 
     async fn get_asset(&self, code: &str) -> Result<Asset, MoneyError> {

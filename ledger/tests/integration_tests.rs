@@ -23,7 +23,7 @@ async fn create_usd_asset(system: &LedgerSystem) -> Asset {
 #[tokio::test]
 async fn test_mint_creates_balance() {
     let (system, ctx, user) = setup();
-    let usd = create_usd_asset(&system).await;
+    let _ = create_usd_asset(&system).await;
 
     Money::atomic(&ctx, |tx| async move {
         tx.mint("USD", user, 100_00, "initial deposit".to_string())
@@ -43,7 +43,7 @@ async fn test_mint_creates_balance() {
 async fn test_simple_transfer() {
     let (system, ctx, user) = setup();
     let merchant = Uuid::now_v7();
-    let usd = create_usd_asset(&system).await;
+    let _ = create_usd_asset(&system).await;
 
     // Mint initial balance
     Money::atomic(&ctx, |tx| async move {
@@ -534,4 +534,40 @@ async fn test_multiple_assets() {
 
     assert_eq!(usd_balance.available, 100_00);
     assert_eq!(ngn_balance.available, 50_000_00);
+}
+
+#[tokio::test]
+async fn test_fetch_transactions() {
+    let (system, ctx, user) = setup();
+    let authority = Uuid::now_v7();
+    create_usd_asset(&system).await;
+
+    Money::atomic(&ctx, |tx| async move {
+        tx.mint("USD", user, 100_00, "deposit".to_string()).await?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+
+    Money::atomic(&ctx, |tx| async move {
+        tx.reserve("USD", user, authority, 60_00, "escrow".to_string())
+            .await?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+
+    let user_balance = Balance::get("USD", user, &ctx).await.unwrap();
+    let authority_balance = Balance::get("USD", authority, &ctx).await.unwrap();
+
+    assert_eq!(user_balance.available, 40_00);
+    assert_eq!(authority_balance.reserved, 60_00);
+
+    let transactions = system
+        .adapter()
+        .get_transactions_for_owner(user)
+        .await
+        .unwrap();
+
+    println!("{:#?}", transactions);
 }
