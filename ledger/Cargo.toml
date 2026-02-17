@@ -9,7 +9,7 @@ documentation = "https://docs.rs/ledger"
 readme = "README.md"
 keywords = ["ledger", "finance", "payments", "money", "double-entry"]
 categories = ["finance", "database"]
-exclude = ["tests/", ".github/"]
+exclude = ["tests/", ".github/", "Cargo.lock"]
 
 [dependencies]
 async-trait = "0.1.89"
