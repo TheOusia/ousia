@@ -116,9 +116,6 @@ impl LedgerContext {
 }
 
 struct MoneyState {
-    asset_id: Uuid,
-    asset_code: String,
-    owner: Uuid,
     amount: u64,
     sliced_amount: u64,
 }
@@ -179,9 +176,6 @@ impl TransactionContext {
         }
 
         let state = MoneyState {
-            asset_id: asset_obj.id,
-            asset_code: asset_code.clone(),
-            owner,
             amount,
             sliced_amount: 0,
         };
