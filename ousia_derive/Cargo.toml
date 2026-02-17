@@ -1,5 +1,5 @@
 [package]
-name = "ousia-derive"
+name = "ousia_derive"
 version = "1.0.0"
 edition = "2024"
 description = "Derive macros for the ousia library"
@@ -9,7 +9,7 @@ documentation = "https://docs.rs/ousia-derive"
 exclude = ["Cargo.lock"]
 
 [lib]
-name = "ousia-derive"
+name = "ousia_derive"
 proc-macro = true
 
 [dependencies]
