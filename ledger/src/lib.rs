@@ -11,7 +11,7 @@ pub use asset::Asset;
 pub use balance::Balance;
 pub use error::MoneyError;
 pub use money::{ExecutionPlan, LedgerContext, Money, MoneySlice, Operation, TransactionContext};
-pub use transaction::{Transaction, TransactionHandle};
+pub use transaction::Transaction;
 pub use value_object::{ValueObject, ValueObjectState};
 
 use async_trait::async_trait;

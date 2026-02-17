@@ -1,5 +1,6 @@
 // ledger/src/money.rs
-use super::{Asset, Balance, LedgerAdapter, MoneyError, Transaction, ValueObject};
+use super::{Balance, LedgerAdapter, MoneyError, Transaction};
+use metrics::{counter, histogram};
 use std::sync::{Arc, Mutex};
 use uuid::Uuid;
 
@@ -222,7 +223,15 @@ impl TransactionContext {
         });
 
         plan.add(Operation::RecordTransaction {
-            transaction: Transaction::new(asset_obj.id, None, Some(owner), 0, amount, metadata),
+            transaction: Transaction::new(
+                asset_obj.id,
+                asset_obj.code,
+                None,
+                Some(owner),
+                0,
+                amount,
+                metadata,
+            ),
         });
 
         Ok(())
@@ -251,7 +260,15 @@ impl TransactionContext {
         });
 
         plan.add(Operation::RecordTransaction {
-            transaction: Transaction::new(asset_obj.id, Some(owner), None, amount, 0, metadata),
+            transaction: Transaction::new(
+                asset_obj.id,
+                asset_obj.code,
+                Some(owner),
+                None,
+                amount,
+                0,
+                metadata,
+            ),
         });
 
         Ok(())
@@ -284,6 +301,7 @@ impl TransactionContext {
         plan.add(Operation::RecordTransaction {
             transaction: Transaction::new(
                 asset_obj.id,
+                asset_obj.code,
                 Some(from),
                 Some(for_authority),
                 amount,
@@ -351,11 +369,27 @@ impl Money {
         let plan = tx_ctx.plan.lock().unwrap().clone();
         let locks = plan.calculate_locks();
 
+        for operation in &plan.operations {
+            match operation {
+                Operation::RecordTransaction { transaction } => {
+                    histogram!("ledger.transaction.amount",
+                        "asset" => transaction.code.clone()
+                    )
+                    .record(if transaction.burned_amount > 0 {
+                        transaction.burned_amount as f64
+                    } else {
+                        transaction.minted_amount as f64
+                    });
+                }
+                _ => (),
+            }
+        }
+
         ledger_ctx.adapter().begin_transaction().await?;
 
         let execution_result = ledger_ctx.adapter().execute_plan(&plan, &locks).await;
 
-        match execution_result {
+        let tx_result = match execution_result {
             Ok(_) => {
                 ledger_ctx.adapter().commit_transaction().await?;
                 Ok(())
@@ -364,7 +398,14 @@ impl Money {
                 ledger_ctx.adapter().rollback_transaction().await?;
                 Err(e)
             }
-        }
+        };
+
+        counter!("ledger.transactions.total",
+            "status" => if tx_result.is_ok() { "success" } else { "failed" }
+        )
+        .increment(1);
+
+        tx_result
     }
 
     pub fn slice(&self, amount: u64) -> Result<MoneySlice, MoneyError> {
@@ -480,6 +521,7 @@ impl MoneySlice {
         plan.add(Operation::RecordTransaction {
             transaction: Transaction::new(
                 asset.id,
+                asset.code,
                 Some(self.owner),
                 Some(recipient),
                 self.amount,
@@ -516,6 +558,7 @@ impl MoneySlice {
         plan.add(Operation::RecordTransaction {
             transaction: Transaction::new(
                 asset.id,
+                asset.code,
                 Some(self.owner),
                 None,
                 self.amount,

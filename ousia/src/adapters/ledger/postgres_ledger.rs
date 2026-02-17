@@ -8,7 +8,7 @@ use uuid::Uuid;
 use crate::adapters::postgres::PostgresAdapter;
 
 impl PostgresAdapter {
-    pub(crate) async fn init_ledger_schema(&self) -> Result<(), MoneyError> {
+    pub async fn init_ledger_schema(&self) -> Result<(), MoneyError> {
         let mut tx = self
             .pool
             .begin()
@@ -239,9 +239,10 @@ impl LedgerAdapter for PostgresAdapter {
     }
 
     async fn get_balance(&self, asset_id: Uuid, owner: Uuid) -> Result<Balance, MoneyError> {
-        let alive_sum: Option<i64> = sqlx::query_scalar(
+        // PostgreSQL SUM returns NUMERIC, we need to cast to BIGINT
+        let alive_sum: i64 = sqlx::query_scalar(
             r#"
-            SELECT COALESCE(SUM(amount), 0)
+            SELECT COALESCE(SUM(amount), 0)::BIGINT
             FROM ledger_value_objects
             WHERE asset = $1 AND owner = $2 AND state = 'alive'
             "#,
@@ -252,9 +253,9 @@ impl LedgerAdapter for PostgresAdapter {
         .await
         .map_err(|e| MoneyError::Storage(e.to_string()))?;
 
-        let reserved_sum: Option<i64> = sqlx::query_scalar(
+        let reserved_sum: i64 = sqlx::query_scalar(
             r#"
-            SELECT COALESCE(SUM(amount), 0)
+            SELECT COALESCE(SUM(amount), 0)::BIGINT
             FROM ledger_value_objects
             WHERE asset = $1 AND owner = $2 AND state = 'reserved'
             "#,
@@ -268,17 +269,18 @@ impl LedgerAdapter for PostgresAdapter {
         Ok(Balance::from_value_objects(
             owner,
             asset_id,
-            alive_sum.unwrap_or(0) as u64,
-            reserved_sum.unwrap_or(0) as u64,
+            alive_sum as u64,
+            reserved_sum as u64,
         ))
     }
 
     async fn get_transaction(&self, tx_id: Uuid) -> Result<Transaction, MoneyError> {
         let row = sqlx::query(
             r#"
-            SELECT id, asset, sender, receiver, burned_amount, minted_amount, metadata, created_at
-            FROM ledger_transactions
-            WHERE id = $1
+            SELECT lt.id, lt.asset, a.code, lt.sender, lt.receiver, lt.burned_amount, lt.minted_amount, lt.metadata, lt.created_at
+            FROM ledger_transactions lt
+            LEFT JOIN assets a ON lt.asset = a.id
+            WHERE lt.id = $1
             "#,
         )
         .bind(tx_id)
@@ -293,6 +295,9 @@ impl LedgerAdapter for PostgresAdapter {
                 .map_err(|e| MoneyError::Storage(e.to_string()))?,
             asset: row
                 .try_get("asset")
+                .map_err(|e| MoneyError::Storage(e.to_string()))?,
+            code: row
+                .try_get("code")
                 .map_err(|e| MoneyError::Storage(e.to_string()))?,
             sender: row
                 .try_get("sender")

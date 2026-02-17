@@ -6,8 +6,10 @@ pub mod query;
 
 #[cfg(feature = "ledger")]
 pub use ledger;
+use metrics::histogram;
 
 use std::sync::Arc;
+use std::time::Instant;
 
 pub use crate::adapters::{Adapter, EdgeRecord, ObjectRecord, Query, QueryContext};
 pub use crate::edge::meta::*;
@@ -236,7 +238,12 @@ impl Engine {
     }
 
     pub async fn query_objects<T: Object>(&self, query: Query) -> Result<Vec<T>, Error> {
+        let start = Instant::now();
         let records = self.inner.adapter.query_objects(T::TYPE, query).await?;
+        histogram!("ousia.query.duration_ms",
+            "type" => T::TYPE
+        )
+        .record(start.elapsed().as_millis() as f64);
         records.into_iter().map(|r| r.to_object()).collect()
     }
 
@@ -366,7 +373,12 @@ impl Engine {
         from: Uuid,
         query: EdgeQuery,
     ) -> Result<Vec<E>, Error> {
+        let start = Instant::now();
         let records = self.inner.adapter.query_edges(E::TYPE, from, query).await?;
+        histogram!("ousia.query_edges.duration_ms",
+            "type" => E::TYPE
+        )
+        .record(start.elapsed().as_millis() as f64);
         records.into_iter().map(|r| r.to_edge()).collect()
     }
 

@@ -497,10 +497,10 @@ impl<'a, T: Object> QueryContext<'a, T> {
         EdgeQueryContext::new(self.adapter, self.root)
     }
 }
+
 /// ==========================
 /// Edge Query Context
 /// ==========================
-
 pub struct EdgeQueryContext<'a, E: Edge, O: crate::Object> {
     owner: Uuid,
     filters: Vec<QueryFilter>,

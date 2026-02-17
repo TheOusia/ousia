@@ -37,6 +37,8 @@ ousia_derive = { version = "1", path = "../ousia_derive", optional = true }
 ledger = { version = "1", path = "../ledger", optional = true }
 uuid = { version = "1", features = ["v7", "serde"] }
 blake3 = "1.8.3"
+metrics = "0.24.3"
+tracing = "0.1.44"
 
 [dev-dependencies]
 testcontainers = "0.25"
