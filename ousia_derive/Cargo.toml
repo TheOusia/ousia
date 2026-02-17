@@ -1,6 +1,6 @@
 [package]
 name = "ousia_derive"
-version = "1.0.0"
+version = "1.0.1"
 edition = "2024"
 description = "Derive macros for the ousia library"
 license = "MIT"
