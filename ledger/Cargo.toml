@@ -1,7 +1,15 @@
 [package]
-name = "ledger"
+name = "ousia-ledger"
 version = "1.0.0"
 edition = "2024"
+description = "A high-performance double-entry ledger system for Rust"
+license = "MIT"
+repository = "https://github.com/theousia/ousia/tree/main/ledger"
+documentation = "https://docs.rs/ledger"
+readme = "README.md"
+keywords = ["ledger", "finance", "payments", "money", "double-entry"]
+categories = ["finance", "database"]
+exclude = ["tests/", ".github/"]
 
 [dependencies]
 async-trait = "0.1.89"

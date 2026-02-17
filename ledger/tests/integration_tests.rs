@@ -1,6 +1,6 @@
 use chrono::{Days, Utc};
 // ledger/tests/integration_tests.rs
-use ledger::{
+use ousia_ledger::{
     Asset, Balance, LedgerContext, LedgerSystem, Money, MoneyError, adapters::MemoryAdapter,
 };
 use std::sync::Arc;
