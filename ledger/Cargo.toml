@@ -1,11 +1,11 @@
 [package]
-name = "ousia-ledger"
-version = "1.0.0"
+name = "ousia_ledger"
+version = "1.0.0-alpha1"
 edition = "2024"
 description = "A high-performance double-entry ledger system for Rust"
 license = "MIT"
 repository = "https://github.com/theousia/ousia/tree/main/ledger"
-documentation = "https://docs.rs/ledger"
+documentation = "https://docs.rs/ousia-ledger"
 readme = "README.md"
 keywords = ["ledger", "finance", "payments", "money", "double-entry"]
 categories = ["finance", "database"]
