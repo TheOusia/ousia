@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use crate::{
     Asset, Balance, ExecutionPlan, LedgerAdapter, MoneyError, Operation, Transaction, ValueObject,
     ValueObjectState,
@@ -143,32 +145,42 @@ where
 
 #[async_trait::async_trait]
 trait PostgresInternalLedgerAdapter {
-    async fn select_for_burn_internal(
+    async fn select_for_burn_internal_tx(
         &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
         asset_id: Uuid,
         owner: Uuid,
         amount: u64,
     ) -> Result<Vec<ValueObject>, MoneyError>;
 
-    async fn mint_internal(
+    async fn mint_internal_tx(
         &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
         asset_id: Uuid,
         owner: Uuid,
         amount: u64,
     ) -> Result<(), MoneyError>;
 
-    async fn mint_reserved_internal(
+    async fn mint_reserved_internal_tx(
         &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
         asset_id: Uuid,
         owner: Uuid,
         amount: u64,
         authority: Uuid,
     ) -> Result<(), MoneyError>;
 
-    async fn burn_value_objects_internal(&self, ids: Vec<Uuid>) -> Result<(), MoneyError>;
+    async fn burn_value_objects_internal_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        ids: Vec<Uuid>,
+    ) -> Result<(), MoneyError>;
 
-    async fn record_transaction_internal(&self, transaction: Transaction)
-    -> Result<(), MoneyError>;
+    async fn record_transaction_internal_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        transaction: Transaction,
+    ) -> Result<(), MoneyError>;
 
     async fn get_asset_by_id(&self, asset_id: Uuid) -> Result<Asset, MoneyError>;
 
@@ -187,8 +199,9 @@ impl<T> PostgresInternalLedgerAdapter for T
 where
     T: PostgresLedgerAdapter + Send + Sync,
 {
-    async fn select_for_burn_internal(
+    async fn select_for_burn_internal_tx(
         &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
         asset_id: Uuid,
         owner: Uuid,
         amount: u64,
@@ -204,7 +217,7 @@ where
         )
         .bind(asset_id)
         .bind(owner)
-        .fetch_all(&self.get_pool())
+        .fetch_all(&mut **tx)
         .await
         .map_err(|e| MoneyError::Storage(e.to_string()))?;
 
@@ -245,8 +258,9 @@ where
         Ok(selected)
     }
 
-    async fn mint_internal(
+    async fn mint_internal_tx(
         &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
         asset_id: Uuid,
         owner: Uuid,
         amount: u64,
@@ -269,7 +283,7 @@ where
             .bind(fragment.asset)
             .bind(fragment.owner)
             .bind(fragment.amount as i64)
-            .execute(&self.get_pool())
+            .execute(&mut **tx)
             .await
             .map_err(|e| MoneyError::Storage(e.to_string()))?;
         }
@@ -277,8 +291,9 @@ where
         Ok(())
     }
 
-    async fn mint_reserved_internal(
+    async fn mint_reserved_internal_tx(
         &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
         asset_id: Uuid,
         owner: Uuid,
         amount: u64,
@@ -299,7 +314,7 @@ where
             .bind(fragment.owner)
             .bind(fragment.amount as i64)
             .bind(authority)
-            .execute(&self.get_pool())
+            .execute(&mut **tx)
             .await
             .map_err(|e| MoneyError::Storage(e.to_string()))?;
         }
@@ -307,7 +322,11 @@ where
         Ok(())
     }
 
-    async fn burn_value_objects_internal(&self, ids: Vec<Uuid>) -> Result<(), MoneyError> {
+    async fn burn_value_objects_internal_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        ids: Vec<Uuid>,
+    ) -> Result<(), MoneyError> {
         for id in ids {
             sqlx::query(
                 r#"
@@ -317,7 +336,7 @@ where
                 "#,
             )
             .bind(id)
-            .execute(&self.get_pool())
+            .execute(&mut **tx)
             .await
             .map_err(|e| MoneyError::Storage(e.to_string()))?;
         }
@@ -325,8 +344,9 @@ where
         Ok(())
     }
 
-    async fn record_transaction_internal(
+    async fn record_transaction_internal_tx(
         &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
         transaction: Transaction,
     ) -> Result<(), MoneyError> {
         sqlx::query(
@@ -343,7 +363,7 @@ where
         .bind(transaction.minted_amount as i64)
         .bind(transaction.metadata)
         .bind(transaction.created_at)
-        .execute(&self.get_pool())
+        .execute(&mut **tx)
         .await
         .map_err(|e| MoneyError::Storage(e.to_string()))?;
 
@@ -418,28 +438,63 @@ where
         plan: &ExecutionPlan,
         locks: &[(Uuid, Uuid, u64)],
     ) -> Result<(), MoneyError> {
-        // Step 1: Lock required amounts (SELECT FOR UPDATE)
-        let mut locked: std::collections::HashMap<(Uuid, Uuid), Vec<ValueObject>> =
-            std::collections::HashMap::new();
+        let mut tx = self
+            .get_pool()
+            .begin()
+            .await
+            .map_err(|e| MoneyError::Storage(e.to_string()))?;
 
-        for (asset_id, owner, amount) in locks {
-            let vos = self
-                .select_for_burn_internal(*asset_id, *owner, *amount)
-                .await?;
+        // ── Phase 1: Lock & verify ─────────────────────────────────────────────
+        // HashMap<(asset_id, owner) -> (locked_vo_ids, total_locked)>
+        let mut locked: HashMap<(Uuid, Uuid), (Vec<Uuid>, u64)> = HashMap::new();
 
-            let total: u64 = vos.iter().map(|vo| vo.amount).sum();
-            if total < *amount {
+        for (asset_id, owner, required) in locks {
+            let rows = sqlx::query(
+                r#"
+            SELECT id, amount
+            FROM ledger_value_objects
+            WHERE asset = $1 AND owner = $2 AND state = 'alive'
+            ORDER BY amount ASC
+            FOR UPDATE SKIP LOCKED
+            "#,
+            )
+            .bind(asset_id)
+            .bind(owner)
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(|e| MoneyError::Storage(e.to_string()))?;
+
+            let mut ids = Vec::new();
+            let mut total = 0u64;
+
+            for row in rows {
+                let id: Uuid = row
+                    .try_get("id")
+                    .map_err(|e| MoneyError::Storage(e.to_string()))?;
+                let amount: i64 = row
+                    .try_get("amount")
+                    .map_err(|e| MoneyError::Storage(e.to_string()))?;
+
+                ids.push(id);
+                total += amount as u64;
+
+                if total >= *required {
+                    break;
+                }
+            }
+
+            // Checked INSIDE the lock — this is the real double-spend guard
+            if total < *required {
+                tx.rollback().await.ok();
                 return Err(MoneyError::InsufficientFunds);
             }
 
-            locked.insert((*asset_id, *owner), vos);
+            locked.insert((*asset_id, *owner), (ids, total));
         }
 
-        // Step 2: Track usage
-        let mut used: std::collections::HashMap<(Uuid, Uuid), u64> =
-            std::collections::HashMap::new();
+        // ── Phase 2: Execute operations ────────────────────────────────────────
+        let mut used: HashMap<(Uuid, Uuid), u64> = HashMap::new();
 
-        // Step 3: Execute operations
         for op in plan.operations() {
             match op {
                 Operation::Mint {
@@ -448,7 +503,8 @@ where
                     amount,
                     ..
                 } => {
-                    self.mint_internal(*asset_id, *owner, *amount).await?;
+                    self.mint_internal_tx(&mut tx, *asset_id, *owner, *amount)
+                        .await?;
                 }
                 Operation::Burn {
                     asset_id,
@@ -466,7 +522,8 @@ where
                     ..
                 } => {
                     *used.entry((*asset_id, *from)).or_insert(0) += amount;
-                    self.mint_internal(*asset_id, *to, *amount).await?;
+                    self.mint_internal_tx(&mut tx, *asset_id, *to, *amount)
+                        .await?;
                 }
                 Operation::Reserve {
                     asset_id,
@@ -476,49 +533,46 @@ where
                     ..
                 } => {
                     *used.entry((*asset_id, *from)).or_insert(0) += amount;
-                    self.mint_reserved_internal(*asset_id, *for_authority, *amount, *for_authority)
-                        .await?;
+                    self.mint_reserved_internal_tx(
+                        &mut tx,
+                        *asset_id,
+                        *for_authority,
+                        *amount,
+                        *for_authority,
+                    )
+                    .await?;
                 }
                 Operation::RecordTransaction { transaction } => {
-                    self.record_transaction_internal(transaction.clone())
+                    self.record_transaction_internal_tx(&mut tx, transaction.clone())
                         .await?;
                 }
             }
         }
 
-        // Step 4: Burn locked VOs and mint change
-        for ((asset_id, owner), vos) in locked.iter() {
-            let total_locked: u64 = vos.iter().map(|vo| vo.amount).sum();
+        // ── Phase 3: Burn locked VOs, mint change ──────────────────────────────
+        for ((asset_id, owner), (ids, total_locked)) in &locked {
             let total_used = used.get(&(*asset_id, *owner)).copied().unwrap_or(0);
 
-            // Burn all locked VOs
-            let ids: Vec<Uuid> = vos.iter().map(|vo| vo.id).collect();
-            self.burn_value_objects_internal(ids).await?;
+            // Burn every locked VO
+            for id in ids {
+                sqlx::query("UPDATE ledger_value_objects SET state = 'burned' WHERE id = $1")
+                    .bind(id)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(|e| MoneyError::Storage(e.to_string()))?;
+            }
 
             // Mint change
             let change = total_locked - total_used;
             if change > 0 {
-                self.mint_internal(*asset_id, *owner, change).await?;
+                self.mint_internal_tx(&mut tx, *asset_id, *owner, change)
+                    .await?;
             }
         }
 
-        Ok(())
-    }
-
-    async fn begin_transaction(&self) -> Result<(), MoneyError> {
-        // Transaction is managed by the caller via sqlx pool
-        // We don't need to do anything here since PostgresAdapter operations
-        // will be wrapped in a transaction by the caller
-        Ok(())
-    }
-
-    async fn commit_transaction(&self) -> Result<(), MoneyError> {
-        // Managed by caller
-        Ok(())
-    }
-
-    async fn rollback_transaction(&self) -> Result<(), MoneyError> {
-        // Managed by caller
+        tx.commit()
+            .await
+            .map_err(|e| MoneyError::Storage(e.to_string()))?;
         Ok(())
     }
 

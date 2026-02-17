@@ -368,6 +368,7 @@ async fn test_over_slice_error() {
 
     assert!(matches!(result, Err(MoneyError::InvalidAmount)));
 }
+
 #[tokio::test]
 async fn test_concurrent_transfers_double_spend_protection() {
     let (resource, system, ctx, user) = setup().await;
@@ -412,13 +413,7 @@ async fn test_concurrent_transfers_double_spend_protection() {
 
     // Under true concurrency we don't know which wins — assert exactly one of each
     let outcomes = [&result1, &result2];
-    let succeeded = outcomes
-        .iter()
-        .filter(|r| {
-            eprintln!("r = {:#?}", r);
-            r.is_ok()
-        })
-        .count();
+    let succeeded = outcomes.iter().filter(|r| r.is_ok()).count();
     let failed = outcomes
         .iter()
         .filter(|r| matches!(r, Err(MoneyError::InsufficientFunds)))

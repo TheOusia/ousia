@@ -360,53 +360,38 @@ impl Money {
     {
         let tx_ctx = TransactionContext::new(Arc::clone(&ledger_ctx.adapter));
 
-        let result = f(tx_ctx.clone()).await;
-        if let Err(e) = result {
+        // Run the planning closure (pure memory, no DB writes)
+        if let Err(e) = f(tx_ctx.clone()).await {
             return Err(e);
         }
 
+        // Validate slice accounting
         tx_ctx.validate()?;
 
         let plan = tx_ctx.plan.lock().unwrap().clone();
         let locks = plan.calculate_locks();
 
+        // Metrics (unchanged)
         for operation in &plan.operations {
-            match operation {
-                Operation::RecordTransaction { transaction } => {
-                    histogram!("ledger.transaction.amount",
-                        "asset" => transaction.code.clone()
-                    )
+            if let Operation::RecordTransaction { transaction } = operation {
+                histogram!("ledger.transaction.amount", "asset" => transaction.code.clone())
                     .record(if transaction.burned_amount > 0 {
                         transaction.burned_amount as f64
                     } else {
                         transaction.minted_amount as f64
                     });
-                }
-                _ => (),
             }
         }
 
-        ledger_ctx.adapter().begin_transaction().await?;
-
-        let execution_result = ledger_ctx.adapter().execute_plan(&plan, &locks).await;
-
-        let tx_result = match execution_result {
-            Ok(_) => {
-                ledger_ctx.adapter().commit_transaction().await?;
-                Ok(())
-            }
-            Err(e) => {
-                ledger_ctx.adapter().rollback_transaction().await?;
-                Err(e)
-            }
-        };
+        // execute_plan owns BEGIN/COMMIT/ROLLBACK — no wrapper needed here
+        let result = ledger_ctx.adapter().execute_plan(&plan, &locks).await;
 
         counter!("ledger.transactions.total",
-            "status" => if tx_result.is_ok() { "success" } else { "failed" }
+            "status" => if result.is_ok() { "success" } else { "failed" }
         )
         .increment(1);
 
-        tx_result
+        result
     }
 
     pub fn slice(&self, amount: u64) -> Result<MoneySlice, MoneyError> {

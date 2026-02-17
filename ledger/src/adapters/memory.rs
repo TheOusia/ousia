@@ -78,24 +78,50 @@ impl LedgerAdapter for MemoryAdapter {
         plan: &ExecutionPlan,
         locks: &[(Uuid, Uuid, u64)],
     ) -> Result<(), MoneyError> {
-        // Step 1: Lock required amounts (SELECT FOR UPDATE simulation)
-        let mut locked: HashMap<(Uuid, Uuid), Vec<ValueObject>> = HashMap::new();
+        // Hold the mutex for the ENTIRE operation — this is the MemoryAdapter's
+        // equivalent of BEGIN/SELECT FOR UPDATE/COMMIT. No other task can enter
+        // execute_plan while we hold it.
+        let mut value_objects = self.store.value_objects.lock().unwrap();
+        let assets = self.store.assets.lock().unwrap();
+        let mut transactions = self.store.transactions.lock().unwrap();
 
-        for (asset_id, owner, amount) in locks {
-            let vos = self.select_for_burn_internal(*asset_id, *owner, *amount)?;
+        // ── Phase 1: Select & verify under lock ───────────────────────────────
+        // HashMap<(asset_id, owner) -> (selected_vo_ids, total_locked)>
+        let mut locked: HashMap<(Uuid, Uuid), (Vec<Uuid>, u64)> = HashMap::new();
 
-            let total: u64 = vos.iter().map(|vo| vo.amount).sum();
-            if total < *amount {
+        for (asset_id, owner, required) in locks {
+            let mut candidates: Vec<(Uuid, u64)> = value_objects
+                .values()
+                .filter(|vo| vo.asset == *asset_id && vo.owner == *owner && vo.state.is_alive())
+                .map(|vo| (vo.id, vo.amount))
+                .collect();
+
+            // Smallest-first selection (matches Postgres ORDER BY amount ASC)
+            candidates.sort_by_key(|(_, amt)| *amt);
+
+            let mut ids = Vec::new();
+            let mut total = 0u64;
+
+            for (id, amt) in candidates {
+                ids.push(id);
+                total += amt;
+                if total >= *required {
+                    break;
+                }
+            }
+
+            // Checked while holding the mutex — this is the real double-spend guard
+            if total < *required {
                 return Err(MoneyError::InsufficientFunds);
             }
 
-            locked.insert((*asset_id, *owner), vos);
+            locked.insert((*asset_id, *owner), (ids, total));
         }
 
-        // Step 2: Track what's been used from each lock
+        // ── Phase 2: Execute operations ───────────────────────────────────────
+        // Track how much of each locked pool is actually consumed
         let mut used: HashMap<(Uuid, Uuid), u64> = HashMap::new();
 
-        // Step 3: Execute operations
         for op in plan.operations() {
             match op {
                 Operation::Mint {
@@ -104,8 +130,20 @@ impl LedgerAdapter for MemoryAdapter {
                     amount,
                     ..
                 } => {
-                    self.mint_internal(*asset_id, *owner, *amount)?;
+                    let asset = assets
+                        .values()
+                        .find(|a| a.id == *asset_id)
+                        .ok_or_else(|| MoneyError::AssetNotFound(asset_id.to_string()))?;
+
+                    let mut remaining = *amount;
+                    while remaining > 0 {
+                        let chunk = remaining.min(asset.unit);
+                        let vo = ValueObject::new_alive(*asset_id, *owner, chunk);
+                        value_objects.insert(vo.id, vo);
+                        remaining -= chunk;
+                    }
                 }
+
                 Operation::Burn {
                     asset_id,
                     owner,
@@ -114,6 +152,7 @@ impl LedgerAdapter for MemoryAdapter {
                 } => {
                     *used.entry((*asset_id, *owner)).or_insert(0) += amount;
                 }
+
                 Operation::Transfer {
                     asset_id,
                     from,
@@ -122,8 +161,21 @@ impl LedgerAdapter for MemoryAdapter {
                     ..
                 } => {
                     *used.entry((*asset_id, *from)).or_insert(0) += amount;
-                    self.mint_internal(*asset_id, *to, *amount)?;
+
+                    let asset = assets
+                        .values()
+                        .find(|a| a.id == *asset_id)
+                        .ok_or_else(|| MoneyError::AssetNotFound(asset_id.to_string()))?;
+
+                    let mut remaining = *amount;
+                    while remaining > 0 {
+                        let chunk = remaining.min(asset.unit);
+                        let vo = ValueObject::new_alive(*asset_id, *to, chunk);
+                        value_objects.insert(vo.id, vo);
+                        remaining -= chunk;
+                    }
                 }
+
                 Operation::Reserve {
                     asset_id,
                     from,
@@ -132,64 +184,61 @@ impl LedgerAdapter for MemoryAdapter {
                     ..
                 } => {
                     *used.entry((*asset_id, *from)).or_insert(0) += amount;
-                    self.mint_reserved_internal(
-                        *asset_id,
-                        *for_authority,
-                        *amount,
-                        *for_authority,
-                    )?;
+
+                    let asset = assets
+                        .values()
+                        .find(|a| a.id == *asset_id)
+                        .ok_or_else(|| MoneyError::AssetNotFound(asset_id.to_string()))?;
+
+                    let mut remaining = *amount;
+                    while remaining > 0 {
+                        let chunk = remaining.min(asset.unit);
+                        let vo = ValueObject::new_reserved(
+                            *asset_id,
+                            *for_authority,
+                            chunk,
+                            *for_authority,
+                        );
+                        value_objects.insert(vo.id, vo);
+                        remaining -= chunk;
+                    }
                 }
+
                 Operation::RecordTransaction { transaction } => {
-                    let mut txs = self.store.transactions.lock().unwrap();
-                    txs.insert(transaction.id, transaction.clone());
+                    transactions.insert(transaction.id, transaction.clone());
                 }
             }
         }
 
-        // Step 4: Burn all locked VOs and mint change
-        for ((asset_id, owner), vos) in locked.iter() {
-            let total_locked: u64 = vos.iter().map(|vo| vo.amount).sum();
+        // ── Phase 3: Burn locked VOs, mint change ─────────────────────────────
+        for ((asset_id, owner), (ids, total_locked)) in &locked {
             let total_used = used.get(&(*asset_id, *owner)).copied().unwrap_or(0);
 
-            // Burn all locked VOs
-            for vo in vos {
-                let mut value_objects = self.store.value_objects.lock().unwrap();
-                if let Some(stored_vo) = value_objects.get_mut(&vo.id) {
-                    stored_vo.state = ValueObjectState::Burned;
+            // Burn every selected VO
+            for id in ids {
+                if let Some(vo) = value_objects.get_mut(id) {
+                    vo.state = ValueObjectState::Burned;
                 }
             }
 
-            // Mint change if any
+            // Mint change if we locked more than we spent
             let change = total_locked - total_used;
             if change > 0 {
-                self.mint_internal(*asset_id, *owner, change)?;
+                let asset = assets
+                    .values()
+                    .find(|a| a.id == *asset_id)
+                    .ok_or_else(|| MoneyError::AssetNotFound(asset_id.to_string()))?;
+
+                let mut remaining = change;
+                while remaining > 0 {
+                    let chunk = remaining.min(asset.unit);
+                    let vo = ValueObject::new_alive(*asset_id, *owner, chunk);
+                    value_objects.insert(vo.id, vo);
+                    remaining -= chunk;
+                }
             }
         }
 
-        Ok(())
-    }
-
-    async fn begin_transaction(&self) -> Result<(), MoneyError> {
-        let mut in_tx = self.store.in_transaction.lock().unwrap();
-        if *in_tx {
-            return Err(MoneyError::Storage("Already in transaction".to_string()));
-        }
-        *in_tx = true;
-        Ok(())
-    }
-
-    async fn commit_transaction(&self) -> Result<(), MoneyError> {
-        let mut in_tx = self.store.in_transaction.lock().unwrap();
-        if !*in_tx {
-            return Err(MoneyError::Storage("Not in transaction".to_string()));
-        }
-        *in_tx = false;
-        Ok(())
-    }
-
-    async fn rollback_transaction(&self) -> Result<(), MoneyError> {
-        let mut in_tx = self.store.in_transaction.lock().unwrap();
-        *in_tx = false;
         Ok(())
     }
 

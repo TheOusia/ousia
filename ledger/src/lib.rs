@@ -21,23 +21,20 @@ use uuid::Uuid;
 /// Internal ledger adapter trait
 #[async_trait]
 pub trait LedgerAdapter: Send + Sync {
-    // === EXECUTION PHASE ===
-
-    /// Execute the complete operation plan
+    /// Execute the complete operation plan atomically.
+    /// Implementors MUST:
+    /// 1. BEGIN a database transaction
+    /// 2. SELECT FOR UPDATE the required value objects (from `locks`)
+    /// 3. Verify sum >= required amount — return InsufficientFunds if not
+    /// 4. Execute all operations
+    /// 5. COMMIT on success, ROLLBACK on any error
     async fn execute_plan(
         &self,
         plan: &ExecutionPlan,
         locks: &[(Uuid, Uuid, u64)],
     ) -> Result<(), MoneyError>;
 
-    // === TRANSACTION CONTROL ===
-
-    async fn begin_transaction(&self) -> Result<(), MoneyError>;
-    async fn commit_transaction(&self) -> Result<(), MoneyError>;
-    async fn rollback_transaction(&self) -> Result<(), MoneyError>;
-
-    // === READ OPERATIONS ===
-
+    // READ OPERATIONS
     async fn get_balance(&self, asset_id: Uuid, owner: Uuid) -> Result<Balance, MoneyError>;
     async fn get_transaction(&self, tx_id: Uuid) -> Result<Transaction, MoneyError>;
     async fn get_asset(&self, code: &str) -> Result<Asset, MoneyError>;

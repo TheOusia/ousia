@@ -337,29 +337,62 @@ async fn test_concurrent_transfers_double_spend_protection() {
     .await
     .unwrap();
 
-    // First transfer should succeed
-    let result1 = Money::atomic(&ctx, |tx| async move {
-        let money = tx.money("USD", user, 100_00).await?;
-        let slice = money.slice(100_00)?;
-        slice.transfer_to(merchant1, "payment1".to_string()).await?;
-        Ok(())
-    })
-    .await;
+    // Clone ctx for each task — both share the same underlying Arc<dyn LedgerAdapter>
+    let ctx1 = ctx.clone();
+    let ctx2 = ctx.clone();
 
-    // Second transfer should fail (insufficient funds)
-    let result2 = Money::atomic(&ctx, |tx| async move {
-        let money = tx.money("USD", user, 100_00).await?;
-        let slice = money.slice(100_00)?;
-        slice.transfer_to(merchant2, "payment2".to_string()).await?;
-        Ok(())
-    })
-    .await;
+    let handle1 = tokio::spawn(async move {
+        Money::atomic(&ctx1, |tx| async move {
+            let money = tx.money("USD", user, 100_00).await?;
+            let slice = money.slice(100_00)?;
+            slice.transfer_to(merchant1, "payment1".to_string()).await?;
+            Ok(())
+        })
+        .await
+    });
 
-    assert!(result1.is_ok());
-    assert!(matches!(result2, Err(MoneyError::InsufficientFunds)));
+    let handle2 = tokio::spawn(async move {
+        Money::atomic(&ctx2, |tx| async move {
+            let money = tx.money("USD", user, 100_00).await?;
+            let slice = money.slice(100_00)?;
+            slice.transfer_to(merchant2, "payment2".to_string()).await?;
+            Ok(())
+        })
+        .await
+    });
 
-    let m1_balance = Balance::get("USD", merchant1, &ctx).await.unwrap();
-    assert_eq!(m1_balance.available, 100_00);
+    let (result1, result2) = tokio::join!(handle1, handle2);
+    let result1 = result1.unwrap(); // unwrap JoinError, keep MoneyError
+    let result2 = result2.unwrap();
+
+    // Under true concurrency we don't know which wins — assert exactly one of each
+    let outcomes = [&result1, &result2];
+    let succeeded = outcomes.iter().filter(|r| r.is_ok()).count();
+    let failed = outcomes
+        .iter()
+        .filter(|r| matches!(r, Err(MoneyError::InsufficientFunds)))
+        .count();
+
+    assert_eq!(succeeded, 1, "exactly one transfer should succeed");
+    assert_eq!(
+        failed, 1,
+        "exactly one transfer should hit InsufficientFunds"
+    );
+
+    // The winner's merchant should have the full balance
+    let total_received = Balance::get("USD", merchant1, &ctx)
+        .await
+        .unwrap()
+        .available
+        + Balance::get("USD", merchant2, &ctx)
+            .await
+            .unwrap()
+            .available;
+
+    assert_eq!(
+        total_received, 100_00,
+        "exactly $100 should have moved, no more"
+    );
 }
 
 #[tokio::test]
