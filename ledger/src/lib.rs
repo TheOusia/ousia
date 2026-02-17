@@ -19,6 +19,10 @@ use async_trait::async_trait;
 use std::sync::Arc;
 use uuid::Uuid;
 
+pub(crate) fn hash_idempotency_key(key: &str) -> String {
+    blake3::hash(key.as_bytes()).to_hex().to_string()
+}
+
 /// Internal ledger adapter trait
 #[async_trait]
 pub trait LedgerAdapter: Send + Sync {
@@ -43,6 +47,11 @@ pub trait LedgerAdapter: Send + Sync {
         owner: Uuid,
         timespan: &[DateTime<Utc>; 2],
     ) -> Result<Vec<Transaction>, MoneyError>;
+    async fn check_idempotency_key(&self, key: &str) -> Result<(), MoneyError>;
+    async fn get_transaction_by_idempotency_key(
+        &self,
+        key: &str,
+    ) -> Result<Transaction, MoneyError>;
     async fn get_asset(&self, code: &str) -> Result<Asset, MoneyError>;
     async fn create_asset(&self, asset: Asset) -> Result<(), MoneyError>;
 }

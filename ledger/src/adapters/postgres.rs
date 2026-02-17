@@ -288,9 +288,33 @@ where
         tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
         transaction: Transaction,
     ) -> Result<(), MoneyError> {
+        // Insert idempotency key FIRST — if it conflicts, bail before touching transactions
+        if let Some(ref raw_key) = transaction.idempotency_key {
+            let hash = crate::hash_idempotency_key(raw_key);
+
+            let inserted = sqlx::query(
+                r#"
+                INSERT INTO ledger_transaction_idempotency_keys (key, transaction_id, created_at)
+                VALUES ($1, $2, NOW())
+                ON CONFLICT (key) DO NOTHING
+                RETURNING key
+                "#,
+            )
+            .bind(&hash)
+            .bind(transaction.id)
+            .fetch_optional(&mut **tx)
+            .await
+            .map_err(|e| MoneyError::Storage(e.to_string()))?;
+
+            if inserted.is_none() {
+                return Err(MoneyError::DuplicateIdempotencyKey(transaction.id));
+            }
+        }
+
         sqlx::query(
             r#"
-            INSERT INTO ledger_transactions (id, asset, sender, receiver, burned_amount, minted_amount, metadata, created_at)
+            INSERT INTO ledger_transactions
+                (id, asset, sender, receiver, burned_amount, minted_amount, metadata, created_at)
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
             "#,
         )
@@ -300,7 +324,7 @@ where
         .bind(transaction.receiver)
         .bind(transaction.burned_amount as i64)
         .bind(transaction.minted_amount as i64)
-        .bind(transaction.metadata)
+        .bind(&transaction.metadata)
         .bind(transaction.created_at)
         .execute(&mut **tx)
         .await
@@ -549,6 +573,90 @@ where
             alive_sum as u64,
             reserved_sum as u64,
         ))
+    }
+
+    async fn check_idempotency_key(&self, key: &str) -> Result<(), MoneyError> {
+        let hash = crate::hash_idempotency_key(key);
+
+        let row = sqlx::query(
+            r#"
+            SELECT transaction_id
+            FROM ledger_transaction_idempotency_keys
+            WHERE key = $1
+            "#,
+        )
+        .bind(&hash)
+        .fetch_optional(&self.get_pool())
+        .await
+        .map_err(|e| MoneyError::Storage(e.to_string()))?;
+
+        if let Some(row) = row {
+            let tx_id: Uuid = row
+                .try_get("transaction_id")
+                .map_err(|e| MoneyError::Storage(e.to_string()))?;
+            return Err(MoneyError::DuplicateIdempotencyKey(tx_id));
+        }
+
+        Ok(())
+    }
+
+    async fn get_transaction_by_idempotency_key(
+        &self,
+        key: &str,
+    ) -> Result<Transaction, MoneyError> {
+        let hash = crate::hash_idempotency_key(key);
+
+        let row = sqlx::query(
+            r#"
+            SELECT
+                lt.id, ik.key as idempotency_key, lt.asset, la.code,
+                lt.sender, lt.receiver,
+                lt.burned_amount, lt.minted_amount,
+                lt.metadata, lt.created_at
+            FROM ledger_transaction_idempotency_keys ik
+            JOIN ledger_transactions lt ON ik.transaction_id = lt.id
+            JOIN ledger_assets la ON lt.asset = la.id
+            WHERE ik.key = $1
+            "#,
+        )
+        .bind(&hash)
+        .fetch_optional(&self.get_pool())
+        .await
+        .map_err(|e| MoneyError::Storage(e.to_string()))?
+        .ok_or(MoneyError::TransactionNotFound)?;
+
+        Ok(Transaction {
+            id: row
+                .try_get("id")
+                .map_err(|e| MoneyError::Storage(e.to_string()))?,
+            idempotency_key: row
+                .try_get("idempotency_key")
+                .map_err(|e| MoneyError::Storage(e.to_string()))?,
+            asset: row
+                .try_get("asset")
+                .map_err(|e| MoneyError::Storage(e.to_string()))?,
+            code: row
+                .try_get("code")
+                .map_err(|e| MoneyError::Storage(e.to_string()))?,
+            sender: row
+                .try_get("sender")
+                .map_err(|e| MoneyError::Storage(e.to_string()))?,
+            receiver: row
+                .try_get("receiver")
+                .map_err(|e| MoneyError::Storage(e.to_string()))?,
+            burned_amount: row
+                .try_get::<i64, _>("burned_amount")
+                .map_err(|e| MoneyError::Storage(e.to_string()))? as u64,
+            minted_amount: row
+                .try_get::<i64, _>("minted_amount")
+                .map_err(|e| MoneyError::Storage(e.to_string()))? as u64,
+            metadata: row
+                .try_get("metadata")
+                .map_err(|e| MoneyError::Storage(e.to_string()))?,
+            created_at: row
+                .try_get("created_at")
+                .map_err(|e| MoneyError::Storage(e.to_string()))?,
+        })
     }
 
     async fn get_transaction(&self, tx_id: Uuid) -> Result<Transaction, MoneyError> {

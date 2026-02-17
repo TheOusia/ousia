@@ -14,6 +14,7 @@ struct MemoryStore {
     assets: Arc<Mutex<HashMap<String, Asset>>>,
     value_objects: Arc<Mutex<HashMap<Uuid, ValueObject>>>,
     transactions: Arc<Mutex<HashMap<Uuid, Transaction>>>,
+    idempotency_keys: Arc<Mutex<HashMap<String, Uuid>>>, // hash -> transaction_id
 }
 
 impl MemoryStore {
@@ -22,6 +23,7 @@ impl MemoryStore {
             assets: Arc::new(Mutex::new(HashMap::new())),
             value_objects: Arc::new(Mutex::new(HashMap::new())),
             transactions: Arc::new(Mutex::new(HashMap::new())),
+            idempotency_keys: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
@@ -172,6 +174,19 @@ impl LedgerAdapter for MemoryAdapter {
                 }
 
                 Operation::RecordTransaction { transaction } => {
+                    if let Some(ref raw_key) = transaction.idempotency_key {
+                        let hash = crate::hash_idempotency_key(raw_key);
+
+                        let mut keys = self.store.idempotency_keys.lock().unwrap();
+
+                        // Check for duplicate while holding the mutex — atomic with the insert
+                        if keys.contains_key(&hash) {
+                            return Err(MoneyError::DuplicateIdempotencyKey(transaction.id));
+                        }
+
+                        keys.insert(hash, transaction.id);
+                    }
+
                     transactions.insert(transaction.id, transaction.clone());
                 }
             }
@@ -230,6 +245,34 @@ impl LedgerAdapter for MemoryAdapter {
             alive_sum,
             reserved_sum,
         ))
+    }
+
+    async fn check_idempotency_key(&self, key: &str) -> Result<(), MoneyError> {
+        let hash = crate::hash_idempotency_key(key);
+        let keys = self.store.idempotency_keys.lock().unwrap();
+        if keys.contains_key(&hash) {
+            // Return the transaction id that consumed this key
+            let tx_id = *keys.get(&hash).unwrap();
+            return Err(MoneyError::DuplicateIdempotencyKey(tx_id));
+        }
+        Ok(())
+    }
+
+    async fn get_transaction_by_idempotency_key(
+        &self,
+        key: &str,
+    ) -> Result<Transaction, MoneyError> {
+        let hash = crate::hash_idempotency_key(key);
+
+        let tx_id = {
+            let keys = self.store.idempotency_keys.lock().unwrap();
+            *keys.get(&hash).ok_or(MoneyError::TransactionNotFound)?
+        };
+
+        let txs = self.store.transactions.lock().unwrap();
+        txs.get(&tx_id)
+            .cloned()
+            .ok_or(MoneyError::TransactionNotFound)
     }
 
     async fn get_transaction(&self, tx_id: Uuid) -> Result<Transaction, MoneyError> {

@@ -1265,6 +1265,7 @@ name = "ledger"
 version = "1.0.0"
 dependencies = [
  "async-trait",
+ "blake3",
  "chrono",
  "metrics",
  "serde",
