@@ -9,7 +9,7 @@ documentation = "https://docs.rs/ousia-derive"
 exclude = ["Cargo.lock"]
 
 [lib]
-name = "ousia_derive"
+name = "ousia-derive"
 proc-macro = true
 
 [dependencies]
