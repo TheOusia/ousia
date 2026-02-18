@@ -1,6 +1,6 @@
 [package]
 name = "ousia"
-version = "1.0.1"
+version = "1.0.2"
 edition = "2024"
 description = "A graph-relational ORM with built-in double-entry ledger for Rust"
 license = "MIT"
@@ -9,6 +9,7 @@ repository = "https://github.com/theousia/ousia"
 keywords = ["orm", "database", "postgres", "graph", "sqlite"]
 categories = ["database"]
 exclude = ["tests/", ".github/", "Cargo.lock"]
+rust-version = "1.85"
 
 [features]
 default = ["derive", "postgres", "ledger"]

@@ -2,8 +2,6 @@
 
 A graph-relational ORM with built-in double-entry ledger for Rust. Zero migrations, compile-time safety, and atomic payment splits — all in one framework.
 
-> Powers [Mealgro](https://mealgro.com) in production: 10k+ users, real NGN money transfers, complex payment splits, zero data loss.
-
 ---
 
 ## Table of Contents
