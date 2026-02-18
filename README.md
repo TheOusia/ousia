@@ -495,6 +495,12 @@ println!("Seller balance: {}", balance.available);
 
 ---
 
+## ☕️ Buy Me a Drink
+
+If this project saved your time, helped you ship faster, or made you say "damn, that's slick!" — consider buying me a beer 🍻
+
+## 👉 [Send me a drink on Cointr.ee](https://cointr.ee/epikoder)
+
 ## License
 
 MIT
