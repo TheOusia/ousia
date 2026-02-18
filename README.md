@@ -1,4 +1,12 @@
-# Ousia
+# Ousia [![Build Status]][actions] [![Latest Version]][crates.io] [![ousia msrv]][Rust 1.85] [![ousia_derive msrv]][Rust 1.85]
+
+[Build Status]: https://img.shields.io/github/actions/workflow/status/TheOusia/ousia/rust.yml?branch=main
+[actions]: https://github.com/TheOusia/ousia/actions?query=branch%3Amain
+[Latest Version]: https://img.shields.io/crates/v/ousia.svg
+[crates.io]: https://crates.io/crates/ousia
+[ousia msrv]: https://img.shields.io/crates/msrv/ousia.svg?label=ousia%20msrv&color=lightgray
+[ousia_derive msrv]: https://img.shields.io/crates/msrv/ousia_derive.svg?label=ousia_derive%20msrv&color=lightgray
+[Rust 1.85]: https://blog.rust-lang.org/2025/02/20/Rust-1.85.0/
 
 A graph-relational ORM with built-in double-entry ledger for Rust. Zero migrations, compile-time safety, and atomic payment splits — all in one framework.
 
