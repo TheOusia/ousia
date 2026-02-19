@@ -3,6 +3,7 @@ use uuid::Uuid;
 
 use crate::{
     Object,
+    adapters::TraversalDirection,
     edge::{Edge, query::EdgeQuery},
     error::Error,
     query::{
@@ -994,34 +995,50 @@ impl<'a, E: Edge, O: Object> EdgeQueryContext<'a, E, O> {
             edge_query.cursor = Some(cusor);
         }
 
-        let edge_records = self
+        let objects = self
             .adapter
-            .query_edges(E::TYPE, self.owner, edge_query)
+            .fetch_object_from_edge_traversal_internal(
+                O::TYPE,
+                self.owner,
+                TraversalDirection::Forward,
+                &self.filters,
+                edge_query,
+            )
             .await?;
 
-        // Extract the 'to' IDs from edges
-        let target_ids: Vec<Uuid> = edge_records.iter().map(|e| e.to).collect();
-
-        if target_ids.is_empty() {
-            return Ok(vec![]);
-        }
-
-        // Fetch the target objects
-        let object_records = self.adapter.fetch_bulk_objects(O::TYPE, target_ids).await?;
-
-        // Convert records to domain objects and apply object filters
-        let mut objects: Vec<O> = object_records
+        objects
             .into_iter()
-            .filter_map(|r| r.to_object().ok())
-            .collect();
+            .map(|or| or.to_object())
+            .collect::<Result<Vec<O>, Error>>()
+    }
 
-        // Apply in-memory filtering if needed (for object filters)
-        // This is a simple implementation - a more efficient approach would push filters to SQL
-        if !self.filters.is_empty() {
-            objects.retain(|obj| self.matches_filters(obj));
+    /// Collect the target objects (traverse the edges and return the destinations)
+    pub async fn collect_reverse(self) -> Result<Vec<O>, Error> {
+        // First, query the edges
+        let mut edge_query = EdgeQuery::default();
+        edge_query.filters = self.edge_filters.clone();
+        if let Some(limit) = self.limit {
+            edge_query.limit = Some(limit);
+        }
+        if let Some(cusor) = self.cursor {
+            edge_query.cursor = Some(cusor);
         }
 
-        Ok(objects)
+        let objects = self
+            .adapter
+            .fetch_object_from_edge_traversal_internal(
+                O::TYPE,
+                self.owner,
+                TraversalDirection::Reverse,
+                &self.filters,
+                edge_query,
+            )
+            .await?;
+
+        objects
+            .into_iter()
+            .map(|or| or.to_object())
+            .collect::<Result<Vec<O>, Error>>()
     }
 
     /// Collect the edges themselves (not the target objects)

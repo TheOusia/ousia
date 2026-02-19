@@ -15,7 +15,8 @@ use uuid::Uuid;
 
 use crate::{
     adapters::{
-        Adapter, EdgeQuery, EdgeRecord, EdgeTraversal, Error, ObjectRecord, Query, UniqueAdapter,
+        Adapter, EdgeQuery, EdgeRecord, EdgeTraversal, Error, ObjectRecord, Query,
+        TraversalDirection, UniqueAdapter,
     },
     query::{Cursor, IndexValue, IndexValueInner, QueryFilter},
 };
@@ -692,6 +693,16 @@ impl PostgresAdapter {
             .collect();
 
         format!("ORDER BY {}", order_terms.join(", "))
+    }
+
+    fn build_object_traversal_query_conditions(
+        owner: Uuid,
+        direction: TraversalDirection,
+        filters: &Vec<QueryFilter>,
+        edge_filters: &Vec<QueryFilter>,
+        cursor: Option<Cursor>,
+    ) -> String {
+        todo!()
     }
 
     fn query_bind_filters<'a>(
@@ -1712,6 +1723,63 @@ impl UniqueAdapter for PostgresAdapter {
         Ok(rows
             .into_iter()
             .map(|row| row.try_get("key").unwrap())
+            .collect())
+    }
+}
+
+#[async_trait::async_trait]
+impl EdgeTraversal for PostgresAdapter {
+    async fn fetch_object_from_edge_traversal_internal(
+        &self,
+        type_name: &str,
+        owner: Uuid,
+        direction: TraversalDirection,
+        filters: &[QueryFilter],
+        plan: EdgeQuery,
+    ) -> Result<Vec<ObjectRecord>, Error> {
+        let where_clause = Self::build_object_traversal_query_conditions(
+            owner,
+            direction,
+            &filters.to_vec(),
+            &plan.filters,
+            plan.cursor,
+        );
+        let order_clause = Self::build_edge_order_clause(&plan.filters);
+
+        let mut sql = format!(
+            r#"
+            SELECT o.*
+            FROM edges e
+            LEFT JOIN objects o ON e."to" = o.id
+            {}
+            {}
+            "#,
+            where_clause, order_clause
+        );
+
+        if let Some(limit) = plan.limit {
+            sql.push_str(&format!(" LIMIT {}", limit));
+        }
+
+        let mut query = sqlx::query(&sql).bind(type_name).bind(owner);
+        if let Some(cursor) = plan.cursor {
+            // bind cursor if available $3
+            query = query.bind(cursor.last_id);
+        }
+
+        let mut combined_filters = filters.to_vec();
+        combined_filters.extend_from_slice(&plan.filters);
+        query = Self::query_bind_filters(query, &combined_filters);
+
+        let pool = self.pool.clone();
+        let rows = query
+            .fetch_all(&pool)
+            .await
+            .map_err(|err| Error::Storage(err.to_string()))?;
+
+        Ok(rows
+            .into_iter()
+            .filter_map(|row| Self::map_row_to_object_record(row).ok())
             .collect())
     }
 }
