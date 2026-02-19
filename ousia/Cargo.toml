@@ -1,13 +1,15 @@
 [package]
 name = "ousia"
-version = "1.0.2"
+version = "1.0.3"
 edition = "2024"
-description = "A graph-relational ORM with built-in double-entry ledger for Rust"
+description = "Postgres ORM with native double-entry ledger, graph relations, and atomic money operations for Rust"
 license = "MIT"
-readme = "../README.md"
+readme = "README.md"
 repository = "https://github.com/theousia/ousia"
-keywords = ["orm", "database", "postgres", "graph", "sqlite"]
-categories = ["database"]
+documentation = "https://docs.rs/ousia"
+homepage = "https://github.com/theousia/ousia"
+keywords = ["orm", "postgres", "ledger", "graph", "finance"]
+categories = ["database", "finance", "data-structures"]
 exclude = ["tests/", ".github/", "Cargo.lock"]
 rust-version = "1.85"
 

@@ -1,3 +1,89 @@
+//! # Ousia
+//!
+//! *οὐσία — Ancient Greek for "essence" or "substance".*
+//!
+//! Ousia is a Postgres-native ORM for Rust that ships with a built-in
+//! **double-entry ledger** as a first-class primitive. It is designed for
+//! applications where data, relationships, and money all need to move
+//! together — atomically, correctly, and without ceremony.
+//!
+//! ## What's inside
+//!
+//! ### Graph-relational ORM
+//! Model your domain as entities connected by typed edges. Relations are
+//! not just foreign keys — they are traversable, queryable graph
+//! connections backed by Postgres.
+//!
+//! ### Double-entry ledger
+//! Every monetary operation — mint, burn, transfer, reserve — is a
+//! double-entry transaction. Nothing is deleted. Everything is auditable.
+//! The ledger is ACID-safe and lives in the same Postgres connection as
+//! your application data.
+//!
+//! ```rust,ignore
+//! Money::atomic(&ctx, |tx| async move {
+//!     // Lock $60 from user, mint $60 to merchant atomically.
+//!     let money = tx.money("USD", user, 60_00).await?;
+//!     let slice = money.slice(60_00)?;
+//!     slice.transfer_to(merchant, "payment".to_string()).await?;
+//!     Ok(())
+//! })
+//! .await?;
+//! ```
+//!
+//! ### Smart fragmentation
+//! Balances are stored as **value objects** — discrete fragments of value.
+//! The fragmentation engine uses your asset's natural denomination as a
+//! soft preferred chunk size, with a hard fragment cap (`max_fragments`)
+//! that automatically scales chunk size up when needed. Every spend is a
+//! consolidation opportunity: change is minted back into at most
+//! `burned_count` fragments, so active accounts stay lean over time
+//! without any background compaction job.
+//!
+//! ### FIFO aging
+//! Value objects are selected oldest-first on every spend. Burned rows
+//! naturally age to the back of the live index and become eligible for
+//! cold-storage archival, keeping your hot dataset small.
+//!
+//! ### Atomic money operations
+//! The `Money` API enforces correct usage at the type level:
+//! - **Mint** — create value out of thin air (deposits, issuance)
+//! - **Burn** — destroy value permanently (fees, redemptions)
+//! - **Transfer** — move value between owners atomically
+//! - **Reserve** — escrow value for a future authority
+//! - **Slice** — partition a money handle before spending
+//!
+//! Unconsumed slices, over-slicing, and double-spend are all caught
+//! before hitting the database.
+//!
+//! ## Quick start
+//!
+//! ```rust,ignore
+//! use ousia::{Engine, adapters::postgres::PostgresAdapter};
+//!
+//! let adapter = PostgresAdapter::from_pool(pool);
+//! adapter.init_schema().await?;
+//!
+//! let engine = Engine::new(Box::new(adapter));
+//! let ctx = engine.ledger_ctx();
+//! ```
+//!
+//! ## Feature flags
+//!
+//! | Flag       | Default | Description                        |
+//! |------------|---------|------------------------------------|
+//! | `postgres` | ✓       | PostgreSQL adapter via sqlx         |
+//! | `cockroach` | ✓       | CockroachDB adapter via sqlx         |
+//! | `sqlite`   |         | SQLite adapter (in-memory or file)  |
+//!
+//! ## Ousia
+//!
+//! *Ousia* (οὐσία) is Aristotle's term for the fundamental substance of
+//! a thing — what it is at its core. The name reflects the library's
+//! ambition: to be the essential data substrate of a Rust application,
+//! handling entities, relationships, and money in one coherent layer.
+//!
+
 pub mod adapters;
 pub mod edge;
 pub mod error;
@@ -6,8 +92,6 @@ pub mod query;
 
 #[cfg(feature = "ledger")]
 pub use ledger;
-#[cfg(feature = "ledger")]
-use ledger::LedgerContext;
 use metrics::histogram;
 
 use std::sync::Arc;
