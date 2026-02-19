@@ -730,16 +730,21 @@ impl Adapter for SqliteAdapter {
         Ok(())
     }
 
-    async fn fetch_object(&self, id: Uuid) -> Result<Option<ObjectRecord>, Error> {
+    async fn fetch_object(
+        &self,
+        type_name: &'static str,
+        id: Uuid,
+    ) -> Result<Option<ObjectRecord>, Error> {
         let pool = self.pool.clone();
         let row = sqlx::query(
             r#"
             SELECT id, type, owner, created_at, updated_at, data, index_meta
             FROM objects
-            WHERE id = ?
+            WHERE id = ? AND type = ?
             "#,
         )
         .bind(id)
+        .bind(type_name)
         .fetch_optional(&pool)
         .await
         .map_err(|err| Error::Storage(err.to_string()))?;
@@ -750,11 +755,15 @@ impl Adapter for SqliteAdapter {
         }
     }
 
-    async fn fetch_bulk_objects(&self, ids: Vec<Uuid>) -> Result<Vec<ObjectRecord>, Error> {
+    async fn fetch_bulk_objects(
+        &self,
+        type_name: &'static str,
+        ids: Vec<Uuid>,
+    ) -> Result<Vec<ObjectRecord>, Error> {
         let pool = self.pool.clone();
         let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
         let sql = format!(
-            "SELECT id, type, owner, created_at, updated_at, data, index_meta FROM objects WHERE id IN ({})",
+            "SELECT id, type, owner, created_at, updated_at, data, index_meta FROM objects WHERE id IN ({}) AND type = ?",
             placeholders
         );
 
@@ -762,6 +771,7 @@ impl Adapter for SqliteAdapter {
         for id in ids {
             query = query.bind(id);
         }
+        query = query.bind(type_name);
 
         let rows = query
             .fetch_all(&pool)
@@ -798,6 +808,7 @@ impl Adapter for SqliteAdapter {
 
     async fn transfer_object(
         &self,
+        type_name: &'static str,
         id: Uuid,
         from_owner: Uuid,
         to_owner: Uuid,
@@ -809,13 +820,14 @@ impl Adapter for SqliteAdapter {
             r#"
             UPDATE objects
             SET updated_at = ?, owner = ?
-            WHERE id = ? AND owner = ?
+            WHERE id = ? AND owner = ? AND type = ?
             "#,
         )
         .bind(Utc::now().to_rfc3339())
         .bind(to_owner)
         .bind(id)
         .bind(from_owner)
+        .bind(type_name)
         .execute(&pool)
         .await
         .map_err(|err| Error::Storage(err.to_string()))?;
@@ -824,14 +836,21 @@ impl Adapter for SqliteAdapter {
             return Err(Error::NotFound);
         }
 
-        self.fetch_object(id).await?.ok_or(Error::NotFound)
+        self.fetch_object(type_name, id)
+            .await?
+            .ok_or(Error::NotFound)
     }
 
-    async fn delete_object(&self, id: Uuid, owner: Uuid) -> Result<Option<ObjectRecord>, Error> {
+    async fn delete_object(
+        &self,
+        type_name: &'static str,
+        id: Uuid,
+        owner: Uuid,
+    ) -> Result<Option<ObjectRecord>, Error> {
         let pool = self.pool.clone();
 
         // Fetch first, then delete (SQLite doesn't have RETURNING)
-        let record = self.fetch_object(id).await?;
+        let record = self.fetch_object(type_name, id).await?;
 
         if let Some(ref rec) = record {
             if rec.owner != owner {
@@ -852,6 +871,49 @@ impl Adapter for SqliteAdapter {
         }
 
         Ok(record)
+    }
+
+    async fn delete_bulk_objects(
+        &self,
+        type_name: &'static str,
+        ids: Vec<Uuid>,
+        owner: Uuid,
+    ) -> Result<u64, Error> {
+        let pool = self.pool.clone();
+
+        let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let sql = format!(
+            "DELETE FROM objects WHERE id IN ({}) AND type = ? AND owner = ?",
+            placeholders
+        );
+
+        let mut query = sqlx::query(&sql);
+        for id in ids {
+            query = query.bind(id);
+        }
+        query = query.bind(type_name);
+
+        let result = query
+            .bind(owner)
+            .execute(&pool)
+            .await
+            .map_err(|err| Error::Storage(err.to_string()))?;
+        Ok(result.rows_affected())
+    }
+
+    async fn delete_owned_objects(
+        &self,
+        type_name: &'static str,
+        owner: Uuid,
+    ) -> Result<u64, Error> {
+        let result = sqlx::query("DELETE FROM objects WHERE type = ? AND owner = ?")
+            .bind(type_name)
+            .bind(owner)
+            .execute(&self.pool)
+            .await
+            .map_err(|err| Error::Storage(err.to_string()))?;
+
+        Ok(result.rows_affected())
     }
 
     async fn find_object(

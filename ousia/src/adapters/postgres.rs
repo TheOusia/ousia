@@ -818,16 +818,21 @@ impl Adapter for PostgresAdapter {
         Ok(())
     }
 
-    async fn fetch_object(&self, id: Uuid) -> Result<Option<ObjectRecord>, Error> {
+    async fn fetch_object(
+        &self,
+        type_name: &'static str,
+        id: Uuid,
+    ) -> Result<Option<ObjectRecord>, Error> {
         let pool = self.pool.clone();
         let row = sqlx::query(
             r#"
             SELECT id, type, owner, created_at, updated_at, data, index_meta
             FROM objects
-            WHERE id = $1
+            WHERE id = $1 AND type = $2
             "#,
         )
         .bind(id)
+        .bind(type_name)
         .fetch_optional(&pool)
         .await
         .map_err(|err| Error::Storage(err.to_string()))?;
@@ -838,16 +843,21 @@ impl Adapter for PostgresAdapter {
         }
     }
 
-    async fn fetch_bulk_objects(&self, ids: Vec<Uuid>) -> Result<Vec<ObjectRecord>, Error> {
+    async fn fetch_bulk_objects(
+        &self,
+        type_name: &'static str,
+        ids: Vec<Uuid>,
+    ) -> Result<Vec<ObjectRecord>, Error> {
         let pool = self.pool.clone();
         let rows = sqlx::query(
             r#"
             SELECT id, type, owner, created_at, updated_at, data, index_meta
             FROM objects
-            WHERE id = ANY($1)
+            WHERE id = ANY($1) AND type = $2
             "#,
         )
         .bind(ids.into_iter().map(|id| id).collect::<Vec<Uuid>>())
+        .bind(type_name)
         .fetch_all(&pool)
         .await
         .map_err(|err| Error::Storage(err.to_string()))?;
@@ -879,6 +889,7 @@ impl Adapter for PostgresAdapter {
 
     async fn transfer_object(
         &self,
+        type_name: &'static str,
         id: Uuid,
         from_owner: Uuid,
         to_owner: Uuid,
@@ -888,7 +899,7 @@ impl Adapter for PostgresAdapter {
             r#"
             UPDATE objects
             SET updated_at = $3, owner = $4
-            WHERE id = $1 AND owner = $2
+            WHERE id = $1 AND owner = $2 AND type = $5
             RETURNING *
             "#,
         )
@@ -896,6 +907,7 @@ impl Adapter for PostgresAdapter {
         .bind(from_owner)
         .bind(Utc::now())
         .bind(to_owner)
+        .bind(type_name)
         .fetch_one(&pool)
         .await
         .map_err(|err| match err {
@@ -906,17 +918,23 @@ impl Adapter for PostgresAdapter {
         Self::map_row_to_object_record(row)
     }
 
-    async fn delete_object(&self, id: Uuid, owner: Uuid) -> Result<Option<ObjectRecord>, Error> {
+    async fn delete_object(
+        &self,
+        type_name: &'static str,
+        id: Uuid,
+        owner: Uuid,
+    ) -> Result<Option<ObjectRecord>, Error> {
         let pool = self.pool.clone();
         let row = sqlx::query(
             r#"
             DELETE FROM objects
-            WHERE id = $1 AND owner = $2
+            WHERE id = $1 AND owner = $2 AND type = $3
             RETURNING *
             "#,
         )
         .bind(id)
         .bind(owner)
+        .bind(type_name)
         .fetch_optional(&pool)
         .await
         .map_err(|err| Error::Storage(err.to_string()))?;
@@ -925,6 +943,40 @@ impl Adapter for PostgresAdapter {
             Some(r) => Self::map_row_to_object_record(r).map(|o| Some(o)),
             None => Ok(None),
         }
+    }
+
+    async fn delete_bulk_objects(
+        &self,
+        type_name: &'static str,
+        ids: Vec<Uuid>,
+        owner: Uuid,
+    ) -> Result<u64, Error> {
+        let pool = self.pool.clone();
+
+        let result =
+            sqlx::query("DELETE FROM objects WHERE id = ANY($1) AND type = $2 AND owner = $3")
+                .bind(ids)
+                .bind(type_name)
+                .bind(owner)
+                .execute(&pool)
+                .await
+                .map_err(|err| Error::Storage(err.to_string()))?;
+        Ok(result.rows_affected())
+    }
+
+    async fn delete_owned_objects(
+        &self,
+        type_name: &'static str,
+        owner: Uuid,
+    ) -> Result<u64, Error> {
+        let result = sqlx::query("DELETE FROM objects WHERE type = $1 AND owner = $2")
+            .bind(type_name)
+            .bind(owner)
+            .execute(&self.pool)
+            .await
+            .map_err(|err| Error::Storage(err.to_string()))?;
+
+        Ok(result.rows_affected())
     }
 
     async fn find_object(

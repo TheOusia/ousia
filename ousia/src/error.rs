@@ -6,7 +6,6 @@ pub enum Error {
     Serialize(String),
     Deserialize(String),
     Storage(String),
-    TypeMismatch,
     UniqueConstraintViolation(String),
 }
 
@@ -17,7 +16,6 @@ impl Display for Error {
             Error::Serialize(err) => write!(f, "Serialization error: {}", err),
             Error::Deserialize(err) => write!(f, "Deserialization error: {}", err),
             Error::Storage(err) => write!(f, "Storage error: {}", err),
-            Error::TypeMismatch => write!(f, "Type mismatch"),
             Error::UniqueConstraintViolation(field) => {
                 write!(f, "Unique constraint violation on field: {}", field)
             }

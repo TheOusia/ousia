@@ -54,19 +54,46 @@ pub(crate) trait UniqueAdapter {
 pub trait Adapter: UniqueAdapter + Send + Sync + 'static {
     /* ---------------- OBJECTS ---------------- */
     async fn insert_object(&self, record: ObjectRecord) -> Result<(), Error>;
-    async fn fetch_object(&self, id: Uuid) -> Result<Option<ObjectRecord>, Error>;
-    async fn fetch_bulk_objects(&self, ids: Vec<Uuid>) -> Result<Vec<ObjectRecord>, Error>;
+    async fn fetch_object(
+        &self,
+        type_name: &'static str,
+        id: Uuid,
+    ) -> Result<Option<ObjectRecord>, Error>;
+    async fn fetch_bulk_objects(
+        &self,
+        type_name: &'static str,
+        ids: Vec<Uuid>,
+    ) -> Result<Vec<ObjectRecord>, Error>;
     async fn update_object(&self, record: ObjectRecord) -> Result<(), Error>;
 
     /// Explicit ownership transfer
     async fn transfer_object(
         &self,
+        type_name: &'static str,
         id: Uuid,
         from_owner: Uuid,
         to_owner: Uuid,
     ) -> Result<ObjectRecord, Error>;
 
-    async fn delete_object(&self, id: Uuid, owner: Uuid) -> Result<Option<ObjectRecord>, Error>;
+    async fn delete_object(
+        &self,
+        type_name: &'static str,
+        id: Uuid,
+        owner: Uuid,
+    ) -> Result<Option<ObjectRecord>, Error>;
+
+    async fn delete_bulk_objects(
+        &self,
+        type_name: &'static str,
+        ids: Vec<Uuid>,
+        owner: Uuid,
+    ) -> Result<u64, Error>;
+
+    async fn delete_owned_objects(
+        &self,
+        type_name: &'static str,
+        owner: Uuid,
+    ) -> Result<u64, Error>;
 
     /* ---------------- QUERIES ---------------- */
     /// Fetch ALL objects matching `plan`. Filters by owner.

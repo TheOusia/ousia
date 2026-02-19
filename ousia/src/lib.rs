@@ -168,7 +168,7 @@ impl Engine {
 
     /// Fetch an object by ID
     pub async fn fetch_object<T: Object>(&self, id: Uuid) -> Result<Option<T>, Error> {
-        let val = self.inner.adapter.fetch_object(id).await?;
+        let val = self.inner.adapter.fetch_object(T::TYPE, id).await?;
         match val {
             Some(record) => record.to_object().map(Some),
             None => Ok(None),
@@ -177,7 +177,7 @@ impl Engine {
 
     /// Fetch multiple objects by IDs
     pub async fn fetch_objects<T: Object>(&self, ids: Vec<Uuid>) -> Result<Vec<T>, Error> {
-        let records = self.inner.adapter.fetch_bulk_objects(ids).await?;
+        let records = self.inner.adapter.fetch_bulk_objects(T::TYPE, ids).await?;
         records.into_iter().map(|r| r.to_object()).collect()
     }
 
@@ -274,12 +274,36 @@ impl Engine {
         id: Uuid,
         owner: Uuid,
     ) -> Result<Option<T>, Error> {
-        let record = self.inner.adapter.delete_object(id, owner).await?;
+        let record = self.inner.adapter.delete_object(T::TYPE, id, owner).await?;
 
         match record {
             Some(r) => r.to_object().map(Some),
             None => Ok(None),
         }
+    }
+
+    pub async fn delete_objects<T: Object>(
+        &self,
+        ids: Vec<Uuid>,
+        owner: Uuid,
+    ) -> Result<u64, Error> {
+        let record = self
+            .inner
+            .adapter
+            .delete_bulk_objects(T::TYPE, ids, owner)
+            .await?;
+
+        Ok(record)
+    }
+
+    pub async fn delete_owned_objects<T: Object>(&self, owner: Uuid) -> Result<u64, Error> {
+        let record = self
+            .inner
+            .adapter
+            .delete_owned_objects(T::TYPE, owner)
+            .await?;
+
+        Ok(record)
     }
 
     /// Transfer ownership of an object
@@ -292,7 +316,7 @@ impl Engine {
         let record = self
             .inner
             .adapter
-            .transfer_object(id, from_owner, to_owner)
+            .transfer_object(T::TYPE, id, from_owner, to_owner)
             .await?;
 
         record.to_object()

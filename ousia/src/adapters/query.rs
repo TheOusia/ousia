@@ -376,7 +376,7 @@ impl<'a, T: Object> QueryContext<'a, T> {
     }
 
     pub async fn get(&self) -> Result<Option<T>, Error> {
-        let val = self.adapter.fetch_object(self.root).await?;
+        let val = self.adapter.fetch_object(T::TYPE, self.root).await?;
         match val {
             Some(o) => o.to_object().map(|o| Some(o)),
             None => Ok(None),
@@ -1007,7 +1007,7 @@ impl<'a, E: Edge, O: Object> EdgeQueryContext<'a, E, O> {
         }
 
         // Fetch the target objects
-        let object_records = self.adapter.fetch_bulk_objects(target_ids).await?;
+        let object_records = self.adapter.fetch_bulk_objects(O::TYPE, target_ids).await?;
 
         // Convert records to domain objects and apply object filters
         let mut objects: Vec<O> = object_records

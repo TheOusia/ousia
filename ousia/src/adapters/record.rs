@@ -16,10 +16,6 @@ pub struct ObjectRecord {
 
 impl ObjectRecord {
     pub fn to_object<T: Object>(self) -> Result<T, Error> {
-        if self.type_name != T::TYPE {
-            return Err(Error::TypeMismatch);
-        }
-
         let mut val = serde_json::from_value::<T>(self.data)
             .map_err(|e| Error::Deserialize(e.to_string()))?;
         let meta = val.meta_mut();
@@ -74,10 +70,6 @@ pub struct EdgeRecord {
 
 impl EdgeRecord {
     pub fn to_edge<E: Edge>(self) -> Result<E, Error> {
-        if self.type_name != E::TYPE {
-            return Err(Error::TypeMismatch);
-        }
-
         let mut val = serde_json::from_value::<E>(self.data)
             .map_err(|e| Error::Deserialize(e.to_string()))?;
         let meta = val.meta_mut();

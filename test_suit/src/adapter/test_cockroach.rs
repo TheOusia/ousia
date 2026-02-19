@@ -85,7 +85,10 @@ async fn test_adapter_get() {
         panic!("Error: {:#?}", err);
     };
 
-    let user_result = adapter.fetch_object(user.id()).await.unwrap();
+    let user_result = adapter
+        .fetch_object(user.type_name(), user.id())
+        .await
+        .unwrap();
     assert!(user_result.is_some());
 
     let _user: User = user_result.unwrap().to_object().unwrap();
@@ -110,7 +113,10 @@ async fn test_adapter_update() {
     {
         panic!("Error: {:#?}", err);
     } else {
-        let user_result = adapter.fetch_object(user.id()).await.unwrap();
+        let user_result = adapter
+            .fetch_object(user.type_name(), user.id())
+            .await
+            .unwrap();
         assert!(user_result.is_some());
 
         let _user: User = user_result.unwrap().to_object().unwrap();
@@ -125,7 +131,10 @@ async fn test_adapter_update() {
     {
         panic!("Error: {:#?}", err);
     } else {
-        let user_result = adapter.fetch_object(user.id()).await.unwrap();
+        let user_result = adapter
+            .fetch_object(user.type_name(), user.id())
+            .await
+            .unwrap();
         assert!(user_result.is_some());
 
         let _user: User = user_result.unwrap().to_object().unwrap();
@@ -152,7 +161,10 @@ async fn test_adapter_query() {
     {
         panic!("Error: {:#?}", err);
     }
-    let user_result = adapter.fetch_object(user.id()).await.unwrap();
+    let user_result = adapter
+        .fetch_object(user.type_name(), user.id())
+        .await
+        .unwrap();
     assert!(user_result.is_some());
 
     let users = adapter
@@ -188,7 +200,7 @@ async fn test_adapter_query() {
         .unwrap();
 
     let _post: Post = adapter
-        .fetch_object(post_1.id())
+        .fetch_object(post_1.type_name(), post_1.id())
         .await
         .unwrap()
         .expect("Post not found")
