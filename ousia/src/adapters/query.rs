@@ -1046,6 +1046,28 @@ impl<'a, E: Edge, O: Object> EdgeQueryContext<'a, E, O> {
             .collect::<Result<Vec<E>, Error>>()
     }
 
+    /// Collect the edges themselves (not the target objects)
+    pub async fn collect_reverse_edges(self) -> Result<Vec<E>, Error> {
+        let mut edge_query = EdgeQuery::default();
+        edge_query.filters = self.edge_filters;
+        if let Some(limit) = self.limit {
+            edge_query.limit = Some(limit);
+        }
+        if let Some(offset) = self.cursor {
+            edge_query.cursor = Some(offset);
+        }
+
+        let edge_records = self
+            .adapter
+            .query_reverse_edges(E::TYPE, self.owner, edge_query)
+            .await?;
+
+        edge_records
+            .into_iter()
+            .map(|r| r.to_edge())
+            .collect::<Result<Vec<E>, Error>>()
+    }
+
     /// Paginate using a cursor
     pub fn paginate(mut self, cursor: Option<impl Into<Cursor>>) -> Self {
         if let Some(cursor) = cursor {

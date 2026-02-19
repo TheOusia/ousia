@@ -14,7 +14,9 @@ use sqlx::{
 use uuid::Uuid;
 
 use crate::{
-    adapters::{Adapter, EdgeQuery, EdgeRecord, Error, ObjectRecord, Query, UniqueAdapter},
+    adapters::{
+        Adapter, EdgeQuery, EdgeRecord, EdgeTraversal, Error, ObjectRecord, Query, UniqueAdapter,
+    },
     query::{Cursor, IndexValue, IndexValueInner, QueryFilter},
 };
 
@@ -1585,8 +1587,8 @@ impl Adapter for PostgresAdapter {
 impl UniqueAdapter for PostgresAdapter {
     async fn insert_unique(
         &self,
-        object_id: Uuid,
         type_name: &str,
+        object_id: Uuid,
         hash: &str,
         field: &str,
     ) -> Result<(), Error> {
@@ -1616,8 +1618,8 @@ impl UniqueAdapter for PostgresAdapter {
 
     async fn insert_unique_hashes(
         &self,
-        object_id: Uuid,
         type_name: &str,
+        object_id: Uuid,
         hashes: Vec<(String, &str)>,
     ) -> Result<(), Error> {
         let mut tx = self

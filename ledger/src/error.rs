@@ -31,3 +31,12 @@ impl fmt::Display for MoneyError {
 }
 
 impl std::error::Error for MoneyError {}
+
+impl MoneyError {
+    pub fn is_duplicate_idempotent_key(&self) -> bool {
+        match self {
+            MoneyError::DuplicateIdempotencyKey(_) => true,
+            _ => false,
+        }
+    }
+}

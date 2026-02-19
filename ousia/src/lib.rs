@@ -155,7 +155,7 @@ impl Engine {
 
             self.inner
                 .adapter
-                .insert_unique_hashes(obj.id(), obj.type_name(), unique_hashes)
+                .insert_unique_hashes(obj.type_name(), obj.id(), unique_hashes)
                 .await?;
             self.inner
                 .adapter
@@ -228,8 +228,8 @@ impl Engine {
                     self.inner
                         .adapter
                         .insert_unique_hashes(
-                            object_id,
                             type_name,
+                            object_id,
                             hashes_to_add.iter().cloned().collect(),
                         )
                         .await?;

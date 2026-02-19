@@ -1528,8 +1528,8 @@ impl Adapter for CockroachAdapter {
 impl UniqueAdapter for CockroachAdapter {
     async fn insert_unique(
         &self,
-        object_id: Uuid,
         type_name: &str,
+        object_id: Uuid,
         hash: &str,
         field: &str,
     ) -> Result<(), Error> {
@@ -1559,8 +1559,8 @@ impl UniqueAdapter for CockroachAdapter {
 
     async fn insert_unique_hashes(
         &self,
-        object_id: Uuid,
         type_name: &str,
+        object_id: Uuid,
         hashes: Vec<(String, &str)>,
     ) -> Result<(), Error> {
         let mut tx = self
