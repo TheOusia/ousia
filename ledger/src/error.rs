@@ -12,7 +12,6 @@ pub enum MoneyError {
     TransactionNotFound,
     DuplicateIdempotencyKey(uuid::Uuid),
     Storage(String),
-    Conflict(String),
 }
 
 impl fmt::Display for MoneyError {
@@ -27,7 +26,6 @@ impl fmt::Display for MoneyError {
             Self::TransactionNotFound => write!(f, "Transaction not found"),
             Self::DuplicateIdempotencyKey(id) => write!(f, "Duplicate idempotency key: {}", id),
             Self::Storage(msg) => write!(f, "Storage error: {}", msg),
-            Self::Conflict(msg) => write!(f, "Conflict: {}", msg),
         }
     }
 }

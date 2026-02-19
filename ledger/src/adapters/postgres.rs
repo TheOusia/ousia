@@ -66,10 +66,13 @@ where
         .map_err(|e| MoneyError::Storage(e.to_string()))?;
 
         // Indexes for ValueObjects
+        //
+        // Include created_at in the composite indexes so the FIFO ORDER BY
+        // created_at ASC in the lock query is satisfied from the index alone.
         sqlx::query(
             r#"
-            CREATE INDEX IF NOT EXISTS idx_value_objects_asset_owner_state
-            ON ledger_value_objects(asset, owner, state)
+            CREATE INDEX IF NOT EXISTS idx_value_objects_asset_owner_state_created
+            ON ledger_value_objects(asset, owner, state, created_at ASC)
             "#,
         )
         .execute(&mut *tx)
@@ -78,8 +81,8 @@ where
 
         sqlx::query(
             r#"
-            CREATE INDEX IF NOT EXISTS idx_value_objects_owner_state
-            ON ledger_value_objects(owner, state)
+            CREATE INDEX IF NOT EXISTS idx_value_objects_owner_state_created
+            ON ledger_value_objects(owner, state, created_at ASC)
             "#,
         )
         .execute(&mut *tx)
@@ -90,6 +93,19 @@ where
             r#"
             CREATE INDEX IF NOT EXISTS idx_value_objects_owner
             ON ledger_value_objects(owner)
+            "#,
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| MoneyError::Storage(e.to_string()))?;
+
+        // Partial index over live VOs only — burned rows are cold/archivable and
+        // should not bloat the index used by live queries.
+        sqlx::query(
+            r#"
+            CREATE INDEX IF NOT EXISTS idx_value_objects_live
+            ON ledger_value_objects(asset, owner, created_at ASC)
+            WHERE state != 'burned'
             "#,
         )
         .execute(&mut *tx)
@@ -177,6 +193,55 @@ where
     }
 }
 
+// ── Fragmentation ─────────────────────────────────────────────────────────────
+//
+// `unit`          — preferred chunk size (soft, natural denomination).
+// `max_fragments` — hard cap on total VO count per mint (default 1_000).
+//
+// chunk = max(unit, ceil(amount / max_fragments))
+//
+// `unit` wins when the amount is small enough. When the amount would produce
+// more fragments than the budget allows, chunk scales up past `unit`
+// automatically so the count always stays ≤ max_fragments.
+
+const DEFAULT_MAX_FRAGMENTS: u64 = 1_000;
+
+fn fragment_amount_smart(
+    amount: u64,
+    unit: u64,
+    max_fragments: u64,
+    asset_id: Uuid,
+    owner: Uuid,
+    reserved_for: Option<Uuid>,
+) -> Vec<ValueObject> {
+    debug_assert!(unit > 0, "unit must be > 0");
+    debug_assert!(max_fragments > 0, "max_fragments must be > 0");
+
+    if amount == 0 {
+        return vec![];
+    }
+
+    let min_chunk = (amount + max_fragments - 1) / max_fragments; // ceil div
+    let chunk = unit.max(min_chunk);
+
+    let mut fragments = Vec::new();
+    let mut remaining = amount;
+
+    while remaining > 0 {
+        let vo_amount = remaining.min(chunk);
+        let vo = match reserved_for {
+            Some(authority) => ValueObject::new_reserved(asset_id, owner, vo_amount, authority),
+            None => ValueObject::new_alive(asset_id, owner, vo_amount),
+        };
+        fragments.push(vo);
+        remaining -= vo_amount;
+    }
+
+    fragments
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 #[async_trait::async_trait]
 trait PostgresInternalLedgerAdapter {
     async fn mint_internal_tx(
@@ -185,6 +250,17 @@ trait PostgresInternalLedgerAdapter {
         asset_id: Uuid,
         owner: Uuid,
         amount: u64,
+    ) -> Result<(), MoneyError>;
+
+    // Change mints call this directly so they can pass burned_count as the
+    // fragment budget, consolidating rather than blindly re-fragmenting.
+    async fn mint_internal_tx_with_max_fragments(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        asset_id: Uuid,
+        owner: Uuid,
+        amount: u64,
+        max_fragments: u64,
     ) -> Result<(), MoneyError>;
 
     async fn mint_reserved_internal_tx(
@@ -204,14 +280,11 @@ trait PostgresInternalLedgerAdapter {
 
     async fn get_asset_by_id(&self, asset_id: Uuid) -> Result<Asset, MoneyError>;
 
-    fn fragment_amount(
-        &self,
-        amount: u64,
-        unit: u64,
-        asset_id: Uuid,
-        owner: Uuid,
-        reserved_for: Option<Uuid>,
-    ) -> Vec<ValueObject>;
+    /// Hard cap on fragment count per mint. Defaults to 1,000.
+    /// Override per-adapter if needed.
+    fn max_fragments(&self) -> u64 {
+        DEFAULT_MAX_FRAGMENTS
+    }
 }
 
 #[async_trait::async_trait]
@@ -226,13 +299,22 @@ where
         owner: Uuid,
         amount: u64,
     ) -> Result<(), MoneyError> {
-        // Get asset to determine fragmentation unit
+        self.mint_internal_tx_with_max_fragments(tx, asset_id, owner, amount, self.max_fragments())
+            .await
+    }
+
+    async fn mint_internal_tx_with_max_fragments(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        asset_id: Uuid,
+        owner: Uuid,
+        amount: u64,
+        max_fragments: u64,
+    ) -> Result<(), MoneyError> {
         let asset = self.get_asset_by_id(asset_id).await?;
+        let fragments =
+            fragment_amount_smart(amount, asset.unit, max_fragments, asset_id, owner, None);
 
-        // Fragment the amount
-        let fragments = self.fragment_amount(amount, asset.unit, asset_id, owner, None);
-
-        // Insert all fragments
         for fragment in fragments {
             sqlx::query(
                 r#"
@@ -261,7 +343,14 @@ where
         authority: Uuid,
     ) -> Result<(), MoneyError> {
         let asset = self.get_asset_by_id(asset_id).await?;
-        let fragments = self.fragment_amount(amount, asset.unit, asset_id, owner, Some(authority));
+        let fragments = fragment_amount_smart(
+            amount,
+            asset.unit,
+            self.max_fragments(),
+            asset_id,
+            owner,
+            Some(authority),
+        );
 
         for fragment in fragments {
             sqlx::query(
@@ -363,32 +452,7 @@ where
         })
     }
 
-    fn fragment_amount(
-        &self,
-        amount: u64,
-        unit: u64,
-        asset_id: Uuid,
-        owner: Uuid,
-        reserved_for: Option<Uuid>,
-    ) -> Vec<ValueObject> {
-        let mut fragments = Vec::new();
-        let mut remaining = amount;
-
-        while remaining > 0 {
-            let chunk = remaining.min(unit);
-
-            let vo = if let Some(authority) = reserved_for {
-                ValueObject::new_reserved(asset_id, owner, chunk, authority)
-            } else {
-                ValueObject::new_alive(asset_id, owner, chunk)
-            };
-
-            fragments.push(vo);
-            remaining -= chunk;
-        }
-
-        fragments
-    }
+    // max_fragments has a default impl above; override per-adapter if needed.
 }
 
 #[async_trait::async_trait]
@@ -408,6 +472,8 @@ where
             .map_err(|e| MoneyError::Storage(e.to_string()))?;
 
         // ── Phase 1: Lock & verify ─────────────────────────────────────────────
+        // Select oldest VOs first (FIFO) so burned rows age out predictably and
+        // can be archived by a background job once cold.
         // HashMap<(asset_id, owner) -> (locked_vo_ids, total_locked)>
         let mut locked: HashMap<(Uuid, Uuid), (Vec<Uuid>, u64)> = HashMap::new();
 
@@ -417,7 +483,7 @@ where
             SELECT id, amount
             FROM ledger_value_objects
             WHERE asset = $1 AND owner = $2 AND state = 'alive'
-            ORDER BY amount ASC
+            ORDER BY created_at ASC
             FOR UPDATE SKIP LOCKED
             "#,
             )
@@ -515,6 +581,9 @@ where
         // ── Phase 3: Burn locked VOs, mint change ──────────────────────────────
         for ((asset_id, owner), (ids, total_locked)) in &locked {
             let total_used = used.get(&(*asset_id, *owner)).copied().unwrap_or(0);
+            // Use burned_count as the fragment budget for change — this consolidates
+            // rather than re-fragmenting. Each spend is a compaction opportunity.
+            let burned_count = ids.len() as u64;
 
             // Burn every locked VO
             for id in ids {
@@ -525,11 +594,17 @@ where
                     .map_err(|e| MoneyError::Storage(e.to_string()))?;
             }
 
-            // Mint change
+            // Mint change — consolidated into at most burned_count fragments.
             let change = total_locked - total_used;
             if change > 0 {
-                self.mint_internal_tx(&mut tx, *asset_id, *owner, change)
-                    .await?;
+                self.mint_internal_tx_with_max_fragments(
+                    &mut tx,
+                    *asset_id,
+                    *owner,
+                    change,
+                    burned_count,
+                )
+                .await?;
             }
         }
 
@@ -720,7 +795,7 @@ where
             FROM ledger_transactions lt
             LEFT JOIN ledger_assets a ON lt.asset = a.id
             LEFT JOIN ledger_transaction_idempotency_keys ik ON ik.transaction_id = lt.id
-            WHERE lt.sender = $1 OR lt.receiver = $1 AND lt.created_at BETWEEN $2 AND $3
+            WHERE (lt.sender = $1 OR lt.receiver = $1) AND lt.created_at BETWEEN $2 AND $3
             "#,
         )
         .bind(owner)
