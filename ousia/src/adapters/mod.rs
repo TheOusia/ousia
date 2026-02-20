@@ -26,14 +26,6 @@ use crate::{Object, edge::query::EdgeQuery, error::Error, query::QueryFilter};
 
 #[async_trait]
 pub(crate) trait UniqueAdapter {
-    async fn insert_unique(
-        &self,
-        type_name: &str,
-        object_id: Uuid,
-        hash: &str,
-        field: &str,
-    ) -> Result<(), Error>;
-
     async fn insert_unique_hashes(
         &self,
         type_name: &str,
@@ -44,25 +36,25 @@ pub(crate) trait UniqueAdapter {
     async fn delete_unique(&self, hash: &str) -> Result<(), Error>;
     async fn delete_unique_hashes(&self, hashes: Vec<String>) -> Result<(), Error>;
 
-    async fn delete_all_for_object(&self, object_id: Uuid) -> Result<(), Error>;
-
     async fn get_hashes_for_object(&self, object_id: Uuid) -> Result<Vec<String>, Error>;
-}
-
-pub(crate) enum TraversalDirection {
-    /// Forward: edges where e."from" = owner  →  fetch e."to" objects
-    Forward,
-    /// Reverse: edges where e."to" = owner  →  fetch e."from" objects
-    Reverse,
 }
 
 #[async_trait]
 pub(crate) trait EdgeTraversal {
     async fn fetch_object_from_edge_traversal_internal(
         &self,
+        edge_type_name: &str,
         type_name: &str,
         owner: Uuid,
-        direction: TraversalDirection,
+        filters: &[QueryFilter],
+        plan: EdgeQuery,
+    ) -> Result<Vec<ObjectRecord>, Error>;
+
+    async fn fetch_object_from_edge_reverse_traversal_internal(
+        &self,
+        edge_type_name: &str,
+        type_name: &str,
+        owner: Uuid,
         filters: &[QueryFilter],
         plan: EdgeQuery,
     ) -> Result<Vec<ObjectRecord>, Error>;

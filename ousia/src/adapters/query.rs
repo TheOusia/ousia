@@ -3,7 +3,6 @@ use uuid::Uuid;
 
 use crate::{
     Object,
-    adapters::TraversalDirection,
     edge::{Edge, query::EdgeQuery},
     error::Error,
     query::{
@@ -12,6 +11,14 @@ use crate::{
     },
     system_owner,
 };
+
+#[derive(Debug, Clone)]
+pub(crate) enum TraversalDirection {
+    /// Forward: edges where e."from" = owner  →  fetch e."to" objects
+    Forward,
+    /// Reverse: edges where e."to" = owner  →  fetch e."from" objects
+    Reverse,
+}
 
 /// -----------------------------
 /// Object Query Plan (storage contract)
@@ -984,7 +991,7 @@ impl<'a, E: Edge, O: Object> EdgeQueryContext<'a, E, O> {
     }
 
     /// Collect the target objects (traverse the edges and return the destinations)
-    pub async fn collect(self) -> Result<Vec<O>, Error> {
+    pub async fn collect(&self) -> Result<Vec<O>, Error> {
         // First, query the edges
         let mut edge_query = EdgeQuery::default();
         edge_query.filters = self.edge_filters.clone();
@@ -998,9 +1005,9 @@ impl<'a, E: Edge, O: Object> EdgeQueryContext<'a, E, O> {
         let objects = self
             .adapter
             .fetch_object_from_edge_traversal_internal(
+                E::TYPE,
                 O::TYPE,
                 self.owner,
-                TraversalDirection::Forward,
                 &self.filters,
                 edge_query,
             )
@@ -1013,7 +1020,7 @@ impl<'a, E: Edge, O: Object> EdgeQueryContext<'a, E, O> {
     }
 
     /// Collect the target objects (traverse the edges and return the destinations)
-    pub async fn collect_reverse(self) -> Result<Vec<O>, Error> {
+    pub async fn collect_reverse(&self) -> Result<Vec<O>, Error> {
         // First, query the edges
         let mut edge_query = EdgeQuery::default();
         edge_query.filters = self.edge_filters.clone();
@@ -1026,10 +1033,10 @@ impl<'a, E: Edge, O: Object> EdgeQueryContext<'a, E, O> {
 
         let objects = self
             .adapter
-            .fetch_object_from_edge_traversal_internal(
+            .fetch_object_from_edge_reverse_traversal_internal(
+                E::TYPE,
                 O::TYPE,
                 self.owner,
-                TraversalDirection::Reverse,
                 &self.filters,
                 edge_query,
             )
@@ -1042,9 +1049,9 @@ impl<'a, E: Edge, O: Object> EdgeQueryContext<'a, E, O> {
     }
 
     /// Collect the edges themselves (not the target objects)
-    pub async fn collect_edges(self) -> Result<Vec<E>, Error> {
+    pub async fn collect_edges(&self) -> Result<Vec<E>, Error> {
         let mut edge_query = EdgeQuery::default();
-        edge_query.filters = self.edge_filters;
+        edge_query.filters = self.edge_filters.clone();
         if let Some(limit) = self.limit {
             edge_query.limit = Some(limit);
         }
@@ -1064,9 +1071,9 @@ impl<'a, E: Edge, O: Object> EdgeQueryContext<'a, E, O> {
     }
 
     /// Collect the edges themselves (not the target objects)
-    pub async fn collect_reverse_edges(self) -> Result<Vec<E>, Error> {
+    pub async fn collect_reverse_edges(&self) -> Result<Vec<E>, Error> {
         let mut edge_query = EdgeQuery::default();
-        edge_query.filters = self.edge_filters;
+        edge_query.filters = self.edge_filters.clone();
         if let Some(limit) = self.limit {
             edge_query.limit = Some(limit);
         }
@@ -1092,125 +1099,5 @@ impl<'a, E: Edge, O: Object> EdgeQueryContext<'a, E, O> {
             self.cursor = Some(_cursor);
         }
         self
-    }
-
-    /// Helper to check if an object matches the filters
-    fn matches_filters(&self, obj: &O) -> bool {
-        let index_meta = obj.index_meta();
-        let meta = index_meta.meta();
-
-        for filter in &self.filters {
-            if let Some(value) = meta.get(filter.field.name) {
-                if !self.value_matches(value, &filter.value, &filter.mode) {
-                    return false;
-                }
-            } else {
-                return false; // Field not found means no match
-            }
-        }
-
-        true
-    }
-
-    /// Helper to compare index values based on query mode
-    fn value_matches(
-        &self,
-        actual: &crate::query::IndexValue,
-        expected: &crate::query::IndexValue,
-        mode: &QueryMode,
-    ) -> bool {
-        if let QueryMode::Search(search) = mode {
-            match search.comparison {
-                Comparison::Equal => actual == expected,
-                Comparison::NotEqual => actual != expected,
-                Comparison::Contains => {
-                    use crate::query::IndexValue;
-                    match (actual, expected) {
-                        (IndexValue::String(a), IndexValue::String(e)) => a.contains(e),
-                        (IndexValue::Int(a), IndexValue::Int(e)) => a == e,
-                        (IndexValue::Float(a), IndexValue::Float(e)) => a == e,
-                        (IndexValue::Bool(a), IndexValue::Bool(e)) => a == e,
-                        (IndexValue::Uuid(a), IndexValue::Uuid(e)) => a == e,
-                        (IndexValue::Timestamp(a), IndexValue::Timestamp(e)) => a == e,
-                        (IndexValue::Array(a), IndexValue::Array(e)) => {
-                            e.iter().any(|inner| a.contains(inner))
-                        }
-                        _ => false, // Handle other cases or mismatched types
-                    }
-                }
-                Comparison::ContainsAll => {
-                    use crate::query::IndexValue;
-                    match (actual, expected) {
-                        (IndexValue::String(a), IndexValue::String(e)) => a == e,
-                        (IndexValue::Int(a), IndexValue::Int(e)) => a == e,
-                        (IndexValue::Float(a), IndexValue::Float(e)) => a == e,
-                        (IndexValue::Bool(a), IndexValue::Bool(e)) => a == e,
-                        (IndexValue::Uuid(a), IndexValue::Uuid(e)) => a == e,
-                        (IndexValue::Timestamp(a), IndexValue::Timestamp(e)) => a == e,
-                        (IndexValue::Array(a), IndexValue::Array(e)) => {
-                            e.iter().all(|inner| a.contains(inner))
-                        }
-                        _ => false, // Handle other cases or mismatched types
-                    }
-                }
-                Comparison::BeginsWith => {
-                    if let (
-                        crate::query::IndexValue::String(a),
-                        crate::query::IndexValue::String(e),
-                    ) = (actual, expected)
-                    {
-                        a.starts_with(e)
-                    } else {
-                        false
-                    }
-                }
-                Comparison::GreaterThan => match (actual, expected) {
-                    (crate::query::IndexValue::Int(a), crate::query::IndexValue::Int(e)) => a > e,
-                    (crate::query::IndexValue::Float(a), crate::query::IndexValue::Float(e)) => {
-                        a > e
-                    }
-                    (
-                        crate::query::IndexValue::Timestamp(a),
-                        crate::query::IndexValue::Timestamp(e),
-                    ) => a > e,
-                    _ => false,
-                },
-                Comparison::LessThan => match (actual, expected) {
-                    (crate::query::IndexValue::Int(a), crate::query::IndexValue::Int(e)) => a < e,
-                    (crate::query::IndexValue::Float(a), crate::query::IndexValue::Float(e)) => {
-                        a < e
-                    }
-                    (
-                        crate::query::IndexValue::Timestamp(a),
-                        crate::query::IndexValue::Timestamp(e),
-                    ) => a < e,
-                    _ => false,
-                },
-                Comparison::GreaterThanOrEqual => match (actual, expected) {
-                    (crate::query::IndexValue::Int(a), crate::query::IndexValue::Int(e)) => a >= e,
-                    (crate::query::IndexValue::Float(a), crate::query::IndexValue::Float(e)) => {
-                        a >= e
-                    }
-                    (
-                        crate::query::IndexValue::Timestamp(a),
-                        crate::query::IndexValue::Timestamp(e),
-                    ) => a >= e,
-                    _ => false,
-                },
-                Comparison::LessThanOrEqual => match (actual, expected) {
-                    (crate::query::IndexValue::Int(a), crate::query::IndexValue::Int(e)) => a <= e,
-                    (crate::query::IndexValue::Float(a), crate::query::IndexValue::Float(e)) => {
-                        a <= e
-                    }
-                    (
-                        crate::query::IndexValue::Timestamp(a),
-                        crate::query::IndexValue::Timestamp(e),
-                    ) => a <= e,
-                    _ => false,
-                },
-            }
-        } else {
-            true // Sort mode doesn't affect filtering
-        }
     }
 }

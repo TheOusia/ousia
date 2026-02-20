@@ -7,7 +7,10 @@ use sqlx::{
 use uuid::Uuid;
 
 use crate::{
-    adapters::{Adapter, EdgeQuery, EdgeRecord, Error, ObjectRecord, Query, UniqueAdapter},
+    adapters::{
+        Adapter, EdgeQuery, EdgeRecord, EdgeTraversal, Error, ObjectRecord, Query,
+        TraversalDirection, UniqueAdapter,
+    },
     query::{Cursor, IndexValue, IndexValueInner, QueryFilter},
 };
 
@@ -311,268 +314,196 @@ impl SqliteAdapter {
             index_meta: index_meta_json,
         })
     }
+    // // ── Shared SQL builder helpers ───────────────────────────────────────────
+
+    fn build_filter_condition(alias: &str, filter: &QueryFilter) -> Option<(String, &'static str)> {
+        let crate::query::QueryMode::Search(ref qs) = filter.mode else {
+            return None;
+        };
+        let comparison = match qs.comparison {
+            crate::query::Comparison::Equal => "=",
+            crate::query::Comparison::NotEqual => "!=",
+            crate::query::Comparison::GreaterThan => ">",
+            crate::query::Comparison::LessThan => "<",
+            crate::query::Comparison::GreaterThanOrEqual => ">=",
+            crate::query::Comparison::LessThanOrEqual => "<=",
+            crate::query::Comparison::BeginsWith => "LIKE",
+            crate::query::Comparison::Contains | crate::query::Comparison::ContainsAll => {
+                if matches!(filter.value, IndexValue::Array(_)) {
+                    "ARRAY_CONTAINS"
+                } else {
+                    "LIKE"
+                }
+            }
+        };
+        let col = format!(
+            "json_extract({}.index_meta, '$.{}')",
+            alias, filter.field.name
+        );
+        let condition = if comparison == "ARRAY_CONTAINS" {
+            format!(
+                "EXISTS (SELECT 1 FROM json_each({col}) WHERE value IN (SELECT value FROM json_each(?)))",
+                col = col
+            )
+        } else {
+            format!("{} {} ?", col, comparison)
+        };
+        let operator = match qs.operator {
+            crate::query::Operator::And => "AND",
+            _ => "OR",
+        };
+        Some((condition, operator))
+    }
+
+    fn join_conditions(conditions: &[(String, &str)]) -> String {
+        let mut out = String::new();
+        for (i, (cond, op)) in conditions.iter().enumerate() {
+            out.push_str(cond);
+            if i < conditions.len() - 1 {
+                out.push(' ');
+                out.push_str(op);
+                out.push(' ');
+            }
+        }
+        out
+    }
+
     fn build_object_query_conditions(filters: &Vec<QueryFilter>, cursor: Option<Cursor>) -> String {
-        let mut conditions = vec![
-            ("type = ?".to_string(), "AND"),
-            ("owner = ?".to_string(), "AND"),
+        let mut conditions: Vec<(String, &str)> = vec![
+            ("o.type = ?".to_string(), "AND"),
+            ("o.owner = ?".to_string(), "AND"),
         ];
-
         if cursor.is_some() {
-            conditions.push(("id < ?".to_string(), "AND"));
+            conditions.push(("o.id < ?".to_string(), "AND"));
         }
-
         for filter in filters {
-            match &filter.mode {
-                crate::query::QueryMode::Search(query_search) => {
-                    let comparison = match query_search.comparison {
-                        crate::query::Comparison::Equal => "=",
-                        crate::query::Comparison::BeginsWith => "LIKE",
-                        crate::query::Comparison::Contains
-                        | crate::query::Comparison::ContainsAll => {
-                            if matches!(filter.value, IndexValue::Array(_)) {
-                                // For arrays, we'll use a custom check
-                                "ARRAY_CONTAINS"
-                            } else {
-                                "LIKE"
-                            }
-                        }
-                        crate::query::Comparison::GreaterThan => ">",
-                        crate::query::Comparison::LessThan => "<",
-                        crate::query::Comparison::GreaterThanOrEqual => ">=",
-                        crate::query::Comparison::LessThanOrEqual => "<=",
-                        crate::query::Comparison::NotEqual => "!=",
-                    };
-
-                    let condition = if comparison == "ARRAY_CONTAINS" {
-                        // For array contains, we need to check if any element in the stored JSON array
-                        // is present in the query array. We'll use a placeholder that gets expanded later.
-                        format!(
-                            "EXISTS (SELECT 1 FROM json_each(json_extract(index_meta, '$.{}')) WHERE value IN (SELECT value FROM json_each(?)))",
-                            filter.field.name
-                        )
-                    } else {
-                        format!(
-                            "json_extract(index_meta, '$.{}') {} ?",
-                            filter.field.name, comparison
-                        )
-                    };
-
-                    let operator = match query_search.operator {
-                        crate::query::Operator::And => "AND",
-                        _ => "OR",
-                    };
-                    conditions.push((condition, operator));
-                }
-                crate::query::QueryMode::Sort(_) => continue,
+            if let Some((cond, op)) = Self::build_filter_condition("o", filter) {
+                conditions.push((cond, op));
             }
         }
-
-        let mut query = String::new();
-        for (i, (cond, joiner)) in conditions.iter().enumerate() {
-            query.push_str(cond);
-            if i < conditions.len() - 1 && !joiner.is_empty() {
-                query.push(' ');
-                query.push_str(joiner);
-                query.push(' ');
-            }
-        }
-
-        format!("WHERE {}", query)
+        format!("WHERE {}", Self::join_conditions(&conditions))
     }
-
-    fn build_edge_query_conditions(filters: &Vec<QueryFilter>, cursor: Option<Cursor>) -> String {
-        let mut conditions = vec![
-            ("type = ?".to_string(), "AND"),
-            (r#""from" = ?"#.to_string(), "AND"),
-        ];
-
-        if cursor.is_some() {
-            conditions.push((r#""to" > ?"#.to_string(), "AND"));
-        }
-
-        for filter in filters {
-            match &filter.mode {
-                crate::query::QueryMode::Search(query_search) => {
-                    let comparison = match query_search.comparison {
-                        crate::query::Comparison::Equal => "=",
-                        crate::query::Comparison::BeginsWith => "LIKE",
-                        crate::query::Comparison::Contains
-                        | crate::query::Comparison::ContainsAll => {
-                            if matches!(filter.value, IndexValue::Array(_)) {
-                                "ARRAY_CONTAINS"
-                            } else {
-                                "LIKE"
-                            }
-                        }
-                        crate::query::Comparison::GreaterThan => ">",
-                        crate::query::Comparison::LessThan => "<",
-                        crate::query::Comparison::GreaterThanOrEqual => ">=",
-                        crate::query::Comparison::LessThanOrEqual => "<=",
-                        crate::query::Comparison::NotEqual => "!=",
-                    };
-
-                    let condition = if comparison == "ARRAY_CONTAINS" {
-                        format!(
-                            "EXISTS (SELECT 1 FROM json_each(json_extract(index_meta, '$.{}')) WHERE value IN (SELECT value FROM json_each(?)))",
-                            filter.field.name
-                        )
-                    } else {
-                        format!(
-                            "json_extract(index_meta, '$.{}') {} ?",
-                            filter.field.name, comparison
-                        )
-                    };
-
-                    let operator = match query_search.operator {
-                        crate::query::Operator::And => "AND",
-                        _ => "OR",
-                    };
-                    conditions.push((condition, operator));
-                }
-                crate::query::QueryMode::Sort(_) => continue,
-            }
-        }
-
-        let mut query = String::new();
-        for (i, (cond, joiner)) in conditions.iter().enumerate() {
-            query.push_str(cond);
-            if i < conditions.len() - 1 && !joiner.is_empty() {
-                query.push(' ');
-                query.push_str(joiner);
-                query.push(' ');
-            }
-        }
-
-        format!("WHERE {}", query)
-    }
-
-    fn build_edge_reverse_query_conditions(
+    fn build_edge_query_conditions(
         filters: &Vec<QueryFilter>,
         cursor: Option<Cursor>,
+        direction: TraversalDirection,
     ) -> String {
-        let mut conditions = vec![
-            ("type = ?".to_string(), "AND"),
-            (r#""to" = ?"#.to_string(), "AND"),
+        let anchor_col = match direction {
+            TraversalDirection::Forward => r#"e."from""#,
+            TraversalDirection::Reverse => r#"e."to""#,
+        };
+        let cursor_col = match direction {
+            TraversalDirection::Forward => r#"e."to""#,
+            TraversalDirection::Reverse => r#"e."from""#,
+        };
+        let mut conditions: Vec<(String, &str)> = vec![
+            ("e.type = ?".to_string(), "AND"),
+            (format!("{} = ?", anchor_col), "AND"),
         ];
-
         if cursor.is_some() {
-            conditions.push((r#""from" > ?"#.to_string(), "AND"));
+            conditions.push((format!("{} < ?", cursor_col), "AND"));
         }
-
         for filter in filters {
-            match &filter.mode {
-                crate::query::QueryMode::Search(query_search) => {
-                    let comparison = match query_search.comparison {
-                        crate::query::Comparison::Equal => "=",
-                        crate::query::Comparison::BeginsWith => "LIKE",
-                        crate::query::Comparison::Contains
-                        | crate::query::Comparison::ContainsAll => {
-                            if matches!(filter.value, IndexValue::Array(_)) {
-                                "ARRAY_CONTAINS"
-                            } else {
-                                "LIKE"
-                            }
-                        }
-                        crate::query::Comparison::GreaterThan => ">",
-                        crate::query::Comparison::LessThan => "<",
-                        crate::query::Comparison::GreaterThanOrEqual => ">=",
-                        crate::query::Comparison::LessThanOrEqual => "<=",
-                        crate::query::Comparison::NotEqual => "!=",
-                    };
-
-                    let condition = if comparison == "ARRAY_CONTAINS" {
-                        format!(
-                            "EXISTS (SELECT 1 FROM json_each(json_extract(index_meta, '$.{}')) WHERE value IN (SELECT value FROM json_each(?)))",
-                            filter.field.name
-                        )
-                    } else {
-                        format!(
-                            "json_extract(index_meta, '$.{}') {} ?",
-                            filter.field.name, comparison
-                        )
-                    };
-
-                    let operator = match query_search.operator {
-                        crate::query::Operator::And => "AND",
-                        _ => "OR",
-                    };
-                    conditions.push((condition, operator));
-                }
-                crate::query::QueryMode::Sort(_) => continue,
+            if let Some((cond, op)) = Self::build_filter_condition("e", filter) {
+                conditions.push((cond, op));
             }
         }
-
-        let mut query = String::new();
-        for (i, (cond, joiner)) in conditions.iter().enumerate() {
-            query.push_str(cond);
-            if i < conditions.len() - 1 && !joiner.is_empty() {
-                query.push(' ');
-                query.push_str(joiner);
-                query.push(' ');
-            }
-        }
-
-        format!("WHERE {}", query)
+        format!("WHERE {}", Self::join_conditions(&conditions))
     }
 
     fn build_order_clause(filters: &Vec<QueryFilter>) -> String {
-        let sort: Vec<&QueryFilter> = filters
-            .iter()
-            .filter(|f| f.mode.as_sort().is_some())
-            .collect();
-
-        if sort.is_empty() {
-            return "ORDER BY id DESC".to_string();
-        }
-
-        let order_terms: Vec<String> = sort
-            .iter()
-            .filter(|s| s.value.as_array().is_none()) // Filter out array types from sorting
-            .map(|s| {
-                let direction = if s.mode.as_sort().unwrap().ascending {
-                    "ASC"
-                } else {
-                    "DESC"
-                };
-
-                format!(
-                    "json_extract(index_meta, '$.{}') {}",
-                    s.field.name, direction
-                )
-            })
-            .collect();
-
-        format!("ORDER BY {}", order_terms.join(", "))
+        Self::build_order_clause_aliased(filters, "", false)
     }
 
     fn build_edge_order_clause(filters: &Vec<QueryFilter>) -> String {
+        Self::build_order_clause_aliased(filters, "e", true)
+    }
+
+    fn build_order_clause_aliased(
+        filters: &Vec<QueryFilter>,
+        alias: &str,
+        is_edge: bool,
+    ) -> String {
+        let prefix = if alias.is_empty() {
+            String::new()
+        } else {
+            format!("{}.", alias)
+        };
         let sort: Vec<&QueryFilter> = filters
             .iter()
             .filter(|f| f.mode.as_sort().is_some())
             .collect();
 
         if sort.is_empty() {
-            return "".to_string();
+            if is_edge {
+                return "".to_string();
+            }
+            return format!("ORDER BY {}id DESC", prefix);
         }
 
         let order_terms: Vec<String> = sort
             .iter()
-            .filter(|s| s.value.as_array().is_none()) // Filter out array types from sorting
+            .filter(|s| s.value.as_array().is_none())
             .map(|s| {
-                let direction = if s.mode.as_sort().unwrap().ascending {
+                let dir = if s.mode.as_sort().unwrap().ascending {
                     "ASC"
                 } else {
                     "DESC"
                 };
-
                 format!(
-                    "json_extract(index_meta, '$.{}') {}",
-                    s.field.name, direction
+                    "json_extract({}index_meta, '$.{}') {}",
+                    prefix, s.field.name, dir
                 )
             })
             .collect();
-
         format!("ORDER BY {}", order_terms.join(", "))
+    }
+
+    fn build_object_traversal_query_conditions(
+        direction: TraversalDirection,
+        obj_filters: &[QueryFilter],
+        edge_filters: &Vec<QueryFilter>,
+        cursor: Option<Cursor>,
+    ) -> String {
+        // $1 = object type_name
+        // $2 = edge type_name
+        // $3 = owner
+
+        // ── Object conditions ────────────────────────────────────────────────────
+        let mut obj_conditions: Vec<(String, &str)> = vec![("o.type = $1".to_string(), "AND")];
+
+        if cursor.is_some() {
+            obj_conditions.push(("o.id < ?".to_string(), "AND"));
+        }
+
+        for filter in obj_filters {
+            if let Some((cond, op)) = Self::build_filter_condition("o", filter) {
+                obj_conditions.push((cond, op));
+            }
+        }
+
+        // ── Edge conditions ──────────────────────────────────────────────────────
+        let owner_col = match direction {
+            TraversalDirection::Forward => r#"e."from""#,
+            TraversalDirection::Reverse => r#"e."to""#,
+        };
+
+        let mut edge_conditions: Vec<(String, &str)> = vec![
+            ("e.type = $2".to_string(), "AND"),
+            (format!("{} = $3", owner_col), "AND"),
+        ];
+
+        for filter in edge_filters {
+            if let Some((cond, op)) = Self::build_filter_condition("e", filter) {
+                edge_conditions.push((cond, op));
+            }
+        }
+
+        // ── Combine: obj AND edge ────────────────────────────────────────────────
+        let obj_clause = Self::join_conditions(&obj_conditions);
+        let edge_clause = Self::join_conditions(&edge_conditions);
+
+        format!("WHERE {} AND ({})", obj_clause, edge_clause)
     }
 
     fn query_bind_filters<'a>(
@@ -698,6 +629,110 @@ impl SqliteAdapter {
     }
 }
 
+impl SqliteAdapter {
+    async fn edge_traversal_inner(
+        &self,
+        edge_type_name: &str,
+        type_name: &str,
+        owner: Uuid,
+        filters: &[QueryFilter],
+        plan: EdgeQuery,
+        direction: TraversalDirection,
+    ) -> Result<Vec<ObjectRecord>, Error> {
+        let where_clause = Self::build_object_traversal_query_conditions(
+            direction.clone(),
+            filters,
+            &plan.filters,
+            plan.cursor,
+        );
+        let order_clause = Self::build_edge_order_clause(&plan.filters);
+
+        let mut sql = format!(
+            r#"
+            SELECT o.id, o.type, o.owner, o.created_at, o.updated_at,
+                   o.data, o.index_meta
+            FROM edges e
+            LEFT JOIN objects o ON e."{join_col}" = o.id
+            {where_clause}
+            {order_clause}
+            "#,
+            join_col = match direction {
+                TraversalDirection::Forward => "to",
+                TraversalDirection::Reverse => "from",
+            },
+            where_clause = where_clause,
+            order_clause = order_clause,
+        );
+
+        if let Some(limit) = plan.limit {
+            sql.push_str(&format!(" LIMIT {}", limit));
+        }
+
+        // Bind in the fixed order that build_object_traversal_query_conditions expects:
+        //   $1 = object type_name
+        //   $2 = edge type_name
+        //   $3 = owner
+        //   $4 = cursor (optional)
+        //   $5+ = filter values (object then edge, matching the WHERE clause order)
+        let mut query = sqlx::query(&sql)
+            .bind(type_name)
+            .bind(edge_type_name)
+            .bind(owner);
+
+        if let Some(cursor) = plan.cursor {
+            query = query.bind(cursor.last_id); // $3
+        }
+
+        let mut combined_filters = filters.to_vec();
+        combined_filters.extend_from_slice(&plan.filters);
+        query = Self::query_bind_filters(query, &combined_filters);
+
+        let rows = query
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|err| Error::Storage(err.to_string()))?;
+
+        Ok(rows
+            .into_iter()
+            .filter_map(|row| Self::map_row_to_object_record(row).ok())
+            .collect())
+    }
+
+    async fn query_edges_internal(
+        &self,
+        type_name: &'static str,
+        owner: Uuid,
+        plan: EdgeQuery,
+        direction: TraversalDirection,
+    ) -> Result<Vec<EdgeRecord>, Error> {
+        let where_clause = Self::build_edge_query_conditions(&plan.filters, plan.cursor, direction);
+        let order_clause = Self::build_edge_order_clause(&plan.filters);
+        let mut sql = format!(
+            r#"
+            SELECT e."from" AS "from", e."to" AS "to", e.type AS "type", e.data, e.index_meta
+            FROM edges e
+            {}
+            {}
+            "#,
+            where_clause, order_clause
+        );
+        if let Some(limit) = plan.limit {
+            sql.push_str(&format!(" LIMIT {}", limit));
+        }
+        let mut query = sqlx::query(&sql).bind(type_name).bind(owner);
+        if let Some(cursor) = plan.cursor {
+            query = query.bind(cursor.last_id);
+        }
+        query = Self::query_bind_filters(query, &plan.filters);
+        let pool = self.pool.clone();
+        let rows = query
+            .fetch_all(&pool)
+            .await
+            .map_err(|e| Error::Storage(e.to_string()))?;
+        rows.into_iter().map(Self::map_row_to_edge_record).collect()
+    }
+}
+
 #[async_trait::async_trait]
 impl Adapter for SqliteAdapter {
     async fn insert_object(&self, record: ObjectRecord) -> Result<(), Error> {
@@ -738,8 +773,8 @@ impl Adapter for SqliteAdapter {
         let pool = self.pool.clone();
         let row = sqlx::query(
             r#"
-            SELECT id, type, owner, created_at, updated_at, data, index_meta
-            FROM objects
+            SELECT o.id, o.type, o.owner, o.created_at, o.updated_at, o.data, o.index_meta
+            FROM objects o
             WHERE id = ? AND type = ?
             "#,
         )
@@ -763,7 +798,7 @@ impl Adapter for SqliteAdapter {
         let pool = self.pool.clone();
         let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
         let sql = format!(
-            "SELECT id, type, owner, created_at, updated_at, data, index_meta FROM objects WHERE id IN ({}) AND type = ?",
+            "SELECT o.id, o.type, o.owner, o.created_at, o.updated_at, o.data, o.index_meta FROM objects o WHERE id IN ({}) AND type = ?",
             placeholders
         );
 
@@ -927,8 +962,8 @@ impl Adapter for SqliteAdapter {
 
         let sql = format!(
             r#"
-            SELECT id, type, owner, created_at, updated_at, data, index_meta
-            FROM objects
+            SELECT o.id, o.type, o.owner, o.created_at, o.updated_at, o.data, o.index_meta
+            FROM objects o
             {}
             {}
             LIMIT 1
@@ -962,13 +997,13 @@ impl Adapter for SqliteAdapter {
         let order_clause = Self::build_order_clause(&plan.filters);
 
         if plan.owner.is_nil() {
-            where_clause = where_clause.replace("owner = ", "owner > ");
+            where_clause = where_clause.replace("o.owner = ", "o.owner > ");
         }
 
         let mut sql = format!(
             r#"
-            SELECT id, type, owner, created_at, updated_at, data, index_meta
-            FROM objects
+            SELECT o.id, o.type, o.owner, o.created_at, o.updated_at, o.data, o.index_meta
+            FROM objects o
             {}
             {}
             "#,
@@ -1011,7 +1046,7 @@ impl Adapter for SqliteAdapter {
 
                 let mut sql = format!(
                     r#"
-                    SELECT COUNT(*) FROM objects
+                    SELECT COUNT(*) FROM objects o
                     {}
                     "#,
                     where_clause
@@ -1054,8 +1089,8 @@ impl Adapter for SqliteAdapter {
         let pool = self.pool.clone();
         let rows = sqlx::query(
             r#"
-            SELECT id, type, owner, created_at, updated_at, data, index_meta
-            FROM objects
+            SELECT o.id, o.type, o.owner, o.created_at, o.updated_at, o.data, o.index_meta
+            FROM objects o
             WHERE owner = ? AND type = ?
             "#,
         )
@@ -1078,8 +1113,8 @@ impl Adapter for SqliteAdapter {
         let pool = self.pool.clone();
         let row = sqlx::query(
             r#"
-            SELECT id, type, owner, created_at, updated_at, data, index_meta
-            FROM objects
+            SELECT o.id, o.type, o.owner, o.created_at, o.updated_at, o.data, o.index_meta
+            FROM objects o
             WHERE owner = ? AND type = ?
             LIMIT 1
             "#,
@@ -1105,8 +1140,8 @@ impl Adapter for SqliteAdapter {
         let pool = self.pool.clone();
         let row = sqlx::query(
             r#"
-            SELECT id, type, owner, created_at, updated_at, data, index_meta
-            FROM objects
+            SELECT o.id, o.type, o.owner, o.created_at, o.updated_at, o.data, o.index_meta
+            FROM objects o
             WHERE id = ? AND (type = ? OR type = ?)
             "#,
         )
@@ -1135,8 +1170,8 @@ impl Adapter for SqliteAdapter {
 
         let sql = format!(
             r#"
-            SELECT id, type, owner, created_at, updated_at, data, index_meta
-            FROM objects
+            SELECT o.id, o.type, o.owner, o.created_at, o.updated_at, o.data, o.index_meta
+            FROM objects o
             WHERE id IN ({}) AND (type = ? OR type = ?)
             "#,
             placeholders
@@ -1167,8 +1202,8 @@ impl Adapter for SqliteAdapter {
         let pool = self.pool.clone();
         let row = sqlx::query(
             r#"
-            SELECT id, type, owner, created_at, updated_at, data, index_meta
-            FROM objects
+            SELECT o.id, o.type, o.owner, o.created_at, o.updated_at, o.data, o.index_meta
+            FROM objects o
             WHERE owner = ? AND (type = ? OR type = ?)
             "#,
         )
@@ -1194,8 +1229,8 @@ impl Adapter for SqliteAdapter {
         let pool = self.pool.clone();
         let rows = sqlx::query(
             r#"
-            SELECT id, type, owner, created_at, updated_at, data, index_meta
-            FROM objects
+            SELECT o.id, o.type, o.owner, o.created_at, o.updated_at, o.data, o.index_meta
+            FROM objects o
             WHERE owner = ? AND (type = ? OR type = ?)
             "#,
         )
@@ -1295,7 +1330,7 @@ impl Adapter for SqliteAdapter {
         let _ = sqlx::query(
             r#"
             DELETE FROM edges
-            WHERE type = $1 AND "from" = $2
+            WHERE type = ? AND "from" = ?
             "#,
         )
         .bind(type_name)
@@ -1313,37 +1348,8 @@ impl Adapter for SqliteAdapter {
         owner: Uuid,
         plan: EdgeQuery,
     ) -> Result<Vec<EdgeRecord>, Error> {
-        let where_clause = Self::build_edge_query_conditions(&plan.filters, plan.cursor);
-        let order_clause = Self::build_edge_order_clause(&plan.filters);
-
-        let mut sql = format!(
-            r#"
-            SELECT "from", "to", "type", data, index_meta
-            FROM edges
-            {}
-            {}
-            "#,
-            where_clause, order_clause
-        );
-
-        if let Some(limit) = plan.limit {
-            sql.push_str(&format!(" LIMIT {}", limit));
-        }
-
-        let mut query = sqlx::query(&sql).bind(type_name).bind(owner);
-
-        if let Some(cursor) = plan.cursor {
-            query = query.bind(cursor.last_id);
-        }
-        query = Self::query_bind_filters(query, &plan.filters);
-
-        let pool = self.pool.clone();
-        let rows = query
-            .fetch_all(&pool)
+        self.query_edges_internal(type_name, owner, plan, TraversalDirection::Forward)
             .await
-            .map_err(|err| Error::Storage(err.to_string()))?;
-
-        rows.into_iter().map(Self::map_row_to_edge_record).collect()
     }
 
     async fn query_reverse_edges(
@@ -1352,37 +1358,8 @@ impl Adapter for SqliteAdapter {
         owner_reverse: Uuid,
         plan: EdgeQuery,
     ) -> Result<Vec<EdgeRecord>, Error> {
-        let where_clause = Self::build_edge_reverse_query_conditions(&plan.filters, plan.cursor);
-        let order_clause = Self::build_edge_order_clause(&plan.filters);
-
-        let mut sql = format!(
-            r#"
-            SELECT "from", "to", "type", data, index_meta
-            FROM edges
-            {}
-            {}
-            "#,
-            where_clause, order_clause
-        );
-
-        if let Some(limit) = plan.limit {
-            sql.push_str(&format!(" LIMIT {}", limit));
-        }
-
-        let mut query = sqlx::query(&sql).bind(type_name).bind(owner_reverse);
-
-        if let Some(cursor) = plan.cursor {
-            query = query.bind(cursor.last_id);
-        }
-        query = Self::query_bind_filters(query, &plan.filters);
-
-        let pool = self.pool.clone();
-        let rows = query
-            .fetch_all(&pool)
+        self.query_edges_internal(type_name, owner_reverse, plan, TraversalDirection::Reverse)
             .await
-            .map_err(|err| Error::Storage(err.to_string()))?;
-
-        rows.into_iter().map(Self::map_row_to_edge_record).collect()
     }
 
     async fn count_edges(
@@ -1395,7 +1372,11 @@ impl Adapter for SqliteAdapter {
 
         match plan {
             Some(plan) => {
-                let where_clause = Self::build_edge_query_conditions(&plan.filters, None);
+                let where_clause = Self::build_edge_query_conditions(
+                    &plan.filters,
+                    None,
+                    TraversalDirection::Forward,
+                );
 
                 let mut sql = format!(
                     r#"
@@ -1447,7 +1428,11 @@ impl Adapter for SqliteAdapter {
 
         match plan {
             Some(plan) => {
-                let where_clause = Self::build_edge_reverse_query_conditions(&plan.filters, None);
+                let where_clause = Self::build_edge_query_conditions(
+                    &plan.filters,
+                    None,
+                    TraversalDirection::Reverse,
+                );
 
                 let mut sql = format!(
                     r#"
@@ -1529,37 +1514,6 @@ impl Adapter for SqliteAdapter {
 
 #[async_trait::async_trait]
 impl UniqueAdapter for SqliteAdapter {
-    async fn insert_unique(
-        &self,
-        type_name: &str,
-        object_id: Uuid,
-        hash: &str,
-        field: &str,
-    ) -> Result<(), Error> {
-        sqlx::query(
-            r#"
-            INSERT INTO unique_constraints (id, type, key, field)
-            VALUES ($1, $2, $3, $4)
-            "#,
-        )
-        .bind(object_id)
-        .bind(type_name)
-        .bind(hash)
-        .bind(field)
-        .execute(&self.pool)
-        .await
-        .map_err(|err| {
-            // Check if it's a uniqueness violation
-            if err.to_string().contains("unique") {
-                Error::UniqueConstraintViolation(field.to_string())
-            } else {
-                Error::Storage(err.to_string())
-            }
-        })?;
-
-        Ok(())
-    }
-
     async fn insert_unique_hashes(
         &self,
         type_name: &str,
@@ -1575,7 +1529,7 @@ impl UniqueAdapter for SqliteAdapter {
             sqlx::query(
                 r#"
                 INSERT INTO unique_constraints (id, type, key, field)
-                VALUES ($1, $2, $3, $4)
+                VALUES (?, ?, ?, ?)
                 "#,
             )
             .bind(object_id)
@@ -1603,7 +1557,7 @@ impl UniqueAdapter for SqliteAdapter {
     async fn delete_unique(&self, hash: &str) -> Result<(), Error> {
         sqlx::query(
             r#"
-            DELETE FROM unique_constraints WHERE key = $1
+            DELETE FROM unique_constraints WHERE key = ?
             "#,
         )
         .bind(hash)
@@ -1636,24 +1590,10 @@ impl UniqueAdapter for SqliteAdapter {
         Ok(())
     }
 
-    async fn delete_all_for_object(&self, object_id: Uuid) -> Result<(), Error> {
-        sqlx::query(
-            r#"
-            DELETE FROM unique_constraints WHERE id = $1
-            "#,
-        )
-        .bind(object_id)
-        .execute(&self.pool)
-        .await
-        .map_err(|e| Error::Storage(e.to_string()))?;
-
-        Ok(())
-    }
-
     async fn get_hashes_for_object(&self, object_id: Uuid) -> Result<Vec<String>, Error> {
         let rows = sqlx::query(
             r#"
-            SELECT key FROM unique_constraints WHERE id = $1
+            SELECT key FROM unique_constraints WHERE id = ?
             "#,
         )
         .bind(object_id)
@@ -1665,5 +1605,46 @@ impl UniqueAdapter for SqliteAdapter {
             .into_iter()
             .map(|row| row.try_get("key").unwrap())
             .collect())
+    }
+}
+
+#[async_trait::async_trait]
+impl EdgeTraversal for SqliteAdapter {
+    async fn fetch_object_from_edge_traversal_internal(
+        &self,
+        edge_type_name: &str,
+        type_name: &str,
+        owner: Uuid,
+        filters: &[QueryFilter],
+        plan: EdgeQuery,
+    ) -> Result<Vec<ObjectRecord>, Error> {
+        self.edge_traversal_inner(
+            edge_type_name,
+            type_name,
+            owner,
+            filters,
+            plan,
+            TraversalDirection::Forward,
+        )
+        .await
+    }
+
+    async fn fetch_object_from_edge_reverse_traversal_internal(
+        &self,
+        edge_type_name: &str,
+        type_name: &str,
+        owner: Uuid,
+        filters: &[QueryFilter],
+        plan: EdgeQuery,
+    ) -> Result<Vec<ObjectRecord>, Error> {
+        self.edge_traversal_inner(
+            edge_type_name,
+            type_name,
+            owner,
+            filters,
+            plan,
+            TraversalDirection::Reverse,
+        )
+        .await
     }
 }
