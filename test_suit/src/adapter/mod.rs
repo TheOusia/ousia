@@ -71,7 +71,7 @@ impl ToIndexValue for Wallet {
 #[ousia(
     type_name = "User",
     unique = "username",
-    index = "email:search",
+    index = "email:search+sort",
     index = "username:search+sort",
     index = "balance:search"
 )]

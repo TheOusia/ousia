@@ -26,6 +26,29 @@ impl Default for EdgeQuery {
     }
 }
 
+pub struct ObjectEdge<E: super::Edge, O: crate::Object> {
+    edge: E,
+    object: O,
+}
+
+impl<E: super::Edge, O: crate::Object> ObjectEdge<E, O> {
+    pub fn new(edge: E, object: O) -> Self {
+        Self { edge, object }
+    }
+
+    pub fn edge(&self) -> &E {
+        &self.edge
+    }
+
+    pub fn object(&self) -> &O {
+        &self.object
+    }
+
+    pub fn into_parts(self) -> (E, O) {
+        (self.edge, self.object)
+    }
+}
+
 impl EdgeQuery {
     pub fn with_filter(
         self,

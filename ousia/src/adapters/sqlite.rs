@@ -185,50 +185,34 @@ impl SqliteAdapter {
         .await
         .map_err(|e| Error::Storage(e.to_string()))?;
 
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS sequences (
+                name TEXT PRIMARY KEY,
+                value INTEGER NOT NULL DEFAULT 1
+            )
+            "#,
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| Error::Storage(e.to_string()))?;
+
         tx.commit()
             .await
             .map_err(|e| Error::Storage(e.to_string()))?;
 
         Ok(())
     }
-
-    async fn ensure_sequence_exists(&self, sq: String) {
-        // Create the sequences table if it doesn't exist
-        let _ = sqlx::query(
-            "CREATE TABLE IF NOT EXISTS sequences (
-            name TEXT PRIMARY KEY,
-            value INTEGER NOT NULL DEFAULT 1
-        )",
-        )
-        .execute(&self.pool.clone())
-        .await
-        .unwrap();
-
-        // Insert the sequence if it doesn't exist
-        let sql = format!(
-            "INSERT OR IGNORE INTO sequences (name, value) VALUES ('{}', 1)",
-            sq
-        );
-
-        let _ = sqlx::query(&sql).execute(&self.pool.clone()).await.unwrap();
-    }
 }
 
 impl SqliteAdapter {
-    fn map_row_to_object_record(row: SqliteRow) -> Result<ObjectRecord, Error> {
+    fn map_row_to_object_record_slim(row: SqliteRow) -> Result<ObjectRecord, Error> {
         let data_str: String = row
             .try_get("data")
             .map_err(|e| Error::Deserialize(e.to_string()))?;
 
-        let index_meta_str: String = row
-            .try_get("index_meta")
-            .map_err(|e| Error::Deserialize(e.to_string()))?;
-
         let data_json: serde_json::Value =
             serde_json::from_str(&data_str).map_err(|e| Error::Deserialize(e.to_string()))?;
-
-        let index_meta_json: serde_json::Value =
-            serde_json::from_str(&index_meta_str).map_err(|e| Error::Deserialize(e.to_string()))?;
 
         let type_name = row
             .try_get::<String, _>("type")
@@ -260,12 +244,12 @@ impl SqliteAdapter {
 
         Ok(ObjectRecord {
             id,
-            type_name,
+            type_name: std::borrow::Cow::Owned(type_name),
             owner,
             created_at,
             updated_at,
             data: data_json,
-            index_meta: index_meta_json,
+            index_meta: serde_json::Value::Null,
         })
     }
 
@@ -297,7 +281,7 @@ impl SqliteAdapter {
             .map_err(|e| Error::Deserialize(e.to_string()))?;
 
         Ok(EdgeRecord {
-            type_name,
+            type_name: std::borrow::Cow::Owned(type_name),
             from,
             to,
             data: data_json,
@@ -358,7 +342,7 @@ impl SqliteAdapter {
         out
     }
 
-    fn build_object_query_conditions(filters: &Vec<QueryFilter>, cursor: Option<Cursor>) -> String {
+    fn build_object_query_conditions(filters: &[QueryFilter], cursor: Option<Cursor>) -> String {
         let mut conditions: Vec<(String, &str)> = vec![
             ("o.type = ?".to_string(), "AND"),
             ("o.owner = ?".to_string(), "AND"),
@@ -374,7 +358,7 @@ impl SqliteAdapter {
         format!("WHERE {}", Self::join_conditions(&conditions))
     }
     fn build_edge_query_conditions(
-        filters: &Vec<QueryFilter>,
+        filters: &[QueryFilter],
         cursor: Option<Cursor>,
         direction: TraversalDirection,
     ) -> String {
@@ -401,16 +385,16 @@ impl SqliteAdapter {
         format!("WHERE {}", Self::join_conditions(&conditions))
     }
 
-    fn build_order_clause(filters: &Vec<QueryFilter>) -> String {
+    fn build_order_clause(filters: &[QueryFilter]) -> String {
         Self::build_order_clause_aliased(filters, "", false)
     }
 
-    fn build_edge_order_clause(filters: &Vec<QueryFilter>) -> String {
+    fn build_edge_order_clause(filters: &[QueryFilter]) -> String {
         Self::build_order_clause_aliased(filters, "e", true)
     }
 
     fn build_order_clause_aliased(
-        filters: &Vec<QueryFilter>,
+        filters: &[QueryFilter],
         alias: &str,
         is_edge: bool,
     ) -> String {
@@ -456,7 +440,7 @@ impl SqliteAdapter {
     fn build_object_traversal_query_conditions(
         direction: TraversalDirection,
         obj_filters: &[QueryFilter],
-        edge_filters: &Vec<QueryFilter>,
+        edge_filters: &[QueryFilter],
         cursor: Option<Cursor>,
     ) -> String {
         // $1 = object type_name
@@ -464,7 +448,7 @@ impl SqliteAdapter {
         // $3 = owner
 
         // ── Object conditions ────────────────────────────────────────────────────
-        let mut obj_conditions: Vec<(String, &str)> = vec![("o.type = $1".to_string(), "AND")];
+        let mut obj_conditions: Vec<(String, &str)> = vec![("o.type = ?".to_string(), "AND")];
 
         if cursor.is_some() {
             obj_conditions.push(("o.id < ?".to_string(), "AND"));
@@ -483,8 +467,8 @@ impl SqliteAdapter {
         };
 
         let mut edge_conditions: Vec<(String, &str)> = vec![
-            ("e.type = $2".to_string(), "AND"),
-            (format!("{} = $3", owner_col), "AND"),
+            ("e.type = ?".to_string(), "AND"),
+            (format!("{} = ?", owner_col), "AND"),
         ];
 
         for filter in edge_filters {
@@ -502,7 +486,7 @@ impl SqliteAdapter {
 
     fn query_bind_filters<'a>(
         mut query: SqlxQuery<'a, Sqlite, SqliteArguments<'a>>,
-        filters: &'a Vec<QueryFilter>,
+        filters: &'a [QueryFilter],
     ) -> SqlxQuery<'a, Sqlite, SqliteArguments<'a>> {
         for filter in filters.iter().filter(|f| f.mode.as_search().is_some()) {
             query = match &filter.value {
@@ -563,7 +547,7 @@ impl SqliteAdapter {
 
     fn query_scalar_bind_filters<'a, O>(
         mut query: QueryScalar<'a, Sqlite, O, SqliteArguments<'a>>,
-        filters: &'a Vec<QueryFilter>,
+        filters: &'a [QueryFilter],
     ) -> QueryScalar<'a, Sqlite, O, SqliteArguments<'a>> {
         for filter in filters.iter().filter(|f| f.mode.as_search().is_some()) {
             query = match &filter.value {
@@ -643,8 +627,7 @@ impl SqliteAdapter {
 
         let mut sql = format!(
             r#"
-            SELECT o.id, o.type, o.owner, o.created_at, o.updated_at,
-                   o.data, o.index_meta
+            SELECT o.id, o.type, o.owner, o.created_at, o.updated_at, o.data
             FROM edges e
             LEFT JOIN objects o ON e."{join_col}" = o.id
             {where_clause}
@@ -662,24 +645,17 @@ impl SqliteAdapter {
             sql.push_str(&format!(" LIMIT {}", limit));
         }
 
-        // Bind in the fixed order that build_object_traversal_query_conditions expects:
-        //   $1 = object type_name
-        //   $2 = edge type_name
-        //   $3 = owner
-        //   $4 = cursor (optional)
-        //   $5+ = filter values (object then edge, matching the WHERE clause order)
         let mut query = sqlx::query(&sql)
             .bind(type_name)
             .bind(edge_type_name)
             .bind(owner);
 
         if let Some(cursor) = plan.cursor {
-            query = query.bind(cursor.last_id); // $3
+            query = query.bind(cursor.last_id);
         }
 
-        let mut combined_filters = filters.to_vec();
-        combined_filters.extend_from_slice(&plan.filters);
-        query = Self::query_bind_filters(query, &combined_filters);
+        query = Self::query_bind_filters(query, filters);
+        query = Self::query_bind_filters(query, &plan.filters);
 
         let rows = query
             .fetch_all(&self.pool)
@@ -688,7 +664,7 @@ impl SqliteAdapter {
 
         Ok(rows
             .into_iter()
-            .filter_map(|row| Self::map_row_to_object_record(row).ok())
+            .filter_map(|row| Self::map_row_to_object_record_slim(row).ok())
             .collect())
     }
 
@@ -718,9 +694,8 @@ impl SqliteAdapter {
             query = query.bind(cursor.last_id);
         }
         query = Self::query_bind_filters(query, &plan.filters);
-        let pool = self.pool.clone();
         let rows = query
-            .fetch_all(&pool)
+            .fetch_all(&self.pool)
             .await
             .map_err(|e| Error::Storage(e.to_string()))?;
         rows.into_iter().map(Self::map_row_to_edge_record).collect()
@@ -730,24 +705,24 @@ impl SqliteAdapter {
 #[async_trait::async_trait]
 impl Adapter for SqliteAdapter {
     async fn insert_object(&self, record: ObjectRecord) -> Result<(), Error> {
-        let pool = self.pool.clone();
+        let ObjectRecord { id, type_name, owner, created_at, updated_at, data, index_meta } = record;
         let _ = sqlx::query(
             r#"
             INSERT INTO objects (id, type, owner, created_at, updated_at, data, index_meta)
             VALUES (?, ?, ?, ?, ?, ?, ?)
             "#,
         )
-        .bind(record.id)
-        .bind(record.type_name)
-        .bind(record.owner)
-        .bind(record.created_at.to_rfc3339())
-        .bind(record.updated_at.to_rfc3339())
-        .bind(serde_json::to_string(&record.data).map_err(|e| Error::Serialize(e.to_string()))?)
+        .bind(id)
+        .bind(type_name.as_ref())
+        .bind(owner)
+        .bind(created_at.to_rfc3339())
+        .bind(updated_at.to_rfc3339())
+        .bind(serde_json::to_string(&data).map_err(|e| Error::Serialize(e.to_string()))?)
         .bind(
-            serde_json::to_string(&record.index_meta)
+            serde_json::to_string(&index_meta)
                 .map_err(|e| Error::Serialize(e.to_string()))?,
         )
-        .execute(&pool)
+        .execute(&self.pool)
         .await
         .map_err(|err| {
             if err.to_string().contains("unique") {
@@ -764,22 +739,21 @@ impl Adapter for SqliteAdapter {
         type_name: &'static str,
         id: Uuid,
     ) -> Result<Option<ObjectRecord>, Error> {
-        let pool = self.pool.clone();
         let row = sqlx::query(
             r#"
-            SELECT o.id, o.type, o.owner, o.created_at, o.updated_at, o.data, o.index_meta
+            SELECT o.id, o.type, o.owner, o.created_at, o.updated_at, o.data
             FROM objects o
             WHERE id = ? AND type = ?
             "#,
         )
         .bind(id)
         .bind(type_name)
-        .fetch_optional(&pool)
+        .fetch_optional(&self.pool)
         .await
         .map_err(|err| Error::Storage(err.to_string()))?;
 
         match row {
-            Some(r) => Self::map_row_to_object_record(r).map(Some),
+            Some(r) => Self::map_row_to_object_record_slim(r).map(Some),
             None => Ok(None),
         }
     }
@@ -789,10 +763,9 @@ impl Adapter for SqliteAdapter {
         type_name: &'static str,
         ids: Vec<Uuid>,
     ) -> Result<Vec<ObjectRecord>, Error> {
-        let pool = self.pool.clone();
         let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
         let sql = format!(
-            "SELECT o.id, o.type, o.owner, o.created_at, o.updated_at, o.data, o.index_meta FROM objects o WHERE id IN ({}) AND type = ?",
+            "SELECT o.id, o.type, o.owner, o.created_at, o.updated_at, o.data FROM objects o WHERE id IN ({}) AND type = ?",
             placeholders
         );
 
@@ -803,17 +776,16 @@ impl Adapter for SqliteAdapter {
         query = query.bind(type_name);
 
         let rows = query
-            .fetch_all(&pool)
+            .fetch_all(&self.pool)
             .await
             .map_err(|err| Error::Storage(err.to_string()))?;
 
         rows.into_iter()
-            .map(Self::map_row_to_object_record)
+            .map(Self::map_row_to_object_record_slim)
             .collect()
     }
 
     async fn update_object(&self, record: ObjectRecord) -> Result<(), Error> {
-        let pool = self.pool.clone();
         sqlx::query(
             r#"
             UPDATE objects
@@ -828,7 +800,7 @@ impl Adapter for SqliteAdapter {
                 .map_err(|e| Error::Serialize(e.to_string()))?,
         )
         .bind(record.id)
-        .execute(&pool)
+        .execute(&self.pool)
         .await
         .map_err(|err| Error::Storage(err.to_string()))?;
 
@@ -842,9 +814,7 @@ impl Adapter for SqliteAdapter {
         from_owner: Uuid,
         to_owner: Uuid,
     ) -> Result<ObjectRecord, Error> {
-        let pool = self.pool.clone();
-
-        // SQLite doesn't support RETURNING, so we need to update then fetch
+        // SQLite doesn't support RETURNING, so we update then fetch
         let result = sqlx::query(
             r#"
             UPDATE objects
@@ -857,7 +827,7 @@ impl Adapter for SqliteAdapter {
         .bind(id)
         .bind(from_owner)
         .bind(type_name)
-        .execute(&pool)
+        .execute(&self.pool)
         .await
         .map_err(|err| Error::Storage(err.to_string()))?;
 
@@ -876,8 +846,6 @@ impl Adapter for SqliteAdapter {
         id: Uuid,
         owner: Uuid,
     ) -> Result<Option<ObjectRecord>, Error> {
-        let pool = self.pool.clone();
-
         // Fetch first, then delete (SQLite doesn't have RETURNING)
         let record = self.fetch_object(type_name, id).await?;
 
@@ -894,7 +862,7 @@ impl Adapter for SqliteAdapter {
             )
             .bind(id)
             .bind(owner)
-            .execute(&pool)
+            .execute(&self.pool)
             .await
             .map_err(|err| Error::Storage(err.to_string()))?;
         }
@@ -908,8 +876,6 @@ impl Adapter for SqliteAdapter {
         ids: Vec<Uuid>,
         owner: Uuid,
     ) -> Result<u64, Error> {
-        let pool = self.pool.clone();
-
         let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
         let sql = format!(
             "DELETE FROM objects WHERE id IN ({}) AND type = ? AND owner = ?",
@@ -924,7 +890,7 @@ impl Adapter for SqliteAdapter {
 
         let result = query
             .bind(owner)
-            .execute(&pool)
+            .execute(&self.pool)
             .await
             .map_err(|err| Error::Storage(err.to_string()))?;
         Ok(result.rows_affected())
@@ -951,12 +917,12 @@ impl Adapter for SqliteAdapter {
         owner: Uuid,
         filters: &[QueryFilter],
     ) -> Result<Option<ObjectRecord>, Error> {
-        let where_clause = Self::build_object_query_conditions(&filters.to_vec(), None);
-        let order_clause = Self::build_order_clause(&filters.to_vec());
+        let where_clause = Self::build_object_query_conditions(filters, None);
+        let order_clause = Self::build_order_clause(filters);
 
         let sql = format!(
             r#"
-            SELECT o.id, o.type, o.owner, o.created_at, o.updated_at, o.data, o.index_meta
+            SELECT o.id, o.type, o.owner, o.created_at, o.updated_at, o.data
             FROM objects o
             {}
             {}
@@ -966,18 +932,15 @@ impl Adapter for SqliteAdapter {
         );
 
         let mut query = sqlx::query(&sql).bind(type_name).bind(owner);
+        query = Self::query_bind_filters(query, filters);
 
-        let f = filters.to_vec();
-        query = Self::query_bind_filters(query, &f);
-
-        let pool = self.pool.clone();
         let row = query
-            .fetch_optional(&pool)
+            .fetch_optional(&self.pool)
             .await
             .map_err(|err| Error::Storage(err.to_string()))?;
 
         match row {
-            Some(r) => Self::map_row_to_object_record(r).map(Some),
+            Some(r) => Self::map_row_to_object_record_slim(r).map(Some),
             None => Ok(None),
         }
     }
@@ -996,7 +959,7 @@ impl Adapter for SqliteAdapter {
 
         let mut sql = format!(
             r#"
-            SELECT o.id, o.type, o.owner, o.created_at, o.updated_at, o.data, o.index_meta
+            SELECT o.id, o.type, o.owner, o.created_at, o.updated_at, o.data
             FROM objects o
             {}
             {}
@@ -1016,14 +979,13 @@ impl Adapter for SqliteAdapter {
 
         query = Self::query_bind_filters(query, &plan.filters);
 
-        let pool = self.pool.clone();
         let rows = query
-            .fetch_all(&pool)
+            .fetch_all(&self.pool)
             .await
             .map_err(|err| Error::Storage(err.to_string()))?;
 
         rows.into_iter()
-            .map(Self::map_row_to_object_record)
+            .map(Self::map_row_to_object_record_slim)
             .collect()
     }
 
@@ -1032,8 +994,6 @@ impl Adapter for SqliteAdapter {
         type_name: &'static str,
         plan: Option<Query>,
     ) -> Result<u64, Error> {
-        let pool = self.pool.clone();
-
         match plan {
             Some(plan) => {
                 let where_clause = Self::build_object_query_conditions(&plan.filters, None);
@@ -1057,7 +1017,7 @@ impl Adapter for SqliteAdapter {
                 query = Self::query_scalar_bind_filters(query, &plan.filters);
 
                 let count = query
-                    .fetch_one(&pool)
+                    .fetch_one(&self.pool)
                     .await
                     .map_err(|e| Error::Storage(e.to_string()))?;
 
@@ -1066,7 +1026,7 @@ impl Adapter for SqliteAdapter {
             None => {
                 let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM objects WHERE type = ?")
                     .bind(type_name)
-                    .fetch_one(&pool)
+                    .fetch_one(&self.pool)
                     .await
                     .map_err(|err| Error::Storage(err.to_string()))?;
 
@@ -1080,22 +1040,21 @@ impl Adapter for SqliteAdapter {
         type_name: &'static str,
         owner: Uuid,
     ) -> Result<Vec<ObjectRecord>, Error> {
-        let pool = self.pool.clone();
         let rows = sqlx::query(
             r#"
-            SELECT o.id, o.type, o.owner, o.created_at, o.updated_at, o.data, o.index_meta
+            SELECT o.id, o.type, o.owner, o.created_at, o.updated_at, o.data
             FROM objects o
             WHERE owner = ? AND type = ?
             "#,
         )
         .bind(owner)
         .bind(type_name)
-        .fetch_all(&pool)
+        .fetch_all(&self.pool)
         .await
         .map_err(|err| Error::Storage(err.to_string()))?;
 
         rows.into_iter()
-            .map(Self::map_row_to_object_record)
+            .map(Self::map_row_to_object_record_slim)
             .collect()
     }
 
@@ -1104,10 +1063,9 @@ impl Adapter for SqliteAdapter {
         type_name: &'static str,
         owner: Uuid,
     ) -> Result<Option<ObjectRecord>, Error> {
-        let pool = self.pool.clone();
         let row = sqlx::query(
             r#"
-            SELECT o.id, o.type, o.owner, o.created_at, o.updated_at, o.data, o.index_meta
+            SELECT o.id, o.type, o.owner, o.created_at, o.updated_at, o.data
             FROM objects o
             WHERE owner = ? AND type = ?
             LIMIT 1
@@ -1115,12 +1073,12 @@ impl Adapter for SqliteAdapter {
         )
         .bind(owner)
         .bind(type_name)
-        .fetch_optional(&pool)
+        .fetch_optional(&self.pool)
         .await
         .map_err(|err| Error::Storage(err.to_string()))?;
 
         match row {
-            Some(r) => Self::map_row_to_object_record(r).map(Some),
+            Some(r) => Self::map_row_to_object_record_slim(r).map(Some),
             None => Ok(None),
         }
     }
@@ -1131,10 +1089,9 @@ impl Adapter for SqliteAdapter {
         b_type_name: &'static str,
         id: Uuid,
     ) -> Result<Option<ObjectRecord>, Error> {
-        let pool = self.pool.clone();
         let row = sqlx::query(
             r#"
-            SELECT o.id, o.type, o.owner, o.created_at, o.updated_at, o.data, o.index_meta
+            SELECT o.id, o.type, o.owner, o.created_at, o.updated_at, o.data
             FROM objects o
             WHERE id = ? AND (type = ? OR type = ?)
             "#,
@@ -1142,12 +1099,12 @@ impl Adapter for SqliteAdapter {
         .bind(id)
         .bind(a_type_name)
         .bind(b_type_name)
-        .fetch_optional(&pool)
+        .fetch_optional(&self.pool)
         .await
         .map_err(|err| Error::Storage(err.to_string()))?;
 
         match row {
-            Some(r) => Self::map_row_to_object_record(r).map(|o| Some(o)),
+            Some(r) => Self::map_row_to_object_record_slim(r).map(Some),
             None => Ok(None),
         }
     }
@@ -1158,13 +1115,11 @@ impl Adapter for SqliteAdapter {
         b_type_name: &'static str,
         ids: Vec<Uuid>,
     ) -> Result<Vec<ObjectRecord>, Error> {
-        let pool = self.pool.clone();
-
         let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
 
         let sql = format!(
             r#"
-            SELECT o.id, o.type, o.owner, o.created_at, o.updated_at, o.data, o.index_meta
+            SELECT o.id, o.type, o.owner, o.created_at, o.updated_at, o.data
             FROM objects o
             WHERE id IN ({}) AND (type = ? OR type = ?)
             "#,
@@ -1178,12 +1133,12 @@ impl Adapter for SqliteAdapter {
         let rows = query
             .bind(a_type_name)
             .bind(b_type_name)
-            .fetch_all(&pool)
+            .fetch_all(&self.pool)
             .await
             .map_err(|err| Error::Storage(err.to_string()))?;
 
         rows.into_iter()
-            .map(Self::map_row_to_object_record)
+            .map(Self::map_row_to_object_record_slim)
             .collect()
     }
 
@@ -1193,10 +1148,9 @@ impl Adapter for SqliteAdapter {
         b_type_name: &'static str,
         owner: Uuid,
     ) -> Result<Option<ObjectRecord>, Error> {
-        let pool = self.pool.clone();
         let row = sqlx::query(
             r#"
-            SELECT o.id, o.type, o.owner, o.created_at, o.updated_at, o.data, o.index_meta
+            SELECT o.id, o.type, o.owner, o.created_at, o.updated_at, o.data
             FROM objects o
             WHERE owner = ? AND (type = ? OR type = ?)
             "#,
@@ -1204,12 +1158,12 @@ impl Adapter for SqliteAdapter {
         .bind(owner)
         .bind(a_type_name)
         .bind(b_type_name)
-        .fetch_optional(&pool)
+        .fetch_optional(&self.pool)
         .await
         .map_err(|err| Error::Storage(err.to_string()))?;
 
         match row {
-            Some(r) => Self::map_row_to_object_record(r).map(|o| Some(o)),
+            Some(r) => Self::map_row_to_object_record_slim(r).map(Some),
             None => Ok(None),
         }
     }
@@ -1220,10 +1174,9 @@ impl Adapter for SqliteAdapter {
         b_type_name: &'static str,
         owner: Uuid,
     ) -> Result<Vec<ObjectRecord>, Error> {
-        let pool = self.pool.clone();
         let rows = sqlx::query(
             r#"
-            SELECT o.id, o.type, o.owner, o.created_at, o.updated_at, o.data, o.index_meta
+            SELECT o.id, o.type, o.owner, o.created_at, o.updated_at, o.data
             FROM objects o
             WHERE owner = ? AND (type = ? OR type = ?)
             "#,
@@ -1231,22 +1184,21 @@ impl Adapter for SqliteAdapter {
         .bind(owner)
         .bind(a_type_name)
         .bind(b_type_name)
-        .fetch_all(&pool)
+        .fetch_all(&self.pool)
         .await
         .map_err(|err| Error::Storage(err.to_string()))?;
 
         rows.into_iter()
-            .map(Self::map_row_to_object_record)
+            .map(Self::map_row_to_object_record_slim)
             .collect()
     }
 
     /* ---------------- EDGES ---------------- */
     async fn insert_edge(&self, record: EdgeRecord) -> Result<(), Error> {
-        let pool = self.pool.clone();
-
-        let data =
-            serde_json::to_string(&record.data).map_err(|e| Error::Serialize(e.to_string()))?;
-        let index_meta = serde_json::to_string(&record.index_meta)
+        let EdgeRecord { from, to, type_name, data, index_meta } = record;
+        let data_str =
+            serde_json::to_string(&data).map_err(|e| Error::Serialize(e.to_string()))?;
+        let index_meta_str = serde_json::to_string(&index_meta)
             .map_err(|e| Error::Serialize(e.to_string()))?;
 
         let _ = sqlx::query(
@@ -1257,14 +1209,14 @@ impl Adapter for SqliteAdapter {
             DO UPDATE SET data = ?, index_meta = ?;
             "#,
         )
-        .bind(record.from)
-        .bind(record.to)
-        .bind(record.type_name)
-        .bind(&data)
-        .bind(&index_meta)
-        .bind(&data)
-        .bind(&index_meta)
-        .execute(&pool)
+        .bind(from)
+        .bind(to)
+        .bind(type_name.as_ref())
+        .bind(&data_str)
+        .bind(&index_meta_str)
+        .bind(&data_str)
+        .bind(&index_meta_str)
+        .execute(&self.pool)
         .await
         .map_err(|err| Error::Storage(err.to_string()))?;
 
@@ -1277,19 +1229,19 @@ impl Adapter for SqliteAdapter {
         old_to: Uuid,
         to: Option<Uuid>,
     ) -> Result<(), Error> {
-        let pool = self.pool.clone();
+        let EdgeRecord { from, type_name, data, .. } = record;
         let _ = sqlx::query(
             r#"
         UPDATE edges SET data = ?, "to" = ?
         WHERE "from" = ? AND type = ? AND "to" = ?
         "#,
         )
-        .bind(record.data)
+        .bind(serde_json::to_string(&data).map_err(|e| Error::Serialize(e.to_string()))?)
         .bind(to.unwrap_or(old_to))
-        .bind(record.from)
-        .bind(record.type_name)
+        .bind(from)
+        .bind(type_name.as_ref())
         .bind(old_to)
-        .execute(&pool)
+        .execute(&self.pool)
         .await
         .map_err(|err| Error::Storage(err.to_string()))?;
 
@@ -1302,7 +1254,6 @@ impl Adapter for SqliteAdapter {
         from: Uuid,
         to: Uuid,
     ) -> Result<(), Error> {
-        let pool = self.pool.clone();
         let _ = sqlx::query(
             r#"
             DELETE FROM edges
@@ -1312,7 +1263,7 @@ impl Adapter for SqliteAdapter {
         .bind(type_name)
         .bind(from)
         .bind(to)
-        .execute(&pool)
+        .execute(&self.pool)
         .await
         .map_err(|err| Error::Storage(err.to_string()))?;
 
@@ -1320,7 +1271,6 @@ impl Adapter for SqliteAdapter {
     }
 
     async fn delete_object_edge(&self, type_name: &'static str, from: Uuid) -> Result<(), Error> {
-        let pool = self.pool.clone();
         let _ = sqlx::query(
             r#"
             DELETE FROM edges
@@ -1329,7 +1279,7 @@ impl Adapter for SqliteAdapter {
         )
         .bind(type_name)
         .bind(from.to_string())
-        .execute(&pool)
+        .execute(&self.pool)
         .await
         .map_err(|err| Error::Storage(err.to_string()))?;
 
@@ -1362,8 +1312,6 @@ impl Adapter for SqliteAdapter {
         owner: Uuid,
         plan: Option<EdgeQuery>,
     ) -> Result<u64, Error> {
-        let pool = self.pool.clone();
-
         match plan {
             Some(plan) => {
                 let where_clause = Self::build_edge_query_conditions(
@@ -1391,7 +1339,7 @@ impl Adapter for SqliteAdapter {
                 query = Self::query_scalar_bind_filters(query, &plan.filters);
 
                 let count = query
-                    .fetch_one(&pool)
+                    .fetch_one(&self.pool)
                     .await
                     .map_err(|e| Error::Storage(e.to_string()))?;
 
@@ -1403,7 +1351,7 @@ impl Adapter for SqliteAdapter {
                 )
                 .bind(type_name)
                 .bind(owner)
-                .fetch_one(&pool)
+                .fetch_one(&self.pool)
                 .await
                 .map_err(|err| Error::Storage(err.to_string()))?;
 
@@ -1418,8 +1366,6 @@ impl Adapter for SqliteAdapter {
         to: Uuid,
         plan: Option<EdgeQuery>,
     ) -> Result<u64, Error> {
-        let pool = self.pool.clone();
-
         match plan {
             Some(plan) => {
                 let where_clause = Self::build_edge_query_conditions(
@@ -1445,7 +1391,7 @@ impl Adapter for SqliteAdapter {
                 query = Self::query_scalar_bind_filters(query, &plan.filters);
 
                 let count = query
-                    .fetch_one(&pool)
+                    .fetch_one(&self.pool)
                     .await
                     .map_err(|e| Error::Storage(e.to_string()))?;
 
@@ -1456,7 +1402,7 @@ impl Adapter for SqliteAdapter {
                     sqlx::query_scalar(r#"SELECT COUNT(*) FROM edges WHERE type = ? AND "to" = ?"#)
                         .bind(type_name)
                         .bind(to)
-                        .fetch_one(&pool)
+                        .fetch_one(&self.pool)
                         .await
                         .map_err(|err| Error::Storage(err.to_string()))?;
 
@@ -1466,36 +1412,33 @@ impl Adapter for SqliteAdapter {
     }
 
     async fn sequence_value(&self, sq: String) -> u64 {
-        self.ensure_sequence_exists(sq.clone()).await;
-
-        let current_val: i64 = sqlx::query_scalar("SELECT value FROM sequences WHERE name = ?")
-            .bind(sq)
-            .fetch_one(&self.pool.clone())
-            .await
-            .expect("Failed to fetch the current sequence value");
-
-        current_val as u64
+        let val: i64 =
+            sqlx::query_scalar("SELECT COALESCE((SELECT value FROM sequences WHERE name = ?), 1)")
+                .bind(&sq)
+                .fetch_one(&self.pool)
+                .await
+                .expect("Failed to fetch the current sequence value");
+        val as u64
     }
 
     async fn sequence_next_value(&self, sq: String) -> u64 {
-        self.ensure_sequence_exists(sq.clone()).await;
-
-        // SQLite doesn't support RETURNING in UPDATE until version 3.35.0
-        // So we'll do it in a transaction for atomicity
         let mut tx = self
             .pool
             .begin()
             .await
             .expect("Failed to begin transaction");
 
-        sqlx::query("UPDATE sequences SET value = value + 1 WHERE name = ?")
-            .bind(&sq)
-            .execute(&mut *tx)
-            .await
-            .expect("Failed to increment sequence");
+        sqlx::query(
+            "INSERT INTO sequences (name, value) VALUES (?, 2)
+             ON CONFLICT (name) DO UPDATE SET value = sequences.value + 1",
+        )
+        .bind(&sq)
+        .execute(&mut *tx)
+        .await
+        .expect("Failed to upsert sequence");
 
         let next_val: i64 = sqlx::query_scalar("SELECT value FROM sequences WHERE name = ?")
-            .bind(sq)
+            .bind(&sq)
             .fetch_one(&mut *tx)
             .await
             .expect("Failed to fetch the next sequence value");
@@ -1563,7 +1506,6 @@ impl UniqueAdapter for SqliteAdapter {
     }
 
     async fn delete_unique_hashes(&self, hashes: Vec<String>) -> Result<(), Error> {
-        let pool = self.pool.clone();
         let placeholders = hashes.iter().map(|_| "?").collect::<Vec<_>>().join(",");
 
         let sql = format!(
@@ -1577,7 +1519,7 @@ impl UniqueAdapter for SqliteAdapter {
         }
 
         query
-            .execute(&pool)
+            .execute(&self.pool)
             .await
             .map_err(|e| Error::Storage(e.to_string()))?;
 

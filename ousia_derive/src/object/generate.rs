@@ -795,6 +795,7 @@ pub fn generate_object_impl(input: &DeriveInput) -> Result<TokenStream> {
             }
         }
 
+        #[derive(Debug)]
         pub struct #indexes_struct_name {
             pub created_at: #ousia::query::IndexField,
             pub updated_at: #ousia::query::IndexField,
