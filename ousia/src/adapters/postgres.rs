@@ -32,16 +32,15 @@ use crate::{
 ///     created_at TIMESTAMPTZ NOT NULL,
 ///     updated_at TIMESTAMPTZ NOT NULL,
 ///     data JSONB NOT NULL,
-///     index_meta JSONB NOT NULL,
-///     CONSTRAINT fk_owner FOREIGN KEY (owner) REFERENCES objects(id) ON DELETE CASCADE
+///     index_meta JSONB NOT NULL
 /// );
 ///
-/// CREATE INDEX idx_objects_type_owner ON objects(type, owner);
-/// CREATE INDEX idx_objects_owner ON objects(owner);
-/// CREATE INDEX idx_objects_created_at ON objects(created_at);
-/// CREATE INDEX idx_objects_updated_at ON objects(updated_at);
-///
-/// -- GIN index for flexible JSONB querying
+/// -- type is always bound; owner on scoped queries; id DESC for default cursor pagination
+/// CREATE INDEX idx_objects_type_owner ON objects(type, owner, id DESC);
+/// -- composite date indexes: planner uses these when user sorts by created_at / updated_at
+/// CREATE INDEX idx_objects_type_owner_created ON objects(type, owner, created_at DESC);
+/// CREATE INDEX idx_objects_type_owner_updated ON objects(type, owner, updated_at DESC);
+/// -- GIN index for index_meta search/filter operations
 /// CREATE INDEX idx_objects_index_meta ON public.objects USING GIN (index_meta);
 /// ```
 pub struct PostgresAdapter {
@@ -90,7 +89,9 @@ impl PostgresAdapter {
 
         sqlx::query(
             r#"
-            CREATE INDEX IF NOT EXISTS idx_objects_type_owner ON objects(type, owner);
+            CREATE INDEX IF NOT EXISTS idx_objects_type_owner
+                ON objects(type, owner, id DESC)
+                INCLUDE (created_at, updated_at);
             "#,
         )
         .execute(&mut *tx)
@@ -99,7 +100,9 @@ impl PostgresAdapter {
 
         sqlx::query(
             r#"
-            CREATE INDEX IF NOT EXISTS idx_objects_owner ON objects(owner);
+            CREATE INDEX IF NOT EXISTS idx_objects_type_owner_created
+                ON objects(type, owner, created_at DESC)
+                INCLUDE (id, updated_at);
             "#,
         )
         .execute(&mut *tx)
@@ -108,7 +111,9 @@ impl PostgresAdapter {
 
         sqlx::query(
             r#"
-            CREATE INDEX IF NOT EXISTS idx_objects_created_at ON objects(created_at);
+            CREATE INDEX IF NOT EXISTS idx_objects_type_owner_updated
+                ON objects(type, owner, updated_at DESC)
+                INCLUDE (id, created_at);
             "#,
         )
         .execute(&mut *tx)
@@ -117,16 +122,8 @@ impl PostgresAdapter {
 
         sqlx::query(
             r#"
-            CREATE INDEX IF NOT EXISTS idx_objects_updated_at ON objects(updated_at);
-            "#,
-        )
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| Error::Storage(e.to_string()))?;
-
-        sqlx::query(
-            r#"
-            CREATE INDEX IF NOT EXISTS idx_objects_index_meta ON public.objects USING GIN (index_meta);
+            CREATE INDEX IF NOT EXISTS idx_objects_index_meta
+                ON public.objects USING GIN (index_meta jsonb_path_ops);
             "#,
         )
         .execute(&mut *tx)
@@ -177,7 +174,8 @@ impl PostgresAdapter {
 
         sqlx::query(
             r#"
-            CREATE INDEX IF NOT EXISTS idx_edges_index_meta ON public.edges USING GIN (index_meta);
+            CREATE INDEX IF NOT EXISTS idx_edges_index_meta
+                ON public.edges USING GIN (index_meta jsonb_path_ops);
             "#,
         )
         .execute(&mut *tx)
@@ -318,58 +316,103 @@ impl PostgresAdapter {
         })
     }
 
+    /// Wraps a value as `{"field": value}` for use with the `@>` GIN operator.
+    fn make_eq_json(field: &str, val: serde_json::Value) -> serde_json::Value {
+        let mut map = serde_json::Map::with_capacity(1);
+        map.insert(field.to_string(), val);
+        serde_json::Value::Object(map)
+    }
+
+    fn inner_to_json(elem: &IndexValueInner) -> serde_json::Value {
+        match elem {
+            IndexValueInner::String(s) => serde_json::Value::String(s.clone()),
+            IndexValueInner::Int(i) => serde_json::Value::Number(serde_json::Number::from(*i)),
+            IndexValueInner::Float(f) => serde_json::Number::from_f64(*f)
+                .map(serde_json::Value::Number)
+                .unwrap_or(serde_json::Value::Null),
+        }
+    }
+
+    fn index_value_to_json(value: &IndexValue) -> serde_json::Value {
+        match value {
+            IndexValue::String(s) => serde_json::Value::String(s.clone()),
+            IndexValue::Int(i) => serde_json::Value::Number(serde_json::Number::from(*i)),
+            IndexValue::Float(f) => serde_json::Number::from_f64(*f)
+                .map(serde_json::Value::Number)
+                .unwrap_or(serde_json::Value::Null),
+            IndexValue::Bool(b) => serde_json::Value::Bool(*b),
+            _ => unreachable!("UUID/Timestamp/Array handled in extraction path"),
+        }
+    }
+
     fn build_filter_condition(
         alias: &str,
         filter: &QueryFilter,
         param_idx: &mut usize,
     ) -> Option<(String, &'static str)> {
-        let index_type = Self::index_type_str(&filter.value);
-
-        let crate::query::QueryMode::Search(ref query_search) = filter.mode else {
-            return None; // Sort entries are skipped
+        let crate::query::QueryMode::Search(ref qs) = filter.mode else {
+            return None;
         };
 
-        let comparison = match query_search.comparison {
-            crate::query::Comparison::Equal => "=",
-            crate::query::Comparison::NotEqual => "<>",
-            crate::query::Comparison::GreaterThan => ">",
-            crate::query::Comparison::LessThan => "<",
-            crate::query::Comparison::GreaterThanOrEqual => ">=",
-            crate::query::Comparison::LessThanOrEqual => "<=",
-            crate::query::Comparison::BeginsWith => "ILIKE",
-            crate::query::Comparison::Contains => {
-                if matches!(filter.value, IndexValue::Array(_)) {
-                    "?|"
-                } else {
-                    "ILIKE"
-                }
-            }
-            crate::query::Comparison::ContainsAll => {
-                if matches!(filter.value, IndexValue::Array(_)) {
-                    "?&"
-                } else {
-                    "ILIKE"
-                }
-            }
-        };
-
-        let condition = if matches!(filter.value, IndexValue::Array(_)) {
-            format!(
-                "{}.index_meta->'{}' {} ${}",
-                alias, filter.field.name, comparison, param_idx
-            )
-        } else {
-            format!(
-                "({}.index_meta->>'{}')::{} {} ${}",
-                alias, filter.field.name, index_type, comparison, param_idx
-            )
-        };
-
-        let operator = match query_search.operator {
+        let operator = match qs.operator {
             crate::query::Operator::And => "AND",
             _ => "OR",
         };
 
+        use crate::query::Comparison::*;
+
+        // GIN jsonb_path_ops @> path: hits the index for equality and array containment
+        match (&qs.comparison, &filter.value) {
+            // Scalar equality for types with safe JSON value semantics
+            (Equal, IndexValue::String(_) | IndexValue::Int(_) | IndexValue::Float(_) | IndexValue::Bool(_)) => {
+                let cond = format!("{}.index_meta @> ${}", alias, param_idx);
+                *param_idx += 1;
+                return Some((cond, operator));
+            }
+            // ContainsAll array: single @> with the full array
+            (ContainsAll, IndexValue::Array(arr)) if !arr.is_empty() => {
+                let cond = format!("{}.index_meta @> ${}", alias, param_idx);
+                *param_idx += 1;
+                return Some((cond, operator));
+            }
+            // Empty array filters: skip (vacuously true/false — no useful predicate)
+            (Contains | ContainsAll, IndexValue::Array(arr)) if arr.is_empty() => {
+                return None;
+            }
+            // Contains array: one @> per element, joined with OR
+            (Contains, IndexValue::Array(arr)) => {
+                let conds: Vec<String> = (0..arr.len())
+                    .map(|i| format!("{}.index_meta @> ${}", alias, *param_idx + i))
+                    .collect();
+                *param_idx += arr.len();
+                let combined = if conds.len() == 1 {
+                    conds.into_iter().next().unwrap()
+                } else {
+                    format!("({})", conds.join(" OR "))
+                };
+                return Some((combined, operator));
+            }
+            _ => {}
+        }
+
+        // Extraction path: range ops, ILIKE, UUID/timestamp equality
+        let index_type = Self::index_type_str(&filter.value);
+        let comparison = match qs.comparison {
+            Equal => "=",
+            NotEqual => "<>",
+            GreaterThan => ">",
+            LessThan => "<",
+            GreaterThanOrEqual => ">=",
+            LessThanOrEqual => "<=",
+            BeginsWith => "ILIKE",
+            Contains => "ILIKE",
+            ContainsAll => "ILIKE",
+        };
+
+        let condition = format!(
+            "({}.index_meta->>'{}')::{} {} ${}",
+            alias, filter.field.name, index_type, comparison, param_idx
+        );
         *param_idx += 1;
         Some((condition, operator))
     }
@@ -501,6 +544,10 @@ impl PostgresAdapter {
                 } else {
                     "DESC"
                 };
+                // Native columns: use direct column reference so composite indexes are hit
+                if matches!(s.field.name, "created_at" | "updated_at") {
+                    return format!("{}{} {}", prefix, s.field.name, direction);
+                }
                 let index_type = match &s.value {
                     IndexValue::String(_) => "text",
                     IndexValue::Int(_) => "bigint",
@@ -572,46 +619,40 @@ impl PostgresAdapter {
         mut query: PgQuery<'a, Postgres, PgArguments>,
         filters: &'a Vec<QueryFilter>,
     ) -> PgQuery<'a, Postgres, PgArguments> {
+        use crate::query::Comparison::*;
         for filter in filters.iter().filter(|f| f.mode.as_search().is_some()) {
-            query = match &filter.value {
-                IndexValue::String(s) => {
-                    use crate::query::Comparison::*;
-                    match filter.mode.as_search().unwrap().comparison {
+            let search = filter.mode.as_search().unwrap();
+            match (&search.comparison, &filter.value) {
+                // GIN @> binds: {"field": value}
+                (Equal, IndexValue::String(_) | IndexValue::Int(_) | IndexValue::Float(_) | IndexValue::Bool(_)) => {
+                    query = query.bind(Self::make_eq_json(filter.field.name, Self::index_value_to_json(&filter.value)));
+                }
+                (ContainsAll, IndexValue::Array(arr)) if !arr.is_empty() => {
+                    let elements: Vec<serde_json::Value> = arr.iter().map(Self::inner_to_json).collect();
+                    query = query.bind(Self::make_eq_json(filter.field.name, serde_json::Value::Array(elements)));
+                }
+                (Contains, IndexValue::Array(arr)) if !arr.is_empty() => {
+                    for elem in arr.iter() {
+                        let val = Self::inner_to_json(elem);
+                        query = query.bind(Self::make_eq_json(filter.field.name, serde_json::Value::Array(vec![val])));
+                    }
+                }
+                // Extraction-based binds: range ops, ILIKE, UUID, timestamp
+                (_, IndexValue::String(s)) => {
+                    query = match search.comparison {
                         BeginsWith => query.bind(format!("{}%", s)),
                         Contains => query.bind(format!("%{}%", s)),
                         _ => query.bind(s),
-                    }
+                    };
                 }
-                IndexValue::Int(i) => query.bind(i),
-                IndexValue::Float(f) => query.bind(f),
-                IndexValue::Bool(b) => query.bind(b),
-                IndexValue::Timestamp(t) => query.bind(t),
-                IndexValue::Uuid(uid) => query.bind(uid),
-                IndexValue::Array(arr) => {
-                    // Determine array element type from first element
-                    if let Some(first) = arr.first() {
-                        match first {
-                            IndexValueInner::String(_) => query.bind(
-                                arr.iter()
-                                    .map(|s| s.as_string().unwrap_or_default().to_string())
-                                    .collect::<Vec<String>>(),
-                            ),
-                            IndexValueInner::Int(_) => query.bind(
-                                arr.iter()
-                                    .map(|s| s.as_int().unwrap_or_default().to_string())
-                                    .collect::<Vec<String>>(),
-                            ),
-                            IndexValueInner::Float(_) => query.bind(
-                                arr.iter()
-                                    .map(|s| s.as_float().unwrap_or_default().to_string())
-                                    .collect::<Vec<String>>(),
-                            ),
-                        }
-                    } else {
-                        query.bind(vec![] as Vec<String>)
-                    }
-                }
-            };
+                (_, IndexValue::Int(i)) => { query = query.bind(i); }
+                (_, IndexValue::Float(f)) => { query = query.bind(f); }
+                (_, IndexValue::Bool(b)) => { query = query.bind(b); }
+                (_, IndexValue::Timestamp(t)) => { query = query.bind(t); }
+                (_, IndexValue::Uuid(uid)) => { query = query.bind(uid); }
+                // Empty arrays and remaining array cases: condition was skipped, no bind
+                (_, IndexValue::Array(_)) => {}
+            }
         }
         query
     }
@@ -620,46 +661,39 @@ impl PostgresAdapter {
         mut query: QueryScalar<'a, Postgres, O, PgArguments>,
         filters: &'a Vec<QueryFilter>,
     ) -> QueryScalar<'a, Postgres, O, PgArguments> {
+        use crate::query::Comparison::*;
         for filter in filters.iter().filter(|f| f.mode.as_search().is_some()) {
-            query = match &filter.value {
-                IndexValue::String(s) => {
-                    use crate::query::Comparison::*;
-                    match filter.mode.as_search().unwrap().comparison {
+            let search = filter.mode.as_search().unwrap();
+            match (&search.comparison, &filter.value) {
+                // GIN @> binds: {"field": value}
+                (Equal, IndexValue::String(_) | IndexValue::Int(_) | IndexValue::Float(_) | IndexValue::Bool(_)) => {
+                    query = query.bind(Self::make_eq_json(filter.field.name, Self::index_value_to_json(&filter.value)));
+                }
+                (ContainsAll, IndexValue::Array(arr)) if !arr.is_empty() => {
+                    let elements: Vec<serde_json::Value> = arr.iter().map(Self::inner_to_json).collect();
+                    query = query.bind(Self::make_eq_json(filter.field.name, serde_json::Value::Array(elements)));
+                }
+                (Contains, IndexValue::Array(arr)) if !arr.is_empty() => {
+                    for elem in arr.iter() {
+                        let val = Self::inner_to_json(elem);
+                        query = query.bind(Self::make_eq_json(filter.field.name, serde_json::Value::Array(vec![val])));
+                    }
+                }
+                // Extraction-based binds: range ops, ILIKE, UUID, timestamp
+                (_, IndexValue::String(s)) => {
+                    query = match search.comparison {
                         BeginsWith => query.bind(format!("{}%", s)),
                         Contains => query.bind(format!("%{}%", s)),
                         _ => query.bind(s),
-                    }
+                    };
                 }
-                IndexValue::Int(i) => query.bind(i),
-                IndexValue::Float(f) => query.bind(f),
-                IndexValue::Bool(b) => query.bind(b),
-                IndexValue::Timestamp(t) => query.bind(t),
-                IndexValue::Uuid(uid) => query.bind(uid),
-                IndexValue::Array(arr) => {
-                    // Determine array element type from first element
-                    if let Some(first) = arr.first() {
-                        match first {
-                            IndexValueInner::String(_) => query.bind(
-                                arr.iter()
-                                    .map(|s| s.as_string().unwrap_or_default().to_string())
-                                    .collect::<Vec<String>>(),
-                            ),
-                            IndexValueInner::Int(_) => query.bind(
-                                arr.iter()
-                                    .map(|s| s.as_int().unwrap_or_default().to_string())
-                                    .collect::<Vec<String>>(),
-                            ),
-                            IndexValueInner::Float(_) => query.bind(
-                                arr.iter()
-                                    .map(|s| s.as_float().unwrap_or_default().to_string())
-                                    .collect::<Vec<String>>(),
-                            ),
-                        }
-                    } else {
-                        query.bind(vec![] as Vec<String>)
-                    }
-                }
-            };
+                (_, IndexValue::Int(i)) => { query = query.bind(i); }
+                (_, IndexValue::Float(f)) => { query = query.bind(f); }
+                (_, IndexValue::Bool(b)) => { query = query.bind(b); }
+                (_, IndexValue::Timestamp(t)) => { query = query.bind(t); }
+                (_, IndexValue::Uuid(uid)) => { query = query.bind(uid); }
+                (_, IndexValue::Array(_)) => {}
+            }
         }
         query
     }

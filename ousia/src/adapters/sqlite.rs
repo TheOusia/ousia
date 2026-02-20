@@ -28,10 +28,9 @@ use crate::{
 ///     index_meta TEXT NOT NULL
 /// );
 ///
-/// CREATE INDEX idx_objects_type_owner ON objects(type, owner);
-/// CREATE INDEX idx_objects_owner ON objects(owner);
-/// CREATE INDEX idx_objects_created_at ON objects(created_at);
-/// CREATE INDEX idx_objects_updated_at ON objects(updated_at);
+/// CREATE INDEX idx_objects_type_owner ON objects(type, owner, id DESC);
+/// CREATE INDEX idx_objects_type_owner_created ON objects(type, owner, created_at DESC);
+/// CREATE INDEX idx_objects_type_owner_updated ON objects(type, owner, updated_at DESC);
 /// ```
 pub struct SqliteAdapter {
     pub(crate) pool: SqlitePool,
@@ -92,7 +91,7 @@ impl SqliteAdapter {
 
         sqlx::query(
             r#"
-            CREATE INDEX IF NOT EXISTS idx_objects_type_owner ON objects(type, owner)
+            CREATE INDEX IF NOT EXISTS idx_objects_type_owner ON objects(type, owner, id DESC)
             "#,
         )
         .execute(&mut *tx)
@@ -101,7 +100,7 @@ impl SqliteAdapter {
 
         sqlx::query(
             r#"
-            CREATE INDEX IF NOT EXISTS idx_objects_owner ON objects(owner)
+            CREATE INDEX IF NOT EXISTS idx_objects_type_owner_created ON objects(type, owner, created_at DESC)
             "#,
         )
         .execute(&mut *tx)
@@ -110,16 +109,7 @@ impl SqliteAdapter {
 
         sqlx::query(
             r#"
-            CREATE INDEX IF NOT EXISTS idx_objects_created_at ON objects(created_at)
-            "#,
-        )
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| Error::Storage(e.to_string()))?;
-
-        sqlx::query(
-            r#"
-            CREATE INDEX IF NOT EXISTS idx_objects_updated_at ON objects(updated_at)
+            CREATE INDEX IF NOT EXISTS idx_objects_type_owner_updated ON objects(type, owner, updated_at DESC)
             "#,
         )
         .execute(&mut *tx)
@@ -450,6 +440,10 @@ impl SqliteAdapter {
                 } else {
                     "DESC"
                 };
+                // Native columns: use direct column reference so composite indexes are hit
+                if matches!(s.field.name, "created_at" | "updated_at") {
+                    return format!("{}{} {}", prefix, s.field.name, dir);
+                }
                 format!(
                     "json_extract({}index_meta, '$.{}') {}",
                     prefix, s.field.name, dir

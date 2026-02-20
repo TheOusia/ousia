@@ -82,7 +82,9 @@ impl CockroachAdapter {
 
         sqlx::query(
             r#"
-            CREATE INDEX IF NOT EXISTS idx_objects_type_owner ON objects(type, owner);
+            CREATE INDEX IF NOT EXISTS idx_objects_type_owner
+                ON objects(type, owner, id DESC)
+                STORING (created_at, updated_at);
             "#,
         )
         .execute(&mut *tx)
@@ -91,7 +93,9 @@ impl CockroachAdapter {
 
         sqlx::query(
             r#"
-            CREATE INDEX IF NOT EXISTS idx_objects_owner ON objects(owner);
+            CREATE INDEX IF NOT EXISTS idx_objects_type_owner_created
+                ON objects(type, owner, created_at DESC)
+                STORING (id, updated_at);
             "#,
         )
         .execute(&mut *tx)
@@ -100,16 +104,9 @@ impl CockroachAdapter {
 
         sqlx::query(
             r#"
-            CREATE INDEX IF NOT EXISTS idx_objects_created_at ON objects(created_at);
-            "#,
-        )
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| Error::Storage(e.to_string()))?;
-
-        sqlx::query(
-            r#"
-            CREATE INDEX IF NOT EXISTS idx_objects_updated_at ON objects(updated_at);
+            CREATE INDEX IF NOT EXISTS idx_objects_type_owner_updated
+                ON objects(type, owner, updated_at DESC)
+                STORING (id, created_at);
             "#,
         )
         .execute(&mut *tx)
@@ -287,53 +284,98 @@ impl CockroachAdapter {
         }
     }
 
+    fn make_eq_json(field: &str, val: serde_json::Value) -> serde_json::Value {
+        let mut map = serde_json::Map::with_capacity(1);
+        map.insert(field.to_string(), val);
+        serde_json::Value::Object(map)
+    }
+
+    fn inner_to_json(elem: &IndexValueInner) -> serde_json::Value {
+        match elem {
+            IndexValueInner::String(s) => serde_json::Value::String(s.clone()),
+            IndexValueInner::Int(i) => serde_json::Value::Number(serde_json::Number::from(*i)),
+            IndexValueInner::Float(f) => serde_json::Number::from_f64(*f)
+                .map(serde_json::Value::Number)
+                .unwrap_or(serde_json::Value::Null),
+        }
+    }
+
+    fn index_value_to_json(value: &IndexValue) -> serde_json::Value {
+        match value {
+            IndexValue::String(s) => serde_json::Value::String(s.clone()),
+            IndexValue::Int(i) => serde_json::Value::Number(serde_json::Number::from(*i)),
+            IndexValue::Float(f) => serde_json::Number::from_f64(*f)
+                .map(serde_json::Value::Number)
+                .unwrap_or(serde_json::Value::Null),
+            IndexValue::Bool(b) => serde_json::Value::Bool(*b),
+            _ => unreachable!("UUID/Timestamp/Array handled in extraction path"),
+        }
+    }
+
     fn build_filter_condition(
         alias: &str,
         filter: &QueryFilter,
         param_idx: &mut usize,
     ) -> Option<(String, &'static str)> {
-        let index_type = Self::index_type_str(&filter.value);
         let crate::query::QueryMode::Search(ref qs) = filter.mode else {
             return None;
         };
-        let comparison = match qs.comparison {
-            crate::query::Comparison::Equal => "=",
-            crate::query::Comparison::NotEqual => "<>",
-            crate::query::Comparison::GreaterThan => ">",
-            crate::query::Comparison::LessThan => "<",
-            crate::query::Comparison::GreaterThanOrEqual => ">=",
-            crate::query::Comparison::LessThanOrEqual => "<=",
-            crate::query::Comparison::BeginsWith => "ILIKE",
-            crate::query::Comparison::Contains => {
-                if matches!(filter.value, IndexValue::Array(_)) {
-                    "?|"
-                } else {
-                    "ILIKE"
-                }
-            }
-            crate::query::Comparison::ContainsAll => {
-                if matches!(filter.value, IndexValue::Array(_)) {
-                    "?&"
-                } else {
-                    "ILIKE"
-                }
-            }
-        };
-        let condition = if matches!(filter.value, IndexValue::Array(_)) {
-            format!(
-                "{}.index_meta->'{}' {} ${}",
-                alias, filter.field.name, comparison, param_idx
-            )
-        } else {
-            format!(
-                "({}.index_meta->>'{}')::{} {} ${}",
-                alias, filter.field.name, index_type, comparison, param_idx
-            )
-        };
+
         let operator = match qs.operator {
             crate::query::Operator::And => "AND",
             _ => "OR",
         };
+
+        use crate::query::Comparison::*;
+
+        // INVERTED INDEX @> path
+        match (&qs.comparison, &filter.value) {
+            (Equal, IndexValue::String(_) | IndexValue::Int(_) | IndexValue::Float(_) | IndexValue::Bool(_)) => {
+                let cond = format!("{}.index_meta @> ${}", alias, param_idx);
+                *param_idx += 1;
+                return Some((cond, operator));
+            }
+            (ContainsAll, IndexValue::Array(arr)) if !arr.is_empty() => {
+                let cond = format!("{}.index_meta @> ${}", alias, param_idx);
+                *param_idx += 1;
+                return Some((cond, operator));
+            }
+            (Contains | ContainsAll, IndexValue::Array(arr)) if arr.is_empty() => {
+                return None;
+            }
+            (Contains, IndexValue::Array(arr)) => {
+                let conds: Vec<String> = (0..arr.len())
+                    .map(|i| format!("{}.index_meta @> ${}", alias, *param_idx + i))
+                    .collect();
+                *param_idx += arr.len();
+                let combined = if conds.len() == 1 {
+                    conds.into_iter().next().unwrap()
+                } else {
+                    format!("({})", conds.join(" OR "))
+                };
+                return Some((combined, operator));
+            }
+            _ => {}
+        }
+
+        // Extraction path: range ops, ILIKE, UUID/timestamp equality
+        let index_type = Self::index_type_str(&filter.value);
+        let comparison = match qs.comparison {
+            Equal => "=",
+            NotEqual => "<>",
+            GreaterThan => ">",
+            LessThan => "<",
+            GreaterThanOrEqual => ">=",
+            LessThanOrEqual => "<=",
+            BeginsWith => "ILIKE",
+            Contains => "ILIKE",
+            ContainsAll => "ILIKE",
+        };
+
+        let condition = format!(
+            "({}.index_meta->>'{}')::{} {} ${}",
+            alias, filter.field.name, index_type, comparison, param_idx
+        );
         *param_idx += 1;
         Some((condition, operator))
     }
@@ -437,6 +479,10 @@ impl CockroachAdapter {
                 } else {
                     "DESC"
                 };
+                // Native columns: use direct column reference so composite indexes are hit
+                if matches!(s.field.name, "created_at" | "updated_at") {
+                    return format!("{}{} {}", prefix, s.field.name, dir);
+                }
                 let t = match &s.value {
                     IndexValue::String(_) => "text",
                     IndexValue::Int(_) => "bigint",
@@ -504,46 +550,37 @@ impl CockroachAdapter {
         mut query: PgQuery<'a, Postgres, PgArguments>,
         filters: &'a Vec<QueryFilter>,
     ) -> PgQuery<'a, Postgres, PgArguments> {
+        use crate::query::Comparison::*;
         for filter in filters.iter().filter(|f| f.mode.as_search().is_some()) {
-            query = match &filter.value {
-                IndexValue::String(s) => {
-                    use crate::query::Comparison::*;
-                    match filter.mode.as_search().unwrap().comparison {
+            let search = filter.mode.as_search().unwrap();
+            match (&search.comparison, &filter.value) {
+                (Equal, IndexValue::String(_) | IndexValue::Int(_) | IndexValue::Float(_) | IndexValue::Bool(_)) => {
+                    query = query.bind(Self::make_eq_json(filter.field.name, Self::index_value_to_json(&filter.value)));
+                }
+                (ContainsAll, IndexValue::Array(arr)) if !arr.is_empty() => {
+                    let elements: Vec<serde_json::Value> = arr.iter().map(Self::inner_to_json).collect();
+                    query = query.bind(Self::make_eq_json(filter.field.name, serde_json::Value::Array(elements)));
+                }
+                (Contains, IndexValue::Array(arr)) if !arr.is_empty() => {
+                    for elem in arr.iter() {
+                        let val = Self::inner_to_json(elem);
+                        query = query.bind(Self::make_eq_json(filter.field.name, serde_json::Value::Array(vec![val])));
+                    }
+                }
+                (_, IndexValue::String(s)) => {
+                    query = match search.comparison {
                         BeginsWith => query.bind(format!("{}%", s)),
                         Contains => query.bind(format!("%{}%", s)),
                         _ => query.bind(s),
-                    }
+                    };
                 }
-                IndexValue::Int(i) => query.bind(i),
-                IndexValue::Float(f) => query.bind(f),
-                IndexValue::Bool(b) => query.bind(b),
-                IndexValue::Timestamp(t) => query.bind(t),
-                IndexValue::Uuid(uid) => query.bind(uid),
-                IndexValue::Array(arr) => {
-                    // Determine array element type from first element
-                    if let Some(first) = arr.first() {
-                        match first {
-                            IndexValueInner::String(_) => query.bind(
-                                arr.iter()
-                                    .map(|s| s.as_string().unwrap_or_default().to_string())
-                                    .collect::<Vec<String>>(),
-                            ),
-                            IndexValueInner::Int(_) => query.bind(
-                                arr.iter()
-                                    .map(|s| s.as_int().unwrap_or_default().to_string())
-                                    .collect::<Vec<String>>(),
-                            ),
-                            IndexValueInner::Float(_) => query.bind(
-                                arr.iter()
-                                    .map(|s| s.as_float().unwrap_or_default().to_string())
-                                    .collect::<Vec<String>>(),
-                            ),
-                        }
-                    } else {
-                        query.bind(vec![] as Vec<String>)
-                    }
-                }
-            };
+                (_, IndexValue::Int(i)) => { query = query.bind(i); }
+                (_, IndexValue::Float(f)) => { query = query.bind(f); }
+                (_, IndexValue::Bool(b)) => { query = query.bind(b); }
+                (_, IndexValue::Timestamp(t)) => { query = query.bind(t); }
+                (_, IndexValue::Uuid(uid)) => { query = query.bind(uid); }
+                (_, IndexValue::Array(_)) => {}
+            }
         }
         query
     }
@@ -552,46 +589,37 @@ impl CockroachAdapter {
         mut query: QueryScalar<'a, Postgres, O, PgArguments>,
         filters: &'a Vec<QueryFilter>,
     ) -> QueryScalar<'a, Postgres, O, PgArguments> {
+        use crate::query::Comparison::*;
         for filter in filters.iter().filter(|f| f.mode.as_search().is_some()) {
-            query = match &filter.value {
-                IndexValue::String(s) => {
-                    use crate::query::Comparison::*;
-                    match filter.mode.as_search().unwrap().comparison {
+            let search = filter.mode.as_search().unwrap();
+            match (&search.comparison, &filter.value) {
+                (Equal, IndexValue::String(_) | IndexValue::Int(_) | IndexValue::Float(_) | IndexValue::Bool(_)) => {
+                    query = query.bind(Self::make_eq_json(filter.field.name, Self::index_value_to_json(&filter.value)));
+                }
+                (ContainsAll, IndexValue::Array(arr)) if !arr.is_empty() => {
+                    let elements: Vec<serde_json::Value> = arr.iter().map(Self::inner_to_json).collect();
+                    query = query.bind(Self::make_eq_json(filter.field.name, serde_json::Value::Array(elements)));
+                }
+                (Contains, IndexValue::Array(arr)) if !arr.is_empty() => {
+                    for elem in arr.iter() {
+                        let val = Self::inner_to_json(elem);
+                        query = query.bind(Self::make_eq_json(filter.field.name, serde_json::Value::Array(vec![val])));
+                    }
+                }
+                (_, IndexValue::String(s)) => {
+                    query = match search.comparison {
                         BeginsWith => query.bind(format!("{}%", s)),
                         Contains => query.bind(format!("%{}%", s)),
                         _ => query.bind(s),
-                    }
+                    };
                 }
-                IndexValue::Int(i) => query.bind(i),
-                IndexValue::Float(f) => query.bind(f),
-                IndexValue::Bool(b) => query.bind(b),
-                IndexValue::Timestamp(t) => query.bind(t),
-                IndexValue::Uuid(uid) => query.bind(uid),
-                IndexValue::Array(arr) => {
-                    // Determine array element type from first element
-                    if let Some(first) = arr.first() {
-                        match first {
-                            IndexValueInner::String(_) => query.bind(
-                                arr.iter()
-                                    .map(|s| s.as_string().unwrap_or_default().to_string())
-                                    .collect::<Vec<String>>(),
-                            ),
-                            IndexValueInner::Int(_) => query.bind(
-                                arr.iter()
-                                    .map(|s| s.as_int().unwrap_or_default().to_string())
-                                    .collect::<Vec<String>>(),
-                            ),
-                            IndexValueInner::Float(_) => query.bind(
-                                arr.iter()
-                                    .map(|s| s.as_float().unwrap_or_default().to_string())
-                                    .collect::<Vec<String>>(),
-                            ),
-                        }
-                    } else {
-                        query.bind(vec![] as Vec<String>)
-                    }
-                }
-            };
+                (_, IndexValue::Int(i)) => { query = query.bind(i); }
+                (_, IndexValue::Float(f)) => { query = query.bind(f); }
+                (_, IndexValue::Bool(b)) => { query = query.bind(b); }
+                (_, IndexValue::Timestamp(t)) => { query = query.bind(t); }
+                (_, IndexValue::Uuid(uid)) => { query = query.bind(uid); }
+                (_, IndexValue::Array(_)) => {}
+            }
         }
         query
     }
