@@ -408,6 +408,48 @@ async fn test_engine_query() {
 }
 
 #[tokio::test]
+async fn test_engine_query_sort() {
+    let (_resource, pool) = setup_test_db().await;
+    let adapter = PostgresAdapter::from_pool(pool);
+    adapter.init_schema().await.unwrap();
+
+    let engine = Engine::new(Box::new(adapter));
+
+    // Create multiple users
+    let mut alice = User::default();
+    alice.display_name = "Alice".to_string();
+    alice.username = "alice".to_string();
+    alice.email = "alice@example.com".to_string();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let mut bob = User::default();
+    bob.display_name = "Bob".to_string();
+    bob.username = "bob".to_string();
+    bob.email = "bob@example.com".to_string();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let mut charlie = User::default();
+    charlie.display_name = "Charlie".to_string();
+    charlie.username = "charlie".to_string();
+    charlie.email = "charlie@example.com".to_string();
+
+    engine.create_object(&alice).await.unwrap();
+    engine.create_object(&bob).await.unwrap();
+    engine.create_object(&charlie).await.unwrap();
+
+    // Query by name
+    let users: Vec<User> = engine
+        .query_objects(Query::default().sort_desc(&User::FIELDS.username))
+        .await
+        .unwrap();
+
+    assert_eq!(users.len(), 3);
+    assert_eq!(&users[0].username, "charlie");
+    assert_eq!(&users[1].username, "bob");
+    assert_eq!(&users[2].username, "alice");
+}
+
+#[tokio::test]
 async fn test_engine_ownership() {
     let (_resource, pool) = setup_test_db().await;
     let adapter = PostgresAdapter::from_pool(pool);

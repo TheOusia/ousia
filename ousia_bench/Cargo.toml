@@ -16,10 +16,6 @@ harness = false
 name = "ousia_queries"
 harness = false
 
-[[bench]]
-name = "ousia_views"
-harness = false
-
 [dependencies]
 ousia = { path = "../ousia" }
 chrono = { version = "0.4", features = ["serde"] }

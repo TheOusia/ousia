@@ -95,7 +95,7 @@ impl CockroachAdapter {
             r#"
             CREATE INDEX IF NOT EXISTS idx_objects_type_owner_created
                 ON objects(type, owner, created_at DESC)
-                STORING (id, updated_at);
+                STORING (updated_at);
             "#,
         )
         .execute(&mut *tx)
@@ -106,7 +106,7 @@ impl CockroachAdapter {
             r#"
             CREATE INDEX IF NOT EXISTS idx_objects_type_owner_updated
                 ON objects(type, owner, updated_at DESC)
-                STORING (id, created_at);
+                STORING (created_at);
             "#,
         )
         .execute(&mut *tx)
@@ -166,6 +166,53 @@ impl CockroachAdapter {
         .await
         .map_err(|e| Error::Storage(e.to_string()))?;
 
+        sqlx::query(
+            r#"
+                    CREATE TABLE IF NOT EXISTS unique_constraints (
+                        id UUID NOT NULL,
+                        type TEXT NOT NULL,
+                        key TEXT NOT NULL UNIQUE,
+                        field TEXT NOT NULL,
+                        PRIMARY KEY (type, key)
+                    )
+                    "#,
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| Error::Storage(e.to_string()))?;
+
+        sqlx::query(
+            r#"
+                    CREATE INDEX IF NOT EXISTS idx_unique_id
+                    ON unique_constraints(id)
+                    "#,
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| Error::Storage(e.to_string()))?;
+
+        sqlx::query(
+            r#"
+                    CREATE INDEX IF NOT EXISTS idx_unique_type_key
+                    ON unique_constraints(type, key)
+                    "#,
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| Error::Storage(e.to_string()))?;
+
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS sequences (
+                name TEXT PRIMARY KEY,
+                value BIGINT NOT NULL DEFAULT 1
+            )
+            "#,
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| Error::Storage(e.to_string()))?;
+
         tx.commit()
             .await
             .map_err(|e| Error::Storage(e.to_string()))?;
@@ -179,87 +226,61 @@ impl CockroachAdapter {
         // }
         Ok(())
     }
-
-    async fn ensure_sequence_exists(&self, sq: String) {
-        // Escape double quotes and wrap in quotes
-        let quoted_sq = format!("\"{}\"", sq.replace("\"", "\"\""));
-
-        let sql = format!("CREATE SEQUENCE IF NOT EXISTS {}", quoted_sq);
-
-        let _ = sqlx::query(&sql).execute(&self.pool.clone()).await.unwrap();
-    }
 }
 
 impl CockroachAdapter {
-    fn map_row_to_object_record(row: PgRow) -> Result<ObjectRecord, Error> {
-        let data_json: serde_json::Value = row
-            .try_get("data")
-            .map_err(|e| Error::Deserialize(e.to_string()))?;
-
-        let index_meta_json: serde_json::Value = row
-            .try_get("index_meta")
-            .map_err(|e| Error::Deserialize(e.to_string()))?;
-
-        // Reconstruct meta from separate columns
-
+    fn map_row_to_object_record_slim(row: PgRow) -> Result<ObjectRecord, Error> {
         let type_name = row
             .try_get::<String, _>("type")
             .map_err(|e| Error::Deserialize(e.to_string()))?;
-
         let id = row
             .try_get::<Uuid, _>("id")
             .map_err(|e| Error::Deserialize(e.to_string()))?;
-
         let owner = row
             .try_get::<Uuid, _>("owner")
             .map_err(|e| Error::Deserialize(e.to_string()))?;
-
         let created_at = row
             .try_get("created_at")
             .map_err(|e| Error::Deserialize(e.to_string()))?;
-
         let updated_at = row
             .try_get("updated_at")
             .map_err(|e| Error::Deserialize(e.to_string()))?;
-
+        let data: serde_json::Value = row
+            .try_get("data")
+            .map_err(|e| Error::Deserialize(e.to_string()))?;
         Ok(ObjectRecord {
             id,
-            type_name,
+            type_name: std::borrow::Cow::Owned(type_name),
             owner,
             created_at,
             updated_at,
-            data: data_json,
-            index_meta: index_meta_json,
+            data,
+            index_meta: serde_json::Value::Null,
         })
     }
 
     fn map_row_to_edge_record(row: PgRow) -> Result<EdgeRecord, Error> {
-        let data_json: serde_json::Value = row
-            .try_get("data")
-            .map_err(|e| Error::Deserialize(e.to_string()))?;
-
-        let index_meta_json: serde_json::Value = row
-            .try_get("index_meta")
-            .map_err(|e| Error::Deserialize(e.to_string()))?;
-
         let type_name = row
             .try_get::<String, _>("type")
             .map_err(|e| Error::Deserialize(e.to_string()))?;
-
         let from = row
             .try_get::<Uuid, _>("from")
             .map_err(|e| Error::Deserialize(e.to_string()))?;
-
         let to = row
             .try_get::<Uuid, _>("to")
             .map_err(|e| Error::Deserialize(e.to_string()))?;
-
+        let data: serde_json::Value = row
+            .try_get("data")
+            .map_err(|e| Error::Deserialize(e.to_string()))?;
+        let index_meta: serde_json::Value = row
+            .try_get("index_meta")
+            .map_err(|e| Error::Deserialize(e.to_string()))?;
         Ok(EdgeRecord {
-            type_name,
+            type_name: std::borrow::Cow::Owned(type_name),
             from,
             to,
-            data: data_json,
-            index_meta: index_meta_json,
+            data,
+            index_meta,
         })
     }
 }
@@ -330,7 +351,13 @@ impl CockroachAdapter {
 
         // INVERTED INDEX @> path
         match (&qs.comparison, &filter.value) {
-            (Equal, IndexValue::String(_) | IndexValue::Int(_) | IndexValue::Float(_) | IndexValue::Bool(_)) => {
+            (
+                Equal,
+                IndexValue::String(_)
+                | IndexValue::Int(_)
+                | IndexValue::Float(_)
+                | IndexValue::Bool(_),
+            ) => {
                 let cond = format!("{}.index_meta @> ${}", alias, param_idx);
                 *param_idx += 1;
                 return Some((cond, operator));
@@ -393,7 +420,7 @@ impl CockroachAdapter {
         out
     }
 
-    fn build_object_query_conditions(filters: &Vec<QueryFilter>, cursor: Option<Cursor>) -> String {
+    fn build_object_query_conditions(filters: &[QueryFilter], cursor: Option<Cursor>) -> String {
         let mut conditions: Vec<(String, &str)> = vec![
             ("o.type = $1".to_string(), "AND"),
             ("o.owner = $2".to_string(), "AND"),
@@ -411,7 +438,7 @@ impl CockroachAdapter {
         format!("WHERE {}", Self::join_conditions(&conditions))
     }
     fn build_edge_query_conditions(
-        filters: &Vec<QueryFilter>,
+        filters: &[QueryFilter],
         cursor: Option<Cursor>,
         direction: TraversalDirection,
     ) -> String {
@@ -440,19 +467,15 @@ impl CockroachAdapter {
         format!("WHERE {}", Self::join_conditions(&conditions))
     }
 
-    fn build_order_clause(filters: &Vec<QueryFilter>) -> String {
+    fn build_order_clause(filters: &[QueryFilter]) -> String {
         Self::build_order_clause_aliased(filters, "", false)
     }
 
-    fn build_edge_order_clause(filters: &Vec<QueryFilter>) -> String {
+    fn build_edge_order_clause(filters: &[QueryFilter]) -> String {
         Self::build_order_clause_aliased(filters, "e", true)
     }
 
-    fn build_order_clause_aliased(
-        filters: &Vec<QueryFilter>,
-        alias: &str,
-        is_edge: bool,
-    ) -> String {
+    fn build_order_clause_aliased(filters: &[QueryFilter], alias: &str, is_edge: bool) -> String {
         let prefix = if alias.is_empty() {
             String::new()
         } else {
@@ -500,7 +523,7 @@ impl CockroachAdapter {
     fn build_object_traversal_query_conditions(
         direction: TraversalDirection,
         obj_filters: &[QueryFilter],
-        edge_filters: &Vec<QueryFilter>,
+        edge_filters: &[QueryFilter],
         cursor: Option<Cursor>,
     ) -> String {
         // $1 = object type_name
@@ -548,23 +571,39 @@ impl CockroachAdapter {
 
     fn query_bind_filters<'a>(
         mut query: PgQuery<'a, Postgres, PgArguments>,
-        filters: &'a Vec<QueryFilter>,
+        filters: &'a [QueryFilter],
     ) -> PgQuery<'a, Postgres, PgArguments> {
         use crate::query::Comparison::*;
         for filter in filters.iter().filter(|f| f.mode.as_search().is_some()) {
             let search = filter.mode.as_search().unwrap();
             match (&search.comparison, &filter.value) {
-                (Equal, IndexValue::String(_) | IndexValue::Int(_) | IndexValue::Float(_) | IndexValue::Bool(_)) => {
-                    query = query.bind(Self::make_eq_json(filter.field.name, Self::index_value_to_json(&filter.value)));
+                (
+                    Equal,
+                    IndexValue::String(_)
+                    | IndexValue::Int(_)
+                    | IndexValue::Float(_)
+                    | IndexValue::Bool(_),
+                ) => {
+                    query = query.bind(Self::make_eq_json(
+                        filter.field.name,
+                        Self::index_value_to_json(&filter.value),
+                    ));
                 }
                 (ContainsAll, IndexValue::Array(arr)) if !arr.is_empty() => {
-                    let elements: Vec<serde_json::Value> = arr.iter().map(Self::inner_to_json).collect();
-                    query = query.bind(Self::make_eq_json(filter.field.name, serde_json::Value::Array(elements)));
+                    let elements: Vec<serde_json::Value> =
+                        arr.iter().map(Self::inner_to_json).collect();
+                    query = query.bind(Self::make_eq_json(
+                        filter.field.name,
+                        serde_json::Value::Array(elements),
+                    ));
                 }
                 (Contains, IndexValue::Array(arr)) if !arr.is_empty() => {
                     for elem in arr.iter() {
                         let val = Self::inner_to_json(elem);
-                        query = query.bind(Self::make_eq_json(filter.field.name, serde_json::Value::Array(vec![val])));
+                        query = query.bind(Self::make_eq_json(
+                            filter.field.name,
+                            serde_json::Value::Array(vec![val]),
+                        ));
                     }
                 }
                 (_, IndexValue::String(s)) => {
@@ -574,11 +613,21 @@ impl CockroachAdapter {
                         _ => query.bind(s),
                     };
                 }
-                (_, IndexValue::Int(i)) => { query = query.bind(i); }
-                (_, IndexValue::Float(f)) => { query = query.bind(f); }
-                (_, IndexValue::Bool(b)) => { query = query.bind(b); }
-                (_, IndexValue::Timestamp(t)) => { query = query.bind(t); }
-                (_, IndexValue::Uuid(uid)) => { query = query.bind(uid); }
+                (_, IndexValue::Int(i)) => {
+                    query = query.bind(i);
+                }
+                (_, IndexValue::Float(f)) => {
+                    query = query.bind(f);
+                }
+                (_, IndexValue::Bool(b)) => {
+                    query = query.bind(b);
+                }
+                (_, IndexValue::Timestamp(t)) => {
+                    query = query.bind(t);
+                }
+                (_, IndexValue::Uuid(uid)) => {
+                    query = query.bind(uid);
+                }
                 (_, IndexValue::Array(_)) => {}
             }
         }
@@ -587,23 +636,39 @@ impl CockroachAdapter {
 
     fn query_scalar_bind_filters<'a, O>(
         mut query: QueryScalar<'a, Postgres, O, PgArguments>,
-        filters: &'a Vec<QueryFilter>,
+        filters: &'a [QueryFilter],
     ) -> QueryScalar<'a, Postgres, O, PgArguments> {
         use crate::query::Comparison::*;
         for filter in filters.iter().filter(|f| f.mode.as_search().is_some()) {
             let search = filter.mode.as_search().unwrap();
             match (&search.comparison, &filter.value) {
-                (Equal, IndexValue::String(_) | IndexValue::Int(_) | IndexValue::Float(_) | IndexValue::Bool(_)) => {
-                    query = query.bind(Self::make_eq_json(filter.field.name, Self::index_value_to_json(&filter.value)));
+                (
+                    Equal,
+                    IndexValue::String(_)
+                    | IndexValue::Int(_)
+                    | IndexValue::Float(_)
+                    | IndexValue::Bool(_),
+                ) => {
+                    query = query.bind(Self::make_eq_json(
+                        filter.field.name,
+                        Self::index_value_to_json(&filter.value),
+                    ));
                 }
                 (ContainsAll, IndexValue::Array(arr)) if !arr.is_empty() => {
-                    let elements: Vec<serde_json::Value> = arr.iter().map(Self::inner_to_json).collect();
-                    query = query.bind(Self::make_eq_json(filter.field.name, serde_json::Value::Array(elements)));
+                    let elements: Vec<serde_json::Value> =
+                        arr.iter().map(Self::inner_to_json).collect();
+                    query = query.bind(Self::make_eq_json(
+                        filter.field.name,
+                        serde_json::Value::Array(elements),
+                    ));
                 }
                 (Contains, IndexValue::Array(arr)) if !arr.is_empty() => {
                     for elem in arr.iter() {
                         let val = Self::inner_to_json(elem);
-                        query = query.bind(Self::make_eq_json(filter.field.name, serde_json::Value::Array(vec![val])));
+                        query = query.bind(Self::make_eq_json(
+                            filter.field.name,
+                            serde_json::Value::Array(vec![val]),
+                        ));
                     }
                 }
                 (_, IndexValue::String(s)) => {
@@ -613,11 +678,21 @@ impl CockroachAdapter {
                         _ => query.bind(s),
                     };
                 }
-                (_, IndexValue::Int(i)) => { query = query.bind(i); }
-                (_, IndexValue::Float(f)) => { query = query.bind(f); }
-                (_, IndexValue::Bool(b)) => { query = query.bind(b); }
-                (_, IndexValue::Timestamp(t)) => { query = query.bind(t); }
-                (_, IndexValue::Uuid(uid)) => { query = query.bind(uid); }
+                (_, IndexValue::Int(i)) => {
+                    query = query.bind(i);
+                }
+                (_, IndexValue::Float(f)) => {
+                    query = query.bind(f);
+                }
+                (_, IndexValue::Bool(b)) => {
+                    query = query.bind(b);
+                }
+                (_, IndexValue::Timestamp(t)) => {
+                    query = query.bind(t);
+                }
+                (_, IndexValue::Uuid(uid)) => {
+                    query = query.bind(uid);
+                }
                 (_, IndexValue::Array(_)) => {}
             }
         }
@@ -645,8 +720,7 @@ impl CockroachAdapter {
 
         let mut sql = format!(
             r#"
-            SELECT o.id, o.type, o.owner, o.created_at, o.updated_at,
-                   o.data, o.index_meta
+            SELECT o.id, o.type, o.owner, o.created_at, o.updated_at, o.data
             FROM edges e
             LEFT JOIN objects o ON e."{join_col}" = o.id
             {where_clause}
@@ -664,24 +738,17 @@ impl CockroachAdapter {
             sql.push_str(&format!(" LIMIT {}", limit));
         }
 
-        // Bind in the fixed order that build_object_traversal_query_conditions expects:
-        //   $1 = object type_name
-        //   $2 = edge type_name
-        //   $3 = owner
-        //   $4 = cursor (optional)
-        //   $5+ = filter values (object then edge, matching the WHERE clause order)
         let mut query = sqlx::query(&sql)
             .bind(type_name)
             .bind(edge_type_name)
             .bind(owner);
 
         if let Some(cursor) = plan.cursor {
-            query = query.bind(cursor.last_id); // $3
+            query = query.bind(cursor.last_id);
         }
 
-        let mut combined_filters = filters.to_vec();
-        combined_filters.extend_from_slice(&plan.filters);
-        query = Self::query_bind_filters(query, &combined_filters);
+        query = Self::query_bind_filters(query, filters);
+        query = Self::query_bind_filters(query, &plan.filters);
 
         let rows = query
             .fetch_all(&self.pool)
@@ -690,7 +757,7 @@ impl CockroachAdapter {
 
         Ok(rows
             .into_iter()
-            .filter_map(|row| Self::map_row_to_object_record(row).ok())
+            .filter_map(|row| Self::map_row_to_object_record_slim(row).ok())
             .collect())
     }
 
@@ -734,21 +801,29 @@ impl CockroachAdapter {
 #[async_trait::async_trait]
 impl Adapter for CockroachAdapter {
     async fn insert_object(&self, record: ObjectRecord) -> Result<(), Error> {
-        let pool = self.pool.clone();
+        let ObjectRecord {
+            id,
+            type_name,
+            owner,
+            created_at,
+            updated_at,
+            data,
+            index_meta,
+        } = record;
         let _ = sqlx::query(
             r#"
             INSERT INTO public.objects (id, type, owner, created_at, updated_at, data, index_meta)
             VALUES ($1, $2, $3, $4, $5, $6, $7)
             "#,
         )
-        .bind(record.id)
-        .bind(record.type_name)
-        .bind(record.owner)
-        .bind(record.created_at)
-        .bind(record.updated_at)
-        .bind(record.data)
-        .bind(record.index_meta)
-        .fetch_optional(&pool)
+        .bind(id)
+        .bind(type_name.as_ref())
+        .bind(owner)
+        .bind(created_at)
+        .bind(updated_at)
+        .bind(data)
+        .bind(index_meta)
+        .fetch_optional(&self.pool)
         .await
         .map_err(|err| {
             if err.to_string().contains("unique") {
@@ -765,22 +840,21 @@ impl Adapter for CockroachAdapter {
         type_name: &'static str,
         id: Uuid,
     ) -> Result<Option<ObjectRecord>, Error> {
-        let pool = self.pool.clone();
         let row = sqlx::query(
             r#"
-            SELECT o.id, o.type, o.owner, o.created_at, o.updated_at, o.data, o.index_meta
+            SELECT o.id, o.type, o.owner, o.created_at, o.updated_at, o.data
             FROM objects o
             WHERE id = $1 AND type = $2
             "#,
         )
         .bind(id)
         .bind(type_name)
-        .fetch_optional(&pool)
+        .fetch_optional(&self.pool)
         .await
         .map_err(|err| Error::Storage(err.to_string()))?;
 
         match row {
-            Some(r) => Self::map_row_to_object_record(r).map(|o| Some(o)),
+            Some(r) => Self::map_row_to_object_record_slim(r).map(|o| Some(o)),
             None => Ok(None),
         }
     }
@@ -790,27 +864,25 @@ impl Adapter for CockroachAdapter {
         type_name: &'static str,
         ids: Vec<Uuid>,
     ) -> Result<Vec<ObjectRecord>, Error> {
-        let pool = self.pool.clone();
         let rows = sqlx::query(
             r#"
-            SELECT o.id, o.type, o.owner, o.created_at, o.updated_at, o.data, o.index_meta
+            SELECT o.id, o.type, o.owner, o.created_at, o.updated_at, o.data
             FROM objects o
             WHERE id = ANY($1) AND type = $2
             "#,
         )
         .bind(ids.into_iter().map(|id| id).collect::<Vec<Uuid>>())
         .bind(type_name)
-        .fetch_all(&pool)
+        .fetch_all(&self.pool)
         .await
         .map_err(|err| Error::Storage(err.to_string()))?;
 
         rows.into_iter()
-            .map(Self::map_row_to_object_record)
+            .map(Self::map_row_to_object_record_slim)
             .collect()
     }
 
     async fn update_object(&self, record: ObjectRecord) -> Result<(), Error> {
-        let pool = self.pool.clone();
         sqlx::query(
             r#"
             UPDATE objects
@@ -822,7 +894,7 @@ impl Adapter for CockroachAdapter {
         .bind(record.updated_at)
         .bind(record.data)
         .bind(record.index_meta)
-        .execute(&pool)
+        .execute(&self.pool)
         .await
         .map_err(|err| Error::Storage(err.to_string()))?;
 
@@ -836,13 +908,12 @@ impl Adapter for CockroachAdapter {
         from_owner: Uuid,
         to_owner: Uuid,
     ) -> Result<ObjectRecord, Error> {
-        let pool = self.pool.clone();
         let row = sqlx::query(
             r#"
             UPDATE objects
             SET updated_at = $3, owner = $4
             WHERE id = $1 AND owner = $2 AND type = $5
-            RETURNING *
+            RETURNING id, type, owner, created_at, updated_at, data
             "#,
         )
         .bind(id)
@@ -850,14 +921,14 @@ impl Adapter for CockroachAdapter {
         .bind(Utc::now())
         .bind(to_owner)
         .bind(type_name)
-        .fetch_one(&pool)
+        .fetch_one(&self.pool)
         .await
         .map_err(|err| match err {
             sqlx::Error::RowNotFound => Error::NotFound,
             _ => Error::Storage(err.to_string()),
         })?;
 
-        Self::map_row_to_object_record(row)
+        Self::map_row_to_object_record_slim(row)
     }
 
     async fn delete_object(
@@ -866,18 +937,17 @@ impl Adapter for CockroachAdapter {
         id: Uuid,
         owner: Uuid,
     ) -> Result<Option<ObjectRecord>, Error> {
-        let pool = self.pool.clone();
         let row = sqlx::query(
             r#"
             DELETE FROM objects
             WHERE id = $1 AND type = $2 AND owner = $3
-            RETURNING *
+            RETURNING id, type, owner, created_at, updated_at, data
             "#,
         )
         .bind(id)
         .bind(type_name)
         .bind(owner)
-        .fetch_optional(&pool)
+        .fetch_optional(&self.pool)
         .await
         .map_err(|err| match err {
             sqlx::Error::RowNotFound => Error::NotFound,
@@ -885,7 +955,7 @@ impl Adapter for CockroachAdapter {
         })?;
 
         match row {
-            Some(r) => Self::map_row_to_object_record(r).map(|o| Some(o)),
+            Some(r) => Self::map_row_to_object_record_slim(r).map(|o| Some(o)),
             None => Ok(None),
         }
     }
@@ -896,14 +966,12 @@ impl Adapter for CockroachAdapter {
         ids: Vec<Uuid>,
         owner: Uuid,
     ) -> Result<u64, Error> {
-        let pool = self.pool.clone();
-
         let result =
             sqlx::query("DELETE FROM objects WHERE id = ANY($1) AND type = $2 AND owner = $3")
                 .bind(ids)
                 .bind(type_name)
                 .bind(owner)
-                .execute(&pool)
+                .execute(&self.pool)
                 .await
                 .map_err(|err| Error::Storage(err.to_string()))?;
         Ok(result.rows_affected())
@@ -930,12 +998,12 @@ impl Adapter for CockroachAdapter {
         owner: Uuid,
         filters: &[QueryFilter],
     ) -> Result<Option<ObjectRecord>, Error> {
-        let where_clause = Self::build_object_query_conditions(&filters.to_vec(), None);
-        let order_clause = Self::build_order_clause(&filters.to_vec());
+        let where_clause = Self::build_object_query_conditions(filters, None);
+        let order_clause = Self::build_order_clause(filters);
 
         let sql = format!(
             r#"
-            SELECT o.id, o.type, o.owner, o.created_at, o.updated_at, o.data, o.index_meta
+            SELECT o.id, o.type, o.owner, o.created_at, o.updated_at, o.data
             FROM objects o
             {}
             {}
@@ -944,18 +1012,15 @@ impl Adapter for CockroachAdapter {
         );
 
         let mut query = sqlx::query(&sql).bind(type_name).bind(owner);
+        query = Self::query_bind_filters(query, filters);
 
-        let f = filters.to_vec();
-        query = Self::query_bind_filters(query, &f);
-
-        let pool = self.pool.clone();
-        let row = query.fetch_optional(&pool).await.map_err(|err| match err {
-            sqlx::Error::RowNotFound => Error::NotFound,
-            _ => Error::Storage(err.to_string()),
-        })?;
+        let row = query
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|err| Error::Storage(err.to_string()))?;
 
         Ok(row
-            .map(|row| Self::map_row_to_object_record(row).ok())
+            .map(|row| Self::map_row_to_object_record_slim(row).ok())
             .unwrap_or_default())
     }
 
@@ -973,7 +1038,7 @@ impl Adapter for CockroachAdapter {
 
         let mut sql = format!(
             r#"
-                SELECT o.id, o.type, o.owner, o.created_at, o.updated_at, o.data, o.index_meta
+                SELECT o.id, o.type, o.owner, o.created_at, o.updated_at, o.data
                 FROM objects o
                 {}
                 {}
@@ -993,15 +1058,14 @@ impl Adapter for CockroachAdapter {
 
         query = Self::query_bind_filters(query, &plan.filters);
 
-        let pool = self.pool.clone();
         let rows = query
-            .fetch_all(&pool)
+            .fetch_all(&self.pool)
             .await
             .map_err(|err| Error::Storage(err.to_string()))?;
 
         Ok(rows
             .into_iter()
-            .filter_map(|row| Self::map_row_to_object_record(row).ok())
+            .filter_map(|row| Self::map_row_to_object_record_slim(row).ok())
             .collect())
     }
 
@@ -1010,15 +1074,13 @@ impl Adapter for CockroachAdapter {
         type_name: &'static str,
         plan: Option<Query>,
     ) -> Result<u64, Error> {
-        let pool = self.pool.clone();
-
         match plan {
             Some(plan) => {
                 let where_clause = Self::build_object_query_conditions(&plan.filters, None);
 
                 let mut sql = format!(
                     r#"
-                    SELECT COUNT(*) FROM objects
+                    SELECT COUNT(*) FROM objects o
                     {}
                     "#,
                     where_clause
@@ -1035,7 +1097,7 @@ impl Adapter for CockroachAdapter {
                 query = Self::query_scalar_bind_filters(query, &plan.filters);
 
                 let count = query
-                    .fetch_one(&pool)
+                    .fetch_one(&self.pool)
                     .await
                     .map_err(|e| Error::Storage(e.to_string()))?;
 
@@ -1044,7 +1106,7 @@ impl Adapter for CockroachAdapter {
             None => {
                 let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM objects WHERE type = $1")
                     .bind(type_name)
-                    .fetch_one(&pool)
+                    .fetch_one(&self.pool)
                     .await
                     .map_err(|err| Error::Storage(err.to_string()))?;
 
@@ -1058,22 +1120,21 @@ impl Adapter for CockroachAdapter {
         type_name: &'static str,
         owner: Uuid,
     ) -> Result<Vec<ObjectRecord>, Error> {
-        let pool = self.pool.clone();
         let rows = sqlx::query(
             r#"
-            SELECT o.id, o.type, o.owner, o.created_at, o.updated_at, o.data, o.index_meta
+            SELECT o.id, o.type, o.owner, o.created_at, o.updated_at, o.data
             FROM objects o
             WHERE owner = $1 AND type = $2
             "#,
         )
         .bind(owner)
         .bind(type_name)
-        .fetch_all(&pool)
+        .fetch_all(&self.pool)
         .await
         .map_err(|err| Error::Storage(err.to_string()))?;
 
         rows.into_iter()
-            .map(Self::map_row_to_object_record)
+            .map(Self::map_row_to_object_record_slim)
             .collect()
     }
 
@@ -1082,22 +1143,21 @@ impl Adapter for CockroachAdapter {
         type_name: &'static str,
         owner: Uuid,
     ) -> Result<Option<ObjectRecord>, Error> {
-        let pool = self.pool.clone();
         let row = sqlx::query(
             r#"
-            SELECT o.id, o.type, o.owner, o.created_at, o.updated_at, o.data, o.index_meta
+            SELECT o.id, o.type, o.owner, o.created_at, o.updated_at, o.data
             FROM objects o
             WHERE owner = $1 AND type = $2
             "#,
         )
         .bind(owner)
         .bind(type_name)
-        .fetch_optional(&pool)
+        .fetch_optional(&self.pool)
         .await
         .map_err(|err| Error::Storage(err.to_string()))?;
 
         match row {
-            Some(r) => Self::map_row_to_object_record(r).map(|o| Some(o)),
+            Some(r) => Self::map_row_to_object_record_slim(r).map(|o| Some(o)),
             None => Ok(None),
         }
     }
@@ -1108,10 +1168,9 @@ impl Adapter for CockroachAdapter {
         b_type_name: &'static str,
         id: Uuid,
     ) -> Result<Option<ObjectRecord>, Error> {
-        let pool = self.pool.clone();
         let row = sqlx::query(
             r#"
-            SELECT o.id, o.type, o.owner, o.created_at, o.updated_at, o.data, o.index_meta
+            SELECT o.id, o.type, o.owner, o.created_at, o.updated_at, o.data
             FROM objects o
             WHERE id = $1 AND (type = $2 OR type = $3)
             "#,
@@ -1119,12 +1178,12 @@ impl Adapter for CockroachAdapter {
         .bind(id)
         .bind(a_type_name)
         .bind(b_type_name)
-        .fetch_optional(&pool)
+        .fetch_optional(&self.pool)
         .await
         .map_err(|err| Error::Storage(err.to_string()))?;
 
         match row {
-            Some(r) => Self::map_row_to_object_record(r).map(|o| Some(o)),
+            Some(r) => Self::map_row_to_object_record_slim(r).map(|o| Some(o)),
             None => Ok(None),
         }
     }
@@ -1135,10 +1194,9 @@ impl Adapter for CockroachAdapter {
         b_type_name: &'static str,
         ids: Vec<Uuid>,
     ) -> Result<Vec<ObjectRecord>, Error> {
-        let pool = self.pool.clone();
         let rows = sqlx::query(
             r#"
-            SELECT o.id, o.type, o.owner, o.created_at, o.updated_at, o.data, o.index_meta
+            SELECT o.id, o.type, o.owner, o.created_at, o.updated_at, o.data
             FROM objects o
             WHERE id = ANY($1) AND (type = $2 OR type = $3)
             "#,
@@ -1146,12 +1204,12 @@ impl Adapter for CockroachAdapter {
         .bind(ids.into_iter().map(|id| id).collect::<Vec<Uuid>>())
         .bind(a_type_name)
         .bind(b_type_name)
-        .fetch_all(&pool)
+        .fetch_all(&self.pool)
         .await
         .map_err(|err| Error::Storage(err.to_string()))?;
 
         rows.into_iter()
-            .map(Self::map_row_to_object_record)
+            .map(Self::map_row_to_object_record_slim)
             .collect()
     }
 
@@ -1161,10 +1219,9 @@ impl Adapter for CockroachAdapter {
         b_type_name: &'static str,
         owner: Uuid,
     ) -> Result<Option<ObjectRecord>, Error> {
-        let pool = self.pool.clone();
         let row = sqlx::query(
             r#"
-            SELECT o.id, o.type, o.owner, o.created_at, o.updated_at, o.data, o.index_meta
+            SELECT o.id, o.type, o.owner, o.created_at, o.updated_at, o.data
             FROM objects o
             WHERE owner = $1 AND (type = $2 OR type = $3)
             "#,
@@ -1172,12 +1229,12 @@ impl Adapter for CockroachAdapter {
         .bind(owner)
         .bind(a_type_name)
         .bind(b_type_name)
-        .fetch_optional(&pool)
+        .fetch_optional(&self.pool)
         .await
         .map_err(|err| Error::Storage(err.to_string()))?;
 
         match row {
-            Some(r) => Self::map_row_to_object_record(r).map(|o| Some(o)),
+            Some(r) => Self::map_row_to_object_record_slim(r).map(|o| Some(o)),
             None => Ok(None),
         }
     }
@@ -1188,10 +1245,9 @@ impl Adapter for CockroachAdapter {
         b_type_name: &'static str,
         owner: Uuid,
     ) -> Result<Vec<ObjectRecord>, Error> {
-        let pool = self.pool.clone();
         let rows = sqlx::query(
             r#"
-            SELECT o.id, o.type, o.owner, o.created_at, o.updated_at, o.data, o.index_meta
+            SELECT o.id, o.type, o.owner, o.created_at, o.updated_at, o.data
             FROM objects o
             WHERE owner = $1 AND (type = $2 OR type = $3)
             "#,
@@ -1199,18 +1255,24 @@ impl Adapter for CockroachAdapter {
         .bind(owner)
         .bind(a_type_name)
         .bind(b_type_name)
-        .fetch_all(&pool)
+        .fetch_all(&self.pool)
         .await
         .map_err(|err| Error::Storage(err.to_string()))?;
 
         rows.into_iter()
-            .map(Self::map_row_to_object_record)
+            .map(Self::map_row_to_object_record_slim)
             .collect()
     }
 
     /* ---------------- EDGES ---------------- */
     async fn insert_edge(&self, record: EdgeRecord) -> Result<(), Error> {
-        let pool = self.pool.clone();
+        let EdgeRecord {
+            from,
+            to,
+            type_name,
+            data,
+            index_meta,
+        } = record;
         let _ = sqlx::query(
             r#"
             INSERT INTO edges ("from", "to", type, data, index_meta)
@@ -1219,12 +1281,12 @@ impl Adapter for CockroachAdapter {
             DO UPDATE SET data = $4, index_meta = $5;
             "#,
         )
-        .bind(record.from)
-        .bind(record.to)
-        .bind(record.type_name)
-        .bind(record.data)
-        .bind(record.index_meta)
-        .execute(&pool)
+        .bind(from)
+        .bind(to)
+        .bind(type_name.as_ref())
+        .bind(data)
+        .bind(index_meta)
+        .execute(&self.pool)
         .await
         .map_err(|err| Error::Storage(err.to_string()))?;
 
@@ -1237,19 +1299,24 @@ impl Adapter for CockroachAdapter {
         old_to: Uuid,
         to: Option<Uuid>,
     ) -> Result<(), Error> {
-        let pool = self.pool.clone();
+        let EdgeRecord {
+            from,
+            type_name,
+            data,
+            ..
+        } = record;
         let _ = sqlx::query(
             r#"
         UPDATE edges SET data = $1, "to" = $2
-        WHERE "from" = $3 AND type = $4 AND "to" = $6
+        WHERE "from" = $3 AND type = $4 AND "to" = $5
         "#,
         )
-        .bind(record.data)
+        .bind(data)
         .bind(to.unwrap_or(old_to))
-        .bind(record.from)
-        .bind(record.type_name)
+        .bind(from)
+        .bind(type_name.as_ref())
         .bind(old_to)
-        .execute(&pool)
+        .execute(&self.pool)
         .await
         .map_err(|err| Error::Storage(err.to_string()))?;
 
@@ -1262,7 +1329,6 @@ impl Adapter for CockroachAdapter {
         from: Uuid,
         to: Uuid,
     ) -> Result<(), Error> {
-        let pool = self.pool.clone();
         let _ = sqlx::query(
             r#"
             DELETE FROM edges
@@ -1272,7 +1338,7 @@ impl Adapter for CockroachAdapter {
         .bind(type_name)
         .bind(from)
         .bind(to)
-        .execute(&pool)
+        .execute(&self.pool)
         .await
         .map_err(|err| Error::Storage(err.to_string()))?;
 
@@ -1280,7 +1346,6 @@ impl Adapter for CockroachAdapter {
     }
 
     async fn delete_object_edge(&self, type_name: &'static str, from: Uuid) -> Result<(), Error> {
-        let pool = self.pool.clone();
         let _ = sqlx::query(
             r#"
             DELETE FROM edges
@@ -1289,7 +1354,7 @@ impl Adapter for CockroachAdapter {
         )
         .bind(type_name)
         .bind(from)
-        .execute(&pool)
+        .execute(&self.pool)
         .await
         .map_err(|err| Error::Storage(err.to_string()))?;
 
@@ -1322,8 +1387,6 @@ impl Adapter for CockroachAdapter {
         owner: Uuid,
         plan: Option<EdgeQuery>,
     ) -> Result<u64, Error> {
-        let pool = self.pool.clone();
-
         match plan {
             Some(plan) => {
                 let where_clause = Self::build_edge_query_conditions(
@@ -1350,9 +1413,8 @@ impl Adapter for CockroachAdapter {
 
                 query = Self::query_scalar_bind_filters(query, &plan.filters);
 
-                let pool = self.pool.clone();
                 let count = query
-                    .fetch_one(&pool)
+                    .fetch_one(&self.pool)
                     .await
                     .map_err(|e| Error::Storage(e.to_string()))?;
 
@@ -1364,7 +1426,7 @@ impl Adapter for CockroachAdapter {
                 )
                 .bind(type_name)
                 .bind(owner)
-                .fetch_one(&pool)
+                .fetch_one(&self.pool)
                 .await
                 .map_err(|err| Error::Storage(err.to_string()))?;
 
@@ -1379,8 +1441,6 @@ impl Adapter for CockroachAdapter {
         to: Uuid,
         plan: Option<EdgeQuery>,
     ) -> Result<u64, Error> {
-        let pool = self.pool.clone();
-
         match plan {
             Some(plan) => {
                 let where_clause = Self::build_edge_query_conditions(
@@ -1405,9 +1465,8 @@ impl Adapter for CockroachAdapter {
 
                 query = Self::query_scalar_bind_filters(query, &plan.filters);
 
-                let pool = self.pool.clone();
                 let count = query
-                    .fetch_one(&pool)
+                    .fetch_one(&self.pool)
                     .await
                     .map_err(|e| Error::Storage(e.to_string()))?;
 
@@ -1421,7 +1480,7 @@ impl Adapter for CockroachAdapter {
                 )
                 .bind(type_name)
                 .bind(to)
-                .fetch_one(&pool)
+                .fetch_one(&self.pool)
                 .await
                 .map_err(|err| Error::Storage(err.to_string()))?;
 
@@ -1431,31 +1490,25 @@ impl Adapter for CockroachAdapter {
     }
 
     async fn sequence_value(&self, sq: String) -> u64 {
-        self.ensure_sequence_exists(sq.clone()).await;
-        let quoted_sq = format!("\"{}\"", sq.replace("\"", "\"\""));
-
-        // Get last_value
-        let query = format!("SELECT last_value FROM {}", quoted_sq);
-        let current_val: i64 = sqlx::query_scalar(&query)
-            .fetch_one(&self.pool.clone())
-            .await
-            .expect("Failed to fetch the current sequence value");
-
-        // CockroachDB returns 0 before first nextval(), adjust to 1
-        if current_val == 0 {
-            return self.sequence_next_value(sq).await;
-        }
-
-        current_val as u64
+        let val: i64 =
+            sqlx::query_scalar("SELECT COALESCE((SELECT value FROM sequences WHERE name = $1), 1)")
+                .bind(&sq)
+                .fetch_one(&self.pool)
+                .await
+                .expect("Failed to fetch the current sequence value");
+        val as u64
     }
 
     async fn sequence_next_value(&self, sq: String) -> u64 {
-        self.ensure_sequence_exists(sq.clone()).await;
-        let next_val: i64 = sqlx::query_scalar("SELECT nextval($1);")
-            .bind(sq)
-            .fetch_one(&self.pool.clone())
-            .await
-            .expect("Failed to fetch the next sequence value");
+        let next_val: i64 = sqlx::query_scalar(
+            "INSERT INTO sequences (name, value) VALUES ($1, 2)
+             ON CONFLICT (name) DO UPDATE SET value = sequences.value + 1
+             RETURNING value",
+        )
+        .bind(&sq)
+        .fetch_one(&self.pool)
+        .await
+        .expect("Failed to fetch the next sequence value");
         next_val as u64
     }
 }
@@ -1468,38 +1521,45 @@ impl UniqueAdapter for CockroachAdapter {
         object_id: Uuid,
         hashes: Vec<(String, &str)>,
     ) -> Result<(), Error> {
-        let mut tx = self
-            .pool
-            .begin()
-            .await
-            .map_err(|err| Error::Storage(err.to_string()))?;
-        for (hash, field) in hashes {
-            sqlx::query(
-                r#"
-                INSERT INTO unique_constraints (id, type, key, field)
-                VALUES ($1, $2, $3, $4)
-                "#,
-            )
-            .bind(object_id)
-            .bind(type_name)
-            .bind(hash)
-            .bind(&field)
-            .execute(&mut *tx)
-            .await
-            .map_err(|err| {
-                // Check if it's a uniqueness violation
-                if err.to_string().contains("unique") {
-                    Error::UniqueConstraintViolation(field.to_string())
-                } else {
-                    Error::Storage(err.to_string())
-                }
-            })?;
+        if hashes.is_empty() {
+            return Ok(());
         }
+        let keys: Vec<&str> = hashes.iter().map(|(k, _)| k.as_str()).collect();
+        let fields: Vec<&str> = hashes.iter().map(|(_, f)| *f).collect();
 
-        tx.commit()
-            .await
-            .map_err(|err| Error::Storage(err.to_string()))?;
-        Ok(())
+        let result = sqlx::query(
+            r#"
+            INSERT INTO unique_constraints (id, type, key, field)
+            SELECT $1, $2, unnest($3::text[]), unnest($4::text[])
+            "#,
+        )
+        .bind(object_id)
+        .bind(type_name)
+        .bind(&keys)
+        .bind(&fields)
+        .execute(&self.pool)
+        .await;
+
+        match result {
+            Ok(_) => Ok(()),
+            Err(err) => {
+                let msg = err.to_string();
+                if msg.contains("unique constraint") || msg.contains("duplicate") {
+                    // Identify which field caused the conflict
+                    let existing: Option<String> = sqlx::query_scalar(
+                        "SELECT field FROM unique_constraints WHERE key = ANY($1) LIMIT 1",
+                    )
+                    .bind(&keys)
+                    .fetch_optional(&self.pool)
+                    .await
+                    .unwrap_or(None);
+                    let field = existing.unwrap_or_else(|| "unknown".to_string());
+                    Err(Error::UniqueConstraintViolation(field))
+                } else {
+                    Err(Error::Storage(msg))
+                }
+            }
+        }
     }
 
     async fn delete_unique(&self, hash: &str) -> Result<(), Error> {

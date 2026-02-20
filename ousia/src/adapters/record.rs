@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use crate::{Object, Union, edge::Edge, error::Error};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -6,7 +8,7 @@ use uuid::Uuid;
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ObjectRecord {
     pub id: Uuid,
-    pub type_name: String,
+    pub type_name: Cow<'static, str>,
     pub owner: Uuid,
     pub data: serde_json::Value,
     pub index_meta: serde_json::Value,
@@ -30,7 +32,7 @@ impl ObjectRecord {
         let meta = obj.meta();
         Self {
             id: meta.id,
-            type_name: obj.type_name().to_string(),
+            type_name: Cow::Borrowed(obj.type_name()),
             owner: meta.owner,
             index_meta: serde_json::to_value(obj.index_meta())
                 .expect("Failed to serialize index_meta"),
@@ -43,13 +45,13 @@ impl ObjectRecord {
 
 impl<A: Object, B: Object> Into<Union<A, B>> for ObjectRecord {
     fn into(self) -> Union<A, B> {
-        match self.type_name.as_str() {
-            _ if self.type_name == A::TYPE => ObjectRecord::to_object::<A>(self)
+        match self.type_name.as_ref() {
+            t if t == A::TYPE => ObjectRecord::to_object::<A>(self)
                 .map(Union::First)
                 .unwrap_or_else(|err| {
                     panic!("Error: {:?}", err);
                 }),
-            _ if self.type_name == B::TYPE => ObjectRecord::to_object::<B>(self)
+            t if t == B::TYPE => ObjectRecord::to_object::<B>(self)
                 .map(Union::Second)
                 .unwrap_or_else(|err| {
                     panic!("Error: {:?}", err);
@@ -61,7 +63,7 @@ impl<A: Object, B: Object> Into<Union<A, B>> for ObjectRecord {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct EdgeRecord {
-    pub type_name: String,
+    pub type_name: Cow<'static, str>,
     pub from: Uuid,
     pub to: Uuid,
     pub data: serde_json::Value,
@@ -83,7 +85,7 @@ impl EdgeRecord {
         Self {
             to: meta.to,
             from: meta.from,
-            type_name: edge.type_name().to_string(),
+            type_name: Cow::Borrowed(edge.type_name()),
             data: serde_json::to_value(edge).expect("Failed to serialize edge"),
             index_meta: serde_json::to_value(edge.index_meta())
                 .expect("Failed to serialize index meta"),

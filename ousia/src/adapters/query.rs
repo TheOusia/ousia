@@ -3,7 +3,10 @@ use uuid::Uuid;
 
 use crate::{
     Object,
-    edge::{Edge, query::EdgeQuery},
+    edge::{
+        Edge,
+        query::{EdgeQuery, ObjectEdge},
+    },
     error::Error,
     query::{
         Comparison, Cursor, IndexField, Operator, QueryFilter, QueryMode, QuerySearch, QuerySort,
@@ -33,6 +36,8 @@ pub struct Query {
 }
 
 impl Default for Query {
+    /// Use this for objects owned by system
+    /// For Global search see `Query::wide`
     fn default() -> Self {
         Self {
             owner: system_owner(),
@@ -53,6 +58,8 @@ impl Query {
         }
     }
 
+    /// Global search.
+    /// For optimized search use `Query::default` or `Query::new(owner)` if owner is known
     pub fn wide() -> Self {
         Self {
             owner: Uuid::nil(),
@@ -208,7 +215,7 @@ impl Query {
         let mut consumed_self = self;
         consumed_self.filters.push(QueryFilter {
             field,
-            value: true.to_index_value(), // Dummy value for sort
+            value: field.name.to_index_value(), // Dummy value for sort
             mode: QueryMode::Sort(QuerySort { ascending: true }),
         });
         consumed_self
@@ -218,7 +225,7 @@ impl Query {
         let mut consumed_self = self;
         consumed_self.filters.push(QueryFilter {
             field,
-            value: true.to_index_value(), // Dummy value for sort
+            value: field.name.to_index_value(), // Dummy value for sort
             mode: QueryMode::Sort(QuerySort { ascending: false }),
         });
         consumed_self
@@ -942,7 +949,7 @@ impl<'a, E: Edge, O: Object> EdgeQueryContext<'a, E, O> {
     pub fn sort_asc(mut self, field: &'static IndexField) -> Self {
         self.filters.push(QueryFilter {
             field,
-            value: true.to_index_value(),
+            value: field.name.to_index_value(),
             mode: QueryMode::Sort(QuerySort { ascending: true }),
         });
         self
@@ -952,7 +959,7 @@ impl<'a, E: Edge, O: Object> EdgeQueryContext<'a, E, O> {
     pub fn sort_desc(mut self, field: &'static IndexField) -> Self {
         self.filters.push(QueryFilter {
             field,
-            value: true.to_index_value(),
+            value: field.name.to_index_value(),
             mode: QueryMode::Sort(QuerySort { ascending: false }),
         });
         self
@@ -962,7 +969,7 @@ impl<'a, E: Edge, O: Object> EdgeQueryContext<'a, E, O> {
     pub fn edge_sort_asc(mut self, field: &'static IndexField) -> Self {
         self.edge_filters.push(QueryFilter {
             field,
-            value: true.to_index_value(),
+            value: field.name.to_index_value(),
             mode: QueryMode::Sort(QuerySort { ascending: true }),
         });
         self
@@ -972,7 +979,7 @@ impl<'a, E: Edge, O: Object> EdgeQueryContext<'a, E, O> {
     pub fn edge_sort_desc(mut self, field: &'static IndexField) -> Self {
         self.edge_filters.push(QueryFilter {
             field,
-            value: true.to_index_value(),
+            value: field.name.to_index_value(),
             mode: QueryMode::Sort(QuerySort { ascending: false }),
         });
         self
@@ -1090,6 +1097,22 @@ impl<'a, E: Edge, O: Object> EdgeQueryContext<'a, E, O> {
             .into_iter()
             .map(|r| r.to_edge())
             .collect::<Result<Vec<E>, Error>>()
+    }
+
+    /// Collect the edges with their targets
+    pub async fn collect_with_target(&self) -> Result<Vec<ObjectEdge<E, O>>, Error> {
+        let mut edge_query = EdgeQuery::default();
+        edge_query.filters = self.edge_filters.clone();
+        if let Some(limit) = self.limit {
+            edge_query.limit = Some(limit);
+        }
+        if let Some(offset) = self.cursor {
+            edge_query.cursor = Some(offset);
+        }
+
+        // proposal: prefix the select columns with edge_ or object_, unwrap them seperately
+        // return ObjectEdge<E, O> where E is the edge type and O is the object type
+        todo!()
     }
 
     /// Paginate using a cursor
