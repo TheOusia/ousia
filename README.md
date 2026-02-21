@@ -83,8 +83,8 @@ Most Rust ORMs give you tables and rows. Ousia gives you a typed graph with mone
 
 ```toml
 [dependencies]
-// ousia = "1.0" -- enables "derive", "postgres" and "ledger"
-ousia = { version = "1.0", features = ["derive", "ledger"] }
+// ousia = "1" -- enables "derive", "postgres" and "ledger"
+ousia = { version = "1", features = ["derive", "ledger"] }
 ```
 
 The `derive` feature enables `#[derive(OusiaObject, OusiaEdge)]`. The `ledger` feature re-exports the `ledger` crate under `ousia::ledger`.
@@ -490,6 +490,97 @@ println!("Seller balance: {}", balance.available);
 - **Soft deletes** — application-specific; implement in your domain if needed
 - **Schema migrations** — the struct is the schema; add and remove fields freely
 - **Early locking** — planning phase is pure memory; execution phase is atomic
+
+---
+
+## Benchmarks
+
+Median latency · 10–20 samples per group · MacBook M1 Pro 32 GB · PostgreSQL 16 in Docker (localhost)
+
+Datasets: **ousia_edges** — 10k users, 100k follows, N+1 bench over 1k pivots; **ousia_queries** — 50k users, 2k posts; **ousia_vs_raw** — 10k users, 2k posts, N+1 bench over 200 owners.
+
+---
+
+#### Disclaimer
+
+This results may not accurately reflect the performance due to structure of bench functions and is expected to change when a better bench functions is implemented
+
+```bash
+cargo bench
+```
+
+---
+
+### N+1 Elimination — the headline result
+
+| Suite                     | Benchmark                   | ousia batch (2q) | raw N+1  | raw batch (2q) | N+1 speedup |
+| ------------------------- | --------------------------- | ---------------- | -------- | -------------- | ----------- |
+| ousia_edges (1k pivots)   | preload_multi_pivot_forward | 464 µs           | 461 ms   | 109 ms         | **993×**    |
+| ousia_edges (1k pivots)   | preload_multi_pivot_count   | 482 µs           | 435 ms   | 20.7 ms        | **903×**    |
+| ousia_vs_raw (200 owners) | preload_owned_batch         | 537 µs           | 103.9 ms | 4.46 ms        | **193×**    |
+
+### Edge Operations (`ousia_edges` — 10k users, 100k follows)
+
+| Benchmark                         | ousia  | raw sqlx | sea-orm |
+| --------------------------------- | ------ | -------- | ------- |
+| query_edges_forward               | 473 µs | 462 µs   | 458 µs  |
+| query_edges_reverse               | 447 µs | 498 µs   | 468 µs  |
+| count_edges                       | 471 µs | 475 µs   | 471 µs  |
+| query_edges_with_filter           | 463 µs | 480 µs   | 510 µs  |
+| preload_forward (1 pivot → users) | 589 µs | 525 µs   | 577 µs  |
+| preload_reverse (1 pivot ← users) | 749 µs | 526 µs   | 466 µs  |
+| create_edge                       | 573 µs | 536 µs   | 537 µs  |
+
+### Object Queries (`ousia_vs_raw` — 10k users, 2k posts)
+
+| Benchmark                | ousia   | raw sqlx | sea-orm |
+| ------------------------ | ------- | -------- | ------- |
+| fetch_by_pk              | 453 µs  | 613 µs   | 1.80 ms |
+| eq_filter_indexed        | 1.68 ms | 1.93 ms  | 1.19 ms |
+| count_aggregate          | 537 µs  | 499 µs   | 472 µs  |
+| owner_scan (by owner ID) | 680 µs  | 459 µs   | 468 µs  |
+| range_sort + limit 20    | 594 µs  | 556 µs   | 688 µs  |
+| array_contains (GIN)     | 660 µs  | 1.19 ms  | 1.67 ms |
+| begins_with prefix       | 623 µs  | 749 µs   | 691 µs  |
+| bulk_fetch × 10          | 475 µs  | 456 µs   | 456 µs  |
+| bulk_fetch × 50          | 639 µs  | 543 µs   | 531 µs  |
+| bulk_fetch × 100         | 840 µs  | 620 µs   | 633 µs  |
+| multi_sort + limit 50    | 504 µs  | 548 µs   | 596 µs  |
+
+### Query Patterns (`ousia_queries` — 50k users, 2k posts)
+
+| Benchmark               | ousia   | raw sqlx | sea-orm |
+| ----------------------- | ------- | -------- | ------- |
+| AND filter (2 fields) ¹ | 468 µs  | 22.5 ms  | 29.4 ms |
+| OR / IN condition       | 621 µs  | 490 µs   | 2.56 ms |
+| cursor page1 × 10       | 2.82 ms | 2.15 ms  | 3.73 ms |
+| cursor mid-page × 10    | 2.29 ms | 4.18 ms  | 2.59 ms |
+| cursor page1 × 50       | 455 µs  | 535 µs   | 508 µs  |
+| cursor mid-page × 50    | 476 µs  | 568 µs   | 526 µs  |
+| cursor page1 × 100      | 470 µs  | 605 µs   | 588 µs  |
+| cursor mid-page × 100   | 516 µs  | 614 µs   | 588 µs  |
+| full scan limit 100     | 470 µs  | 613 µs   | 579 µs  |
+| full scan limit 500     | 507 µs  | 967 µs   | 1.11 ms |
+| multi_sort + limit 50   | 487 µs  | 548 µs   | 616 µs  |
+| create_object           | 635 µs  | 590 µs   | 613 µs  |
+
+¹ At 50k rows, ousia's `index_meta` JSONB indexes turn a full-table scan into an index lookup — **48× faster** than hand-written SQL without a matching composite index.
+
+### Joins & CTEs (`ousia_vs_raw`)
+
+| Benchmark                            | ousia    | raw sqlx | sea-orm |
+| ------------------------------------ | -------- | -------- | ------- |
+| join_posts_users (published, top 20) | —        | 615 µs   | 613 µs  |
+| cte_ranked_posts (window fn top-3)   | 726 µs ² | 1.20 ms  | 1.60 ms |
+
+² ousia fetches all published posts + groups top-3 per owner in Rust.
+
+**Key takeaways:**
+
+- Batch preload eliminates N+1 with **193–993× speedup** — the gap grows with dataset size.
+- At 50k rows, JSONB index queries beat full-table-scan SQL by **48×** for compound AND filters.
+- Single-query operations (PK fetch, GIN array search, cursors ≥50) match or beat raw sqlx.
+- Joins and window functions are best expressed as raw SQL; ousia provides an escape hatch for these.
 
 ---
 
