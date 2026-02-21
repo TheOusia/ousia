@@ -1,6 +1,5 @@
 pub mod test_cockroach;
 pub mod test_postgres;
-pub mod test_postgres_ledger_standalone;
 pub mod test_sqlite;
 
 use ousia::{EdgeMeta, Meta, OusiaDefault, OusiaEdge, OusiaObject, query::ToIndexValue};

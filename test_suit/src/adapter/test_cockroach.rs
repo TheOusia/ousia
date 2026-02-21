@@ -1007,3 +1007,808 @@ async fn test_sequence() {
     let value = engine.counter_value("my-key".to_string()).await;
     assert_eq!(value, 2);
 }
+
+// ============================================================
+// Preload API — Single Pivot (QueryContext / EdgeQueryContext)
+// ============================================================
+
+#[tokio::test]
+async fn test_preload_object_get() {
+    let (_resource, pool) = setup_test_db().await;
+    let adapter = CockroachAdapter::from_pool(pool);
+    adapter.init_schema().await.unwrap();
+    let engine = Engine::new(Box::new(adapter));
+
+    let mut alice = User::default();
+    alice.username = "alice".into();
+    alice.email = "alice@example.com".into();
+    alice.display_name = "Alice".into();
+    engine.create_object(&alice).await.unwrap();
+
+    let found: Option<User> = engine.preload_object(alice.id()).get().await.unwrap();
+    assert!(found.is_some());
+    assert_eq!(found.unwrap().username, "alice");
+
+    let missing: Option<User> = engine
+        .preload_object(uuid::Uuid::now_v7())
+        .get()
+        .await
+        .unwrap();
+    assert!(missing.is_none());
+}
+
+#[tokio::test]
+async fn test_preload_single_pivot_following() {
+    let (_resource, pool) = setup_test_db().await;
+    let adapter = CockroachAdapter::from_pool(pool);
+    adapter.init_schema().await.unwrap();
+    let engine = Engine::new(Box::new(adapter));
+
+    let mut alice = User::default();
+    alice.username = "alice".into();
+    alice.email = "alice@example.com".into();
+    engine.create_object(&alice).await.unwrap();
+
+    let mut bob = User::default();
+    bob.username = "bob".into();
+    bob.email = "bob@example.com".into();
+    engine.create_object(&bob).await.unwrap();
+
+    let mut charlie = User::default();
+    charlie.username = "charlie".into();
+    charlie.email = "charlie@example.com".into();
+    engine.create_object(&charlie).await.unwrap();
+
+    engine.create_edge(&Follow { _meta: EdgeMeta::new(alice.id(), bob.id()), notification: true }).await.unwrap();
+    engine.create_edge(&Follow { _meta: EdgeMeta::new(alice.id(), charlie.id()), notification: false }).await.unwrap();
+
+    let following: Vec<User> = engine
+        .preload_object::<User>(alice.id())
+        .edge::<Follow, User>()
+        .collect()
+        .await
+        .unwrap();
+
+    assert_eq!(following.len(), 2);
+    let ids: std::collections::HashSet<_> = following.iter().map(|u| u.id()).collect();
+    assert!(ids.contains(&bob.id()));
+    assert!(ids.contains(&charlie.id()));
+
+    let bobs_following: Vec<User> = engine
+        .preload_object::<User>(bob.id())
+        .edge::<Follow, User>()
+        .collect()
+        .await
+        .unwrap();
+    assert!(bobs_following.is_empty());
+}
+
+#[tokio::test]
+async fn test_preload_single_pivot_followers() {
+    let (_resource, pool) = setup_test_db().await;
+    let adapter = CockroachAdapter::from_pool(pool);
+    adapter.init_schema().await.unwrap();
+    let engine = Engine::new(Box::new(adapter));
+
+    let mut alice = User::default();
+    alice.username = "alice".into();
+    alice.email = "alice@example.com".into();
+    engine.create_object(&alice).await.unwrap();
+
+    let mut michael = User::default();
+    michael.username = "michael".into();
+    michael.email = "michael@example.com".into();
+    engine.create_object(&michael).await.unwrap();
+
+    let mut bob = User::default();
+    bob.username = "bob".into();
+    bob.email = "bob@example.com".into();
+    engine.create_object(&bob).await.unwrap();
+
+    engine.create_edge(&Follow { _meta: EdgeMeta::new(alice.id(), bob.id()), notification: true }).await.unwrap();
+    engine.create_edge(&Follow { _meta: EdgeMeta::new(michael.id(), bob.id()), notification: false }).await.unwrap();
+
+    let followers: Vec<User> = engine
+        .preload_object::<User>(bob.id())
+        .edge::<Follow, User>()
+        .collect_reverse()
+        .await
+        .unwrap();
+
+    assert_eq!(followers.len(), 2);
+    let ids: std::collections::HashSet<_> = followers.iter().map(|u| u.id()).collect();
+    assert!(ids.contains(&alice.id()));
+    assert!(ids.contains(&michael.id()));
+}
+
+#[tokio::test]
+async fn test_preload_single_pivot_collect_edges() {
+    let (_resource, pool) = setup_test_db().await;
+    let adapter = CockroachAdapter::from_pool(pool);
+    adapter.init_schema().await.unwrap();
+    let engine = Engine::new(Box::new(adapter));
+
+    let mut alice = User::default();
+    alice.username = "alice".into();
+    alice.email = "alice@example.com".into();
+    engine.create_object(&alice).await.unwrap();
+
+    let mut bob = User::default();
+    bob.username = "bob".into();
+    bob.email = "bob@example.com".into();
+    engine.create_object(&bob).await.unwrap();
+
+    engine.create_edge(&Follow { _meta: EdgeMeta::new(alice.id(), bob.id()), notification: true }).await.unwrap();
+
+    let edges: Vec<Follow> = engine
+        .preload_object::<User>(alice.id())
+        .edge::<Follow, User>()
+        .collect_edges()
+        .await
+        .unwrap();
+
+    assert_eq!(edges.len(), 1);
+    assert_eq!(edges[0].from(), alice.id());
+    assert_eq!(edges[0].to(), bob.id());
+    assert!(edges[0].notification);
+}
+
+#[tokio::test]
+async fn test_preload_single_pivot_collect_with_target() {
+    let (_resource, pool) = setup_test_db().await;
+    let adapter = CockroachAdapter::from_pool(pool);
+    adapter.init_schema().await.unwrap();
+    let engine = Engine::new(Box::new(adapter));
+
+    let mut alice = User::default();
+    alice.username = "alice".into();
+    alice.email = "alice@example.com".into();
+    engine.create_object(&alice).await.unwrap();
+
+    let mut bob = User::default();
+    bob.username = "bob".into();
+    bob.email = "bob@example.com".into();
+    engine.create_object(&bob).await.unwrap();
+
+    engine.create_edge(&Follow { _meta: EdgeMeta::new(alice.id(), bob.id()), notification: true }).await.unwrap();
+
+    let pairs = engine
+        .preload_object::<User>(alice.id())
+        .edge::<Follow, User>()
+        .collect_with_target()
+        .await
+        .unwrap();
+
+    assert_eq!(pairs.len(), 1);
+    assert_eq!(pairs[0].edge().from(), alice.id());
+    assert_eq!(pairs[0].edge().to(), bob.id());
+    assert!(pairs[0].edge().notification);
+    assert_eq!(pairs[0].object().username, "bob");
+}
+
+#[tokio::test]
+async fn test_preload_single_pivot_collect_both() {
+    let (_resource, pool) = setup_test_db().await;
+    let adapter = CockroachAdapter::from_pool(pool);
+    adapter.init_schema().await.unwrap();
+    let engine = Engine::new(Box::new(adapter));
+
+    let mut alice = User::default();
+    alice.username = "alice".into();
+    alice.email = "alice@example.com".into();
+    engine.create_object(&alice).await.unwrap();
+
+    let mut bob = User::default();
+    bob.username = "bob".into();
+    bob.email = "bob@example.com".into();
+    engine.create_object(&bob).await.unwrap();
+
+    let mut charlie = User::default();
+    charlie.username = "charlie".into();
+    charlie.email = "charlie@example.com".into();
+    engine.create_object(&charlie).await.unwrap();
+
+    engine.create_edge(&Follow { _meta: EdgeMeta::new(alice.id(), bob.id()), notification: true }).await.unwrap();
+    engine.create_edge(&Follow { _meta: EdgeMeta::new(charlie.id(), alice.id()), notification: false }).await.unwrap();
+
+    let (following, followers) = engine
+        .preload_object::<User>(alice.id())
+        .edge::<Follow, User>()
+        .collect_both()
+        .await
+        .unwrap();
+
+    assert_eq!(following.len(), 1);
+    assert_eq!(following[0].username, "bob");
+    assert_eq!(followers.len(), 1);
+    assert_eq!(followers[0].username, "charlie");
+}
+
+#[tokio::test]
+async fn test_preload_single_pivot_collect_both_with_target() {
+    let (_resource, pool) = setup_test_db().await;
+    let adapter = CockroachAdapter::from_pool(pool);
+    adapter.init_schema().await.unwrap();
+    let engine = Engine::new(Box::new(adapter));
+
+    let mut alice = User::default();
+    alice.username = "alice".into();
+    alice.email = "alice@example.com".into();
+    engine.create_object(&alice).await.unwrap();
+
+    let mut bob = User::default();
+    bob.username = "bob".into();
+    bob.email = "bob@example.com".into();
+    engine.create_object(&bob).await.unwrap();
+
+    let mut charlie = User::default();
+    charlie.username = "charlie".into();
+    charlie.email = "charlie@example.com".into();
+    engine.create_object(&charlie).await.unwrap();
+
+    engine.create_edge(&Follow { _meta: EdgeMeta::new(alice.id(), bob.id()), notification: true }).await.unwrap();
+    engine.create_edge(&Follow { _meta: EdgeMeta::new(charlie.id(), alice.id()), notification: false }).await.unwrap();
+
+    let (fwd_pairs, rev_pairs) = engine
+        .preload_object::<User>(alice.id())
+        .edge::<Follow, User>()
+        .collect_both_with_target()
+        .await
+        .unwrap();
+
+    assert_eq!(fwd_pairs.len(), 1);
+    assert_eq!(fwd_pairs[0].edge().from(), alice.id());
+    assert_eq!(fwd_pairs[0].object().username, "bob");
+
+    assert_eq!(rev_pairs.len(), 1);
+    assert_eq!(rev_pairs[0].edge().from(), charlie.id());
+    assert_eq!(rev_pairs[0].object().username, "charlie");
+}
+
+#[tokio::test]
+async fn test_preload_single_pivot_collect_both_edges() {
+    let (_resource, pool) = setup_test_db().await;
+    let adapter = CockroachAdapter::from_pool(pool);
+    adapter.init_schema().await.unwrap();
+    let engine = Engine::new(Box::new(adapter));
+
+    let mut alice = User::default();
+    alice.username = "alice".into();
+    alice.email = "alice@example.com".into();
+    engine.create_object(&alice).await.unwrap();
+
+    let mut bob = User::default();
+    bob.username = "bob".into();
+    bob.email = "bob@example.com".into();
+    engine.create_object(&bob).await.unwrap();
+
+    let mut charlie = User::default();
+    charlie.username = "charlie".into();
+    charlie.email = "charlie@example.com".into();
+    engine.create_object(&charlie).await.unwrap();
+
+    engine.create_edge(&Follow { _meta: EdgeMeta::new(alice.id(), bob.id()), notification: true }).await.unwrap();
+    engine.create_edge(&Follow { _meta: EdgeMeta::new(charlie.id(), alice.id()), notification: false }).await.unwrap();
+
+    let (fwd_edges, rev_edges): (Vec<Follow>, Vec<Follow>) = engine
+        .preload_object::<User>(alice.id())
+        .edge::<Follow, User>()
+        .collect_both_edges()
+        .await
+        .unwrap();
+
+    assert_eq!(fwd_edges.len(), 1);
+    assert_eq!(fwd_edges[0].from(), alice.id());
+    assert_eq!(fwd_edges[0].to(), bob.id());
+    assert!(fwd_edges[0].notification);
+
+    assert_eq!(rev_edges.len(), 1);
+    assert_eq!(rev_edges[0].from(), charlie.id());
+    assert_eq!(rev_edges[0].to(), alice.id());
+    assert!(!rev_edges[0].notification);
+}
+
+#[tokio::test]
+async fn test_preload_single_pivot_edge_filter() {
+    let (_resource, pool) = setup_test_db().await;
+    let adapter = CockroachAdapter::from_pool(pool);
+    adapter.init_schema().await.unwrap();
+    let engine = Engine::new(Box::new(adapter));
+
+    let mut alice = User::default();
+    alice.username = "alice".into();
+    alice.email = "alice@example.com".into();
+    engine.create_object(&alice).await.unwrap();
+
+    let mut bob = User::default();
+    bob.username = "bob".into();
+    bob.email = "bob@example.com".into();
+    engine.create_object(&bob).await.unwrap();
+
+    let mut charlie = User::default();
+    charlie.username = "charlie".into();
+    charlie.email = "charlie@example.com".into();
+    engine.create_object(&charlie).await.unwrap();
+
+    engine.create_edge(&Follow { _meta: EdgeMeta::new(alice.id(), bob.id()), notification: true }).await.unwrap();
+    engine.create_edge(&Follow { _meta: EdgeMeta::new(alice.id(), charlie.id()), notification: false }).await.unwrap();
+
+    let notified: Vec<User> = engine
+        .preload_object::<User>(alice.id())
+        .edge::<Follow, User>()
+        .edge_eq(&Follow::FIELDS.notification, true)
+        .collect()
+        .await
+        .unwrap();
+
+    assert_eq!(notified.len(), 1);
+    assert_eq!(notified[0].username, "bob");
+
+    let silent: Vec<User> = engine
+        .preload_object::<User>(alice.id())
+        .edge::<Follow, User>()
+        .edge_eq(&Follow::FIELDS.notification, false)
+        .collect()
+        .await
+        .unwrap();
+
+    assert_eq!(silent.len(), 1);
+    assert_eq!(silent[0].username, "charlie");
+}
+
+// ============================================================
+// Preload API — Multi-Pivot (MultiPreloadContext)
+// ============================================================
+
+#[tokio::test]
+async fn test_preload_multi_pivot_following() {
+    let (_resource, pool) = setup_test_db().await;
+    let adapter = CockroachAdapter::from_pool(pool);
+    adapter.init_schema().await.unwrap();
+    let engine = Engine::new(Box::new(adapter));
+
+    let mut alice = User::default();
+    alice.username = "alice".into();
+    alice.email = "alice@example.com".into();
+    engine.create_object(&alice).await.unwrap();
+
+    let mut bob = User::default();
+    bob.username = "bob".into();
+    bob.email = "bob@example.com".into();
+    engine.create_object(&bob).await.unwrap();
+
+    let mut charlie = User::default();
+    charlie.username = "charlie".into();
+    charlie.email = "charlie@example.com".into();
+    engine.create_object(&charlie).await.unwrap();
+
+    engine.create_edge(&Follow { _meta: EdgeMeta::new(alice.id(), bob.id()), notification: true }).await.unwrap();
+    engine.create_edge(&Follow { _meta: EdgeMeta::new(bob.id(), charlie.id()), notification: false }).await.unwrap();
+
+    let results: Vec<(User, Vec<User>)> = engine
+        .preload_objects::<User>(Query::default())
+        .edge::<Follow, User>()
+        .collect()
+        .await
+        .unwrap();
+
+    assert_eq!(results.len(), 3);
+
+    let alice_entry = results.iter().find(|(u, _)| u.username == "alice").unwrap();
+    assert_eq!(alice_entry.1.len(), 1);
+    assert_eq!(alice_entry.1[0].username, "bob");
+
+    let bob_entry = results.iter().find(|(u, _)| u.username == "bob").unwrap();
+    assert_eq!(bob_entry.1.len(), 1);
+    assert_eq!(bob_entry.1[0].username, "charlie");
+
+    let charlie_entry = results.iter().find(|(u, _)| u.username == "charlie").unwrap();
+    assert!(charlie_entry.1.is_empty());
+}
+
+#[tokio::test]
+async fn test_preload_multi_pivot_followers() {
+    let (_resource, pool) = setup_test_db().await;
+    let adapter = CockroachAdapter::from_pool(pool);
+    adapter.init_schema().await.unwrap();
+    let engine = Engine::new(Box::new(adapter));
+
+    let mut alice = User::default();
+    alice.username = "alice".into();
+    alice.email = "alice@example.com".into();
+    engine.create_object(&alice).await.unwrap();
+
+    let mut michael = User::default();
+    michael.username = "michael".into();
+    michael.email = "michael@example.com".into();
+    engine.create_object(&michael).await.unwrap();
+
+    let mut bob = User::default();
+    bob.username = "bob".into();
+    bob.email = "bob@example.com".into();
+    engine.create_object(&bob).await.unwrap();
+
+    engine.create_edge(&Follow { _meta: EdgeMeta::new(alice.id(), bob.id()), notification: true }).await.unwrap();
+    engine.create_edge(&Follow { _meta: EdgeMeta::new(michael.id(), bob.id()), notification: false }).await.unwrap();
+
+    let results: Vec<(User, Vec<User>)> = engine
+        .preload_objects::<User>(Query::default())
+        .edge::<Follow, User>()
+        .collect_reverse()
+        .await
+        .unwrap();
+
+    assert_eq!(results.len(), 3);
+
+    let bob_entry = results.iter().find(|(u, _)| u.username == "bob").unwrap();
+    assert_eq!(bob_entry.1.len(), 2);
+    let follower_names: std::collections::HashSet<_> =
+        bob_entry.1.iter().map(|u| u.username.as_str()).collect();
+    assert!(follower_names.contains("alice"));
+    assert!(follower_names.contains("michael"));
+
+    let alice_entry = results.iter().find(|(u, _)| u.username == "alice").unwrap();
+    assert!(alice_entry.1.is_empty());
+}
+
+#[tokio::test]
+async fn test_preload_multi_pivot_collect_edges() {
+    let (_resource, pool) = setup_test_db().await;
+    let adapter = CockroachAdapter::from_pool(pool);
+    adapter.init_schema().await.unwrap();
+    let engine = Engine::new(Box::new(adapter));
+
+    let mut alice = User::default();
+    alice.username = "alice".into();
+    alice.email = "alice@example.com".into();
+    engine.create_object(&alice).await.unwrap();
+
+    let mut bob = User::default();
+    bob.username = "bob".into();
+    bob.email = "bob@example.com".into();
+    engine.create_object(&bob).await.unwrap();
+
+    engine.create_edge(&Follow { _meta: EdgeMeta::new(alice.id(), bob.id()), notification: true }).await.unwrap();
+
+    let results: Vec<(User, Vec<Follow>)> = engine
+        .preload_objects::<User>(Query::default())
+        .edge::<Follow, User>()
+        .collect_edges()
+        .await
+        .unwrap();
+
+    assert_eq!(results.len(), 2);
+
+    let alice_entry = results.iter().find(|(u, _)| u.username == "alice").unwrap();
+    assert_eq!(alice_entry.1.len(), 1);
+    assert_eq!(alice_entry.1[0].from(), alice.id());
+    assert_eq!(alice_entry.1[0].to(), bob.id());
+    assert!(alice_entry.1[0].notification);
+
+    let bob_entry = results.iter().find(|(u, _)| u.username == "bob").unwrap();
+    assert!(bob_entry.1.is_empty());
+}
+
+#[tokio::test]
+async fn test_preload_multi_pivot_collect_with_target() {
+    let (_resource, pool) = setup_test_db().await;
+    let adapter = CockroachAdapter::from_pool(pool);
+    adapter.init_schema().await.unwrap();
+    let engine = Engine::new(Box::new(adapter));
+
+    let mut alice = User::default();
+    alice.username = "alice".into();
+    alice.email = "alice@example.com".into();
+    engine.create_object(&alice).await.unwrap();
+
+    let mut bob = User::default();
+    bob.username = "bob".into();
+    bob.email = "bob@example.com".into();
+    engine.create_object(&bob).await.unwrap();
+
+    engine.create_edge(&Follow { _meta: EdgeMeta::new(alice.id(), bob.id()), notification: true }).await.unwrap();
+
+    let results = engine
+        .preload_objects::<User>(Query::default())
+        .edge::<Follow, User>()
+        .collect_with_target()
+        .await
+        .unwrap();
+
+    assert_eq!(results.len(), 2);
+
+    let alice_entry = results.iter().find(|(u, _)| u.username == "alice").unwrap();
+    assert_eq!(alice_entry.1.len(), 1);
+    assert_eq!(alice_entry.1[0].edge().from(), alice.id());
+    assert_eq!(alice_entry.1[0].edge().to(), bob.id());
+    assert!(alice_entry.1[0].edge().notification);
+    assert_eq!(alice_entry.1[0].object().username, "bob");
+
+    let bob_entry = results.iter().find(|(u, _)| u.username == "bob").unwrap();
+    assert!(bob_entry.1.is_empty());
+}
+
+#[tokio::test]
+async fn test_preload_multi_pivot_count() {
+    let (_resource, pool) = setup_test_db().await;
+    let adapter = CockroachAdapter::from_pool(pool);
+    adapter.init_schema().await.unwrap();
+    let engine = Engine::new(Box::new(adapter));
+
+    let mut alice = User::default();
+    alice.username = "alice".into();
+    alice.email = "alice@example.com".into();
+    engine.create_object(&alice).await.unwrap();
+
+    let mut bob = User::default();
+    bob.username = "bob".into();
+    bob.email = "bob@example.com".into();
+    engine.create_object(&bob).await.unwrap();
+
+    let mut charlie = User::default();
+    charlie.username = "charlie".into();
+    charlie.email = "charlie@example.com".into();
+    engine.create_object(&charlie).await.unwrap();
+
+    engine.create_edge(&Follow { _meta: EdgeMeta::new(alice.id(), bob.id()), notification: true }).await.unwrap();
+    engine.create_edge(&Follow { _meta: EdgeMeta::new(alice.id(), charlie.id()), notification: false }).await.unwrap();
+    engine.create_edge(&Follow { _meta: EdgeMeta::new(bob.id(), charlie.id()), notification: true }).await.unwrap();
+
+    let counts: Vec<(User, u64)> = engine
+        .preload_objects::<User>(Query::default())
+        .edge::<Follow, User>()
+        .count()
+        .await
+        .unwrap();
+
+    assert_eq!(counts.len(), 3);
+
+    let alice_count = counts.iter().find(|(u, _)| u.username == "alice").unwrap();
+    assert_eq!(alice_count.1, 2);
+
+    let bob_count = counts.iter().find(|(u, _)| u.username == "bob").unwrap();
+    assert_eq!(bob_count.1, 1);
+
+    let charlie_count = counts.iter().find(|(u, _)| u.username == "charlie").unwrap();
+    assert_eq!(charlie_count.1, 0);
+}
+
+#[tokio::test]
+async fn test_preload_multi_pivot_count_reverse() {
+    let (_resource, pool) = setup_test_db().await;
+    let adapter = CockroachAdapter::from_pool(pool);
+    adapter.init_schema().await.unwrap();
+    let engine = Engine::new(Box::new(adapter));
+
+    let mut alice = User::default();
+    alice.username = "alice".into();
+    alice.email = "alice@example.com".into();
+    engine.create_object(&alice).await.unwrap();
+
+    let mut bob = User::default();
+    bob.username = "bob".into();
+    bob.email = "bob@example.com".into();
+    engine.create_object(&bob).await.unwrap();
+
+    let mut charlie = User::default();
+    charlie.username = "charlie".into();
+    charlie.email = "charlie@example.com".into();
+    engine.create_object(&charlie).await.unwrap();
+
+    engine.create_edge(&Follow { _meta: EdgeMeta::new(alice.id(), bob.id()), notification: true }).await.unwrap();
+    engine.create_edge(&Follow { _meta: EdgeMeta::new(alice.id(), charlie.id()), notification: false }).await.unwrap();
+    engine.create_edge(&Follow { _meta: EdgeMeta::new(bob.id(), charlie.id()), notification: true }).await.unwrap();
+
+    let counts: Vec<(User, u64)> = engine
+        .preload_objects::<User>(Query::default())
+        .edge::<Follow, User>()
+        .count_reverse()
+        .await
+        .unwrap();
+
+    assert_eq!(counts.len(), 3);
+
+    let alice_count = counts.iter().find(|(u, _)| u.username == "alice").unwrap();
+    assert_eq!(alice_count.1, 0);
+
+    let bob_count = counts.iter().find(|(u, _)| u.username == "bob").unwrap();
+    assert_eq!(bob_count.1, 1);
+
+    let charlie_count = counts.iter().find(|(u, _)| u.username == "charlie").unwrap();
+    assert_eq!(charlie_count.1, 2);
+}
+
+#[tokio::test]
+async fn test_preload_multi_pivot_owned() {
+    let (_resource, pool) = setup_test_db().await;
+    let adapter = CockroachAdapter::from_pool(pool);
+    adapter.init_schema().await.unwrap();
+    let engine = Engine::new(Box::new(adapter));
+
+    let mut alice = User::default();
+    alice.username = "alice".into();
+    alice.email = "alice@example.com".into();
+    engine.create_object(&alice).await.unwrap();
+
+    let mut bob = User::default();
+    bob.username = "bob".into();
+    bob.email = "bob@example.com".into();
+    engine.create_object(&bob).await.unwrap();
+
+    let mut post1 = Post::default();
+    post1.set_owner(alice.id());
+    post1.title = "Alice Post 1".into();
+    engine.create_object(&post1).await.unwrap();
+
+    let mut post2 = Post::default();
+    post2.set_owner(alice.id());
+    post2.title = "Alice Post 2".into();
+    engine.create_object(&post2).await.unwrap();
+
+    let mut post3 = Post::default();
+    post3.set_owner(bob.id());
+    post3.title = "Bob Post".into();
+    engine.create_object(&post3).await.unwrap();
+
+    let results: Vec<(User, Vec<Post>)> = engine
+        .preload_objects::<User>(Query::default())
+        .preload::<Post>()
+        .collect()
+        .await
+        .unwrap();
+
+    assert_eq!(results.len(), 2);
+
+    let alice_entry = results.iter().find(|(u, _)| u.username == "alice").unwrap();
+    assert_eq!(alice_entry.1.len(), 2);
+    let alice_post_titles: std::collections::HashSet<_> =
+        alice_entry.1.iter().map(|p| p.title.as_str()).collect();
+    assert!(alice_post_titles.contains("Alice Post 1"));
+    assert!(alice_post_titles.contains("Alice Post 2"));
+
+    let bob_entry = results.iter().find(|(u, _)| u.username == "bob").unwrap();
+    assert_eq!(bob_entry.1.len(), 1);
+    assert_eq!(bob_entry.1[0].title, "Bob Post");
+}
+
+// ============================================================
+// Engine — Bulk Delete & Utility Methods
+// ============================================================
+
+#[tokio::test]
+async fn test_delete_bulk_objects() {
+    let (_resource, pool) = setup_test_db().await;
+    let adapter = CockroachAdapter::from_pool(pool);
+    adapter.init_schema().await.unwrap();
+    let engine = Engine::new(Box::new(adapter));
+
+    let mut ids = Vec::new();
+    for i in 0..5 {
+        let mut user = User::default();
+        user.username = format!("bulk{}", i);
+        user.email = format!("bulk{}@example.com", i);
+        ids.push(user.id());
+        engine.create_object(&user).await.unwrap();
+    }
+
+    let count_before: u64 = engine.count_objects::<User>(None).await.unwrap();
+    assert_eq!(count_before, 5);
+
+    let deleted = engine
+        .delete_objects::<User>(ids[..3].to_vec(), system_owner())
+        .await
+        .unwrap();
+    assert_eq!(deleted, 3);
+
+    let remaining: u64 = engine.count_objects::<User>(None).await.unwrap();
+    assert_eq!(remaining, 2);
+}
+
+#[tokio::test]
+async fn test_delete_owned_objects() {
+    let (_resource, pool) = setup_test_db().await;
+    let adapter = CockroachAdapter::from_pool(pool);
+    adapter.init_schema().await.unwrap();
+    let engine = Engine::new(Box::new(adapter));
+
+    let mut owner = User::default();
+    owner.username = "owner".into();
+    owner.email = "owner@example.com".into();
+    engine.create_object(&owner).await.unwrap();
+
+    for i in 0..4 {
+        let mut post = Post::default();
+        post.set_owner(owner.id());
+        post.title = format!("Post {}", i);
+        engine.create_object(&post).await.unwrap();
+    }
+
+    let count_before: u64 = engine
+        .count_objects::<Post>(Some(Query::new(owner.id())))
+        .await
+        .unwrap();
+    assert_eq!(count_before, 4);
+
+    let deleted = engine.delete_owned_objects::<Post>(owner.id()).await.unwrap();
+    assert_eq!(deleted, 4);
+
+    let count_after: u64 = engine
+        .count_objects::<Post>(Some(Query::new(owner.id())))
+        .await
+        .unwrap();
+    assert_eq!(count_after, 0);
+}
+
+#[tokio::test]
+async fn test_find_object_with_owner() {
+    let (_resource, pool) = setup_test_db().await;
+    let adapter = CockroachAdapter::from_pool(pool);
+    adapter.init_schema().await.unwrap();
+    let engine = Engine::new(Box::new(adapter));
+
+    let mut owner = User::default();
+    owner.username = "finder".into();
+    owner.email = "finder@example.com".into();
+    engine.create_object(&owner).await.unwrap();
+
+    let mut published = Post::default();
+    published.set_owner(owner.id());
+    published.title = "Published Post".into();
+    published.status = PostStatus::Published;
+    engine.create_object(&published).await.unwrap();
+
+    let mut draft = Post::default();
+    draft.set_owner(owner.id());
+    draft.title = "Draft Post".into();
+    engine.create_object(&draft).await.unwrap();
+
+    let found: Option<Post> = engine
+        .find_object_with_owner(
+            owner.id(),
+            &[filter!(&Post::FIELDS.status, PostStatus::Published)],
+        )
+        .await
+        .unwrap();
+    assert!(found.is_some());
+    assert_eq!(found.unwrap().title, "Published Post");
+
+    let other_owner_id = uuid::Uuid::now_v7();
+    let missing: Option<Post> = engine
+        .find_object_with_owner(
+            other_owner_id,
+            &[filter!(&Post::FIELDS.status, PostStatus::Published)],
+        )
+        .await
+        .unwrap();
+    assert!(missing.is_none());
+}
+
+#[tokio::test]
+async fn test_fetch_owned_object() {
+    let (_resource, pool) = setup_test_db().await;
+    let adapter = CockroachAdapter::from_pool(pool);
+    adapter.init_schema().await.unwrap();
+    let engine = Engine::new(Box::new(adapter));
+
+    let mut alice = User::default();
+    alice.username = "alice".into();
+    alice.email = "alice@example.com".into();
+    engine.create_object(&alice).await.unwrap();
+
+    let mut bob = User::default();
+    bob.username = "bob".into();
+    bob.email = "bob@example.com".into();
+    engine.create_object(&bob).await.unwrap();
+
+    let mut post = Post::default();
+    post.set_owner(alice.id());
+    post.title = "Alice's Post".into();
+    engine.create_object(&post).await.unwrap();
+
+    let found: Option<Post> = engine.fetch_owned_object(alice.id()).await.unwrap();
+    assert!(found.is_some());
+    assert_eq!(found.unwrap().title, "Alice's Post");
+
+    let none: Option<Post> = engine.fetch_owned_object(bob.id()).await.unwrap();
+    assert!(none.is_none());
+}

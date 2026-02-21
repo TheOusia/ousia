@@ -1014,628 +1014,975 @@ async fn test_sequence() {
     assert_eq!(value, 2);
 }
 
-#[cfg(feature = "ledger")]
-mod ledger_tests {
-    use super::*;
-    use ousia::adapters::postgres::PostgresAdapter;
-    use ousia::ledger::{
-        Asset, Balance, LedgerAdapter, LedgerSystem, Money, MoneyError, Transaction,
-    };
-    use sqlx::postgres::PgPoolOptions;
-    use std::sync::Arc;
-    use testcontainers::ContainerAsync;
-    use testcontainers_modules::postgres::Postgres;
-    use uuid::Uuid;
+// ============================================================
+// Preload API — Single Pivot (QueryContext / EdgeQueryContext)
+// ============================================================
 
-    #[tokio::test]
-    async fn test_full_transaction_flow() {
-        let (_container, pool) = setup_test_db().await;
-        let adapter = PostgresAdapter::from_pool(pool);
-        adapter.init_schema().await.unwrap();
+#[tokio::test]
+async fn test_preload_object_get() {
+    let (_resource, pool) = setup_test_db().await;
+    let adapter = PostgresAdapter::from_pool(pool);
+    adapter.init_schema().await.unwrap();
+    let engine = Engine::new(Box::new(adapter));
 
-        // Create asset
-        let asset = Asset::new("USD", 10_000);
-        adapter.create_asset(asset.clone()).await.unwrap();
+    let mut alice = User::default();
+    alice.username = "alice".into();
+    alice.email = "alice@example.com".into();
+    alice.display_name = "Alice".into();
+    engine.create_object(&alice).await.unwrap();
 
-        // Create two users
-        let alice = uuid::Uuid::now_v7();
-        let bob = uuid::Uuid::now_v7();
+    let found: Option<User> = engine.preload_object(alice.id()).get().await.unwrap();
+    assert!(found.is_some());
+    assert_eq!(found.unwrap().username, "alice");
 
-        // Mint money to Alice
-        adapter
-            .mint_value_objects(asset.id, alice, 50_000, "initial".to_string())
-            .await
-            .unwrap();
+    let missing: Option<User> = engine
+        .preload_object(uuid::Uuid::now_v7())
+        .get()
+        .await
+        .unwrap();
+    assert!(missing.is_none());
+}
 
-        // Check Alice's balance
-        let balance = adapter.get_balance(asset.id, alice).await.unwrap();
-        assert_eq!(balance.available, 50_000);
-        assert_eq!(balance.reserved, 0);
+#[tokio::test]
+async fn test_preload_single_pivot_following() {
+    let (_resource, pool) = setup_test_db().await;
+    let adapter = PostgresAdapter::from_pool(pool);
+    adapter.init_schema().await.unwrap();
+    let engine = Engine::new(Box::new(adapter));
 
-        // Transfer to Bob
-        let to_burn = adapter
-            .select_for_burn(asset.id, alice, 20_000)
-            .await
-            .unwrap();
-        let burn_ids: Vec<Uuid> = to_burn.iter().map(|vo| vo.id).collect();
-        adapter
-            .burn_value_objects(burn_ids, "transfer".to_string())
-            .await
-            .unwrap();
+    let mut alice = User::default();
+    alice.username = "alice".into();
+    alice.email = "alice@example.com".into();
+    engine.create_object(&alice).await.unwrap();
 
-        adapter
-            .mint_value_objects(asset.id, bob, 20_000, "transfer".to_string())
-            .await
-            .unwrap();
+    let mut bob = User::default();
+    bob.username = "bob".into();
+    bob.email = "bob@example.com".into();
+    engine.create_object(&bob).await.unwrap();
 
-        // Check final balances
-        let alice_balance = adapter.get_balance(asset.id, alice).await.unwrap();
-        let bob_balance = adapter.get_balance(asset.id, bob).await.unwrap();
+    let mut charlie = User::default();
+    charlie.username = "charlie".into();
+    charlie.email = "charlie@example.com".into();
+    engine.create_object(&charlie).await.unwrap();
 
-        assert_eq!(alice_balance.available, 30_000);
-        assert_eq!(bob_balance.available, 20_000);
-    }
-
-    #[tokio::test]
-    async fn test_idempotency() {
-        let (_container, pool) = setup_test_db().await;
-        let adapter = PostgresAdapter::from_pool(pool);
-        adapter.init_schema().await.unwrap();
-
-        let asset = Asset::new("EUR", 10_000);
-        adapter.create_asset(asset.clone()).await.unwrap();
-
-        let user = uuid::Uuid::now_v7();
-        let key = "unique-key-123";
-
-        // First mint
-        let tx_id1 = adapter
-            .mint_idempotent(key, asset.id, user, 10_000, "deposit".to_string())
-            .await
-            .unwrap();
-
-        // Second mint with same key - should return same transaction
-        let tx_id2 = adapter
-            .mint_idempotent(key, asset.id, user, 10_000, "deposit".to_string())
-            .await
-            .unwrap();
-
-        assert_eq!(tx_id1, tx_id2);
-
-        // Balance should only reflect one mint
-        let balance = adapter.get_balance(asset.id, user).await.unwrap();
-        assert_eq!(balance.available, 10_000);
-    }
-
-    #[tokio::test]
-    async fn test_transaction_reversion() {
-        let (_container, pool) = setup_test_db().await;
-        let adapter = PostgresAdapter::from_pool(pool);
-        adapter.init_schema().await.unwrap();
-
-        let asset = Asset::new("GBP", 10_000);
-        adapter.create_asset(asset.clone()).await.unwrap();
-
-        let alice = uuid::Uuid::now_v7();
-        let bob = uuid::Uuid::now_v7();
-
-        // Mint to Alice
-        adapter
-            .mint_value_objects(asset.id, alice, 30_000, "initial".to_string())
-            .await
-            .unwrap();
-
-        // Transfer to Bob
-        let to_burn = adapter
-            .select_for_burn(asset.id, alice, 15_000)
-            .await
-            .unwrap();
-        let burn_ids: Vec<Uuid> = to_burn.iter().map(|vo| vo.id).collect();
-        adapter
-            .burn_value_objects(burn_ids, "transfer".to_string())
-            .await
-            .unwrap();
-
-        adapter
-            .mint_value_objects(asset.id, bob, 15_000, "transfer".to_string())
-            .await
-            .unwrap();
-
-        // Record the transaction
-        let tx = Transaction::new(
-            asset.id,
-            Some(alice),
-            Some(bob),
-            15_000,
-            15_000,
-            "transfer".to_string(),
-        );
-        let tx_id = adapter.record_transaction(tx).await.unwrap();
-
-        // Revert it
-        let _revert_tx_id = adapter
-            .revert_transaction(tx_id, "mistake".to_string())
-            .await
-            .unwrap();
-
-        // Check balances are back to original
-        let alice_balance = adapter.get_balance(asset.id, alice).await.unwrap();
-        let bob_balance = adapter.get_balance(asset.id, bob).await.unwrap();
-
-        assert_eq!(alice_balance.available, 30_000);
-        assert_eq!(bob_balance.available, 0);
-    }
-
-    #[tokio::test]
-    async fn test_create_assets() {
-        let (_container, pool) = setup_test_db().await;
-        let adapter = PostgresAdapter::from_pool(pool);
-        adapter.init_schema().await.unwrap();
-
-        let system = Arc::new(LedgerSystem::new(Box::new(adapter)));
-
-        // Create assets
-        let usd = Asset::new("USD", 100_00);
-        let ngn = Asset::new("NGN", 1_000_00);
-
-        system.adapter().create_asset(usd.clone()).await.unwrap();
-        system.adapter().create_asset(ngn.clone()).await.unwrap();
-
-        // Verify assets can be retrieved
-        let retrieved_usd = system.adapter().get_asset("USD").await.unwrap();
-        let retrieved_ngn = system.adapter().get_asset("NGN").await.unwrap();
-
-        assert_eq!(retrieved_usd.code, "USD");
-        assert_eq!(retrieved_usd.unit, 100_00);
-        assert_eq!(retrieved_ngn.code, "NGN");
-        assert_eq!(retrieved_ngn.unit, 1_000_00);
-    }
-
-    #[tokio::test]
-    async fn test_mint_money() {
-        let (_container, pool) = setup_test_db().await;
-        let adapter = PostgresAdapter::from_pool(pool);
-        adapter.init_schema().await.unwrap();
-
-        let system = Arc::new(LedgerSystem::new(Box::new(adapter)));
-
-        // Create asset
-        let usd = Asset::new("USD", 100_00);
-        system.adapter().create_asset(usd.clone()).await.unwrap();
-
-        let alice = uuid::Uuid::now_v7();
-
-        // Mint $500 to Alice
-        let mint_tx = Money::mint(
-            "USD",
-            alice,
-            500_00,
-            "Initial deposit".to_string(),
-            system.clone(),
-        )
+    engine
+        .create_edge(&Follow {
+            _meta: EdgeMeta::new(alice.id(), bob.id()),
+            notification: true,
+        })
+        .await
+        .unwrap();
+    engine
+        .create_edge(&Follow {
+            _meta: EdgeMeta::new(alice.id(), charlie.id()),
+            notification: false,
+        })
         .await
         .unwrap();
 
-        assert_eq!(mint_tx.amount, 500_00);
-
-        // Check Alice's balance
-        let alice_balance = Balance::get("USD", alice, system.clone()).await.unwrap();
-        assert_eq!(alice_balance.available, 500_00);
-        assert_eq!(alice_balance.reserved, 0);
-        assert_eq!(alice_balance.total, 500_00);
-    }
-
-    #[tokio::test]
-    async fn test_transfer_money() {
-        let (_container, pool) = setup_test_db().await;
-        let adapter = PostgresAdapter::from_pool(pool);
-        adapter.init_schema().await.unwrap();
-
-        let system = Arc::new(LedgerSystem::new(Box::new(adapter)));
-
-        // Setup
-        let usd = Asset::new("USD", 100_00);
-        system.adapter().create_asset(usd.clone()).await.unwrap();
-
-        let alice = uuid::Uuid::now_v7();
-        let bob = uuid::Uuid::now_v7();
-
-        // Mint to Alice
-        Money::mint(
-            "USD",
-            alice,
-            500_00,
-            "Initial deposit".to_string(),
-            system.clone(),
-        )
+    let following: Vec<User> = engine
+        .preload_object::<User>(alice.id())
+        .edge::<Follow, User>()
+        .collect()
         .await
         .unwrap();
 
-        // Transfer from Alice to Bob
-        let alice_money = Money::new(system.clone(), "USD", alice);
-        let slice = alice_money.slice(200_00).unwrap();
+    assert_eq!(following.len(), 2);
+    let ids: std::collections::HashSet<_> = following.iter().map(|u| u.id()).collect();
+    assert!(ids.contains(&bob.id()));
+    assert!(ids.contains(&charlie.id()));
 
-        slice
-            .transfer_to(bob, "Payment for services".to_string())
-            .await
-            .unwrap();
+    let bobs_following: Vec<User> = engine
+        .preload_object::<User>(bob.id())
+        .edge::<Follow, User>()
+        .collect()
+        .await
+        .unwrap();
+    assert!(bobs_following.is_empty());
+}
 
-        // Check balances
-        let alice_balance = Balance::get("USD", alice, system.clone()).await.unwrap();
-        let bob_balance = Balance::get("USD", bob, system.clone()).await.unwrap();
+#[tokio::test]
+async fn test_preload_single_pivot_followers() {
+    let (_resource, pool) = setup_test_db().await;
+    let adapter = PostgresAdapter::from_pool(pool);
+    adapter.init_schema().await.unwrap();
+    let engine = Engine::new(Box::new(adapter));
 
-        assert_eq!(alice_balance.available, 300_00);
-        assert_eq!(bob_balance.available, 200_00);
-    }
+    let mut alice = User::default();
+    alice.username = "alice".into();
+    alice.email = "alice@example.com".into();
+    engine.create_object(&alice).await.unwrap();
 
-    #[tokio::test]
-    async fn test_transfer_insufficient_funds() {
-        let (_container, pool) = setup_test_db().await;
-        let adapter = PostgresAdapter::from_pool(pool);
-        adapter.init_schema().await.unwrap();
+    let mut michael = User::default();
+    michael.username = "michael".into();
+    michael.email = "michael@example.com".into();
+    engine.create_object(&michael).await.unwrap();
 
-        let system = Arc::new(LedgerSystem::new(Box::new(adapter)));
+    let mut bob = User::default();
+    bob.username = "bob".into();
+    bob.email = "bob@example.com".into();
+    engine.create_object(&bob).await.unwrap();
 
-        // Setup
-        let usd = Asset::new("USD", 100_00);
-        system.adapter().create_asset(usd.clone()).await.unwrap();
-
-        let alice = uuid::Uuid::now_v7();
-        let bob = uuid::Uuid::now_v7();
-
-        // Mint small amount to Alice
-        Money::mint("USD", alice, 50_00, "deposit".to_string(), system.clone())
-            .await
-            .unwrap();
-
-        // Try to transfer more than Alice has
-        let alice_money = Money::new(system.clone(), "USD", alice);
-        let slice = alice_money.slice(100_00).unwrap();
-
-        let result = slice.transfer_to(bob, "payment".to_string()).await;
-
-        assert!(matches!(result, Err(MoneyError::InsufficientFunds)));
-    }
-
-    #[tokio::test]
-    async fn test_reserve_money() {
-        let (_container, pool) = setup_test_db().await;
-        let adapter = PostgresAdapter::from_pool(pool);
-        adapter.init_schema().await.unwrap();
-
-        let system = Arc::new(LedgerSystem::new(Box::new(adapter)));
-
-        // Setup
-        let usd = Asset::new("USD", 100_00);
-        system.adapter().create_asset(usd.clone()).await.unwrap();
-
-        let bob = uuid::Uuid::now_v7();
-        let marketplace = uuid::Uuid::now_v7();
-
-        // Mint to Bob
-        Money::mint("USD", bob, 200_00, "deposit".to_string(), system.clone())
-            .await
-            .unwrap();
-
-        // Reserve money
-        let reserve_tx = Money::reserve(
-            "USD",
-            bob,
-            marketplace,
-            100_00,
-            "Escrow for order #123".to_string(),
-            system.clone(),
-        )
+    engine
+        .create_edge(&Follow {
+            _meta: EdgeMeta::new(alice.id(), bob.id()),
+            notification: true,
+        })
+        .await
+        .unwrap();
+    engine
+        .create_edge(&Follow {
+            _meta: EdgeMeta::new(michael.id(), bob.id()),
+            notification: false,
+        })
         .await
         .unwrap();
 
-        assert_eq!(reserve_tx.amount, 100_00);
-
-        // Check balance
-        let bob_balance = Balance::get("USD", bob, system.clone()).await.unwrap();
-        assert_eq!(bob_balance.available, 100_00);
-        assert_eq!(bob_balance.reserved, 100_00);
-        assert_eq!(bob_balance.total, 200_00);
-    }
-
-    #[tokio::test]
-    async fn test_idempotent_minting() {
-        let (_container, pool) = setup_test_db().await;
-        let adapter = PostgresAdapter::from_pool(pool);
-        adapter.init_schema().await.unwrap();
-
-        let system = Arc::new(LedgerSystem::new(Box::new(adapter)));
-
-        // Setup
-        let usd = Asset::new("USD", 100_00);
-        system.adapter().create_asset(usd.clone()).await.unwrap();
-
-        let charlie = uuid::Uuid::now_v7();
-        let idempotency_key = "webhook-123-retry-1";
-
-        // First mint
-        let tx1 = Money::mint_idempotent(
-            idempotency_key.to_string(),
-            "USD",
-            charlie,
-            75_00,
-            "Webhook deposit".to_string(),
-            system.clone(),
-        )
+    let followers: Vec<User> = engine
+        .preload_object::<User>(bob.id())
+        .edge::<Follow, User>()
+        .collect_reverse()
         .await
         .unwrap();
 
-        // Retry with same key (simulating webhook retry)
-        let tx2 = Money::mint_idempotent(
-            idempotency_key.to_string(),
-            "USD",
-            charlie,
-            75_00,
-            "Webhook deposit".to_string(),
-            system.clone(),
-        )
+    assert_eq!(followers.len(), 2);
+    let ids: std::collections::HashSet<_> = followers.iter().map(|u| u.id()).collect();
+    assert!(ids.contains(&alice.id()));
+    assert!(ids.contains(&michael.id()));
+}
+
+#[tokio::test]
+async fn test_preload_single_pivot_collect_edges() {
+    let (_resource, pool) = setup_test_db().await;
+    let adapter = PostgresAdapter::from_pool(pool);
+    adapter.init_schema().await.unwrap();
+    let engine = Engine::new(Box::new(adapter));
+
+    let mut alice = User::default();
+    alice.username = "alice".into();
+    alice.email = "alice@example.com".into();
+    engine.create_object(&alice).await.unwrap();
+
+    let mut bob = User::default();
+    bob.username = "bob".into();
+    bob.email = "bob@example.com".into();
+    engine.create_object(&bob).await.unwrap();
+
+    engine
+        .create_edge(&Follow {
+            _meta: EdgeMeta::new(alice.id(), bob.id()),
+            notification: true,
+        })
         .await
         .unwrap();
 
-        // Should return the same transaction
-        assert_eq!(tx1.transaction_id, tx2.transaction_id);
-
-        // Balance should only reflect one mint
-        let charlie_balance = Balance::get("USD", charlie, system.clone()).await.unwrap();
-        assert_eq!(charlie_balance.available, 75_00);
-    }
-
-    #[tokio::test]
-    async fn test_burn_money() {
-        let (_container, pool) = setup_test_db().await;
-        let adapter = PostgresAdapter::from_pool(pool);
-        adapter.init_schema().await.unwrap();
-
-        let system = Arc::new(LedgerSystem::new(Box::new(adapter)));
-
-        // Setup
-        let usd = Asset::new("USD", 100_00);
-        system.adapter().create_asset(usd.clone()).await.unwrap();
-
-        let alice = uuid::Uuid::now_v7();
-
-        // Mint to Alice
-        Money::mint("USD", alice, 300_00, "deposit".to_string(), system.clone())
-            .await
-            .unwrap();
-
-        // Burn some money
-        let alice_money = Money::new(system.clone(), "USD", alice);
-        let slice = alice_money.slice(50_00).unwrap();
-
-        slice.burn("Fee deduction".to_string()).await.unwrap();
-
-        // Check balance
-        let alice_balance = Balance::get("USD", alice, system.clone()).await.unwrap();
-        assert_eq!(alice_balance.available, 250_00);
-    }
-
-    #[tokio::test]
-    async fn test_multiple_transfers() {
-        let (_container, pool) = setup_test_db().await;
-        let adapter = PostgresAdapter::from_pool(pool);
-        adapter.init_schema().await.unwrap();
-
-        let system = Arc::new(LedgerSystem::new(Box::new(adapter)));
-
-        // Setup
-        let usd = Asset::new("USD", 100_00);
-        system.adapter().create_asset(usd.clone()).await.unwrap();
-
-        let alice = uuid::Uuid::now_v7();
-        let bob = uuid::Uuid::now_v7();
-        let charlie = uuid::Uuid::now_v7();
-
-        // Mint to Alice
-        Money::mint("USD", alice, 1000_00, "deposit".to_string(), system.clone())
-            .await
-            .unwrap();
-
-        // Alice transfers to Bob
-        let alice_money = Money::new(system.clone(), "USD", alice);
-        let slice = alice_money.slice(300_00).unwrap();
-        slice
-            .transfer_to(bob, "payment 1".to_string())
-            .await
-            .unwrap();
-
-        // Bob transfers to Charlie
-        let bob_money = Money::new(system.clone(), "USD", bob);
-        let slice = bob_money.slice(150_00).unwrap();
-        slice
-            .transfer_to(charlie, "payment 2".to_string())
-            .await
-            .unwrap();
-
-        // Alice transfers to Charlie
-        let alice_money = Money::new(system.clone(), "USD", alice);
-        let slice = alice_money.slice(200_00).unwrap();
-        slice
-            .transfer_to(charlie, "payment 3".to_string())
-            .await
-            .unwrap();
-
-        // Check final balances
-        let alice_balance = Balance::get("USD", alice, system.clone()).await.unwrap();
-        let bob_balance = Balance::get("USD", bob, system.clone()).await.unwrap();
-        let charlie_balance = Balance::get("USD", charlie, system.clone()).await.unwrap();
-
-        assert_eq!(alice_balance.available, 500_00); // 1000 - 300 - 200
-        assert_eq!(bob_balance.available, 150_00); // 300 - 150
-        assert_eq!(charlie_balance.available, 350_00); // 150 + 200
-    }
-
-    #[tokio::test]
-    async fn test_invalid_amount() {
-        let (_container, pool) = setup_test_db().await;
-        let adapter = PostgresAdapter::from_pool(pool);
-        adapter.init_schema().await.unwrap();
-
-        let system = Arc::new(LedgerSystem::new(Box::new(adapter)));
-
-        let usd = Asset::new("USD", 100_00);
-        system.adapter().create_asset(usd.clone()).await.unwrap();
-
-        let alice = uuid::Uuid::now_v7();
-
-        // Try to mint negative amount
-        let result =
-            Money::mint("USD", alice, -100_00, "invalid".to_string(), system.clone()).await;
-
-        assert!(matches!(result, Err(MoneyError::InvalidAmount)));
-
-        // Try to mint zero
-        let result = Money::mint("USD", alice, 0, "invalid".to_string(), system.clone()).await;
-
-        assert!(matches!(result, Err(MoneyError::InvalidAmount)));
-    }
-
-    #[tokio::test]
-    async fn test_asset_not_found() {
-        let (_container, pool) = setup_test_db().await;
-        let adapter = PostgresAdapter::from_pool(pool);
-        adapter.init_schema().await.unwrap();
-
-        let system = Arc::new(LedgerSystem::new(Box::new(adapter)));
-
-        let alice = uuid::Uuid::now_v7();
-
-        // Try to mint with non-existent asset
-        let result =
-            Money::mint("INVALID", alice, 100_00, "test".to_string(), system.clone()).await;
-
-        assert!(matches!(result, Err(MoneyError::AssetNotFound(_))));
-    }
-
-    #[tokio::test]
-    async fn test_concurrent_transfers() {
-        let (_container, pool) = setup_test_db().await;
-        let adapter = PostgresAdapter::from_pool(pool);
-        adapter.init_schema().await.unwrap();
-
-        let system = Arc::new(LedgerSystem::new(Box::new(adapter)));
-
-        // Setup
-        let usd = Asset::new("USD", 100_00);
-        system.adapter().create_asset(usd.clone()).await.unwrap();
-
-        let alice = uuid::Uuid::now_v7();
-        let bob = uuid::Uuid::now_v7();
-        let charlie = uuid::Uuid::now_v7();
-
-        // Mint to Alice
-        Money::mint("USD", alice, 1000_00, "deposit".to_string(), system.clone())
-            .await
-            .unwrap();
-
-        // Spawn concurrent transfers
-        let system1 = system.clone();
-        let system2 = system.clone();
-
-        let handle1 = tokio::spawn(async move {
-            let alice_money = Money::new(system1.clone(), "USD", alice);
-            let slice = alice_money.slice(200_00).unwrap();
-            slice.transfer_to(bob, "concurrent 1".to_string()).await
-        });
-
-        let handle2 = tokio::spawn(async move {
-            let alice_money = Money::new(system2.clone(), "USD", alice);
-            let slice = alice_money.slice(300_00).unwrap();
-            slice.transfer_to(charlie, "concurrent 2".to_string()).await
-        });
-
-        // Both should succeed
-        handle1.await.unwrap().unwrap();
-        handle2.await.unwrap().unwrap();
-
-        // Check final balances
-        let alice_balance = Balance::get("USD", alice, system.clone()).await.unwrap();
-        let bob_balance = Balance::get("USD", bob, system.clone()).await.unwrap();
-        let charlie_balance = Balance::get("USD", charlie, system.clone()).await.unwrap();
-
-        assert_eq!(alice_balance.available, 500_00); // 1000 - 200 - 300
-        assert_eq!(bob_balance.available, 200_00);
-        assert_eq!(charlie_balance.available, 300_00);
-    }
-
-    #[tokio::test]
-    async fn test_fragmentation() {
-        let (_container, pool) = setup_test_db().await;
-        let adapter = PostgresAdapter::from_pool(pool);
-        adapter.init_schema().await.unwrap();
-
-        let system = Arc::new(LedgerSystem::new(Box::new(adapter)));
-
-        // Create asset with small unit size
-        let usd = Asset::new("USD", 100_00);
-        system.adapter().create_asset(usd.clone()).await.unwrap();
-
-        let alice = uuid::Uuid::now_v7();
-
-        // Mint amount larger than unit - should fragment
-        Money::mint(
-            "USD",
-            alice,
-            500_00, // 5x the unit size
-            "deposit".to_string(),
-            system.clone(),
-        )
+    let edges: Vec<Follow> = engine
+        .preload_object::<User>(alice.id())
+        .edge::<Follow, User>()
+        .collect_edges()
         .await
         .unwrap();
 
-        let balance = Balance::get("USD", alice, system.clone()).await.unwrap();
-        assert_eq!(balance.available, 500_00);
+    assert_eq!(edges.len(), 1);
+    assert_eq!(edges[0].from(), alice.id());
+    assert_eq!(edges[0].to(), bob.id());
+    assert!(edges[0].notification);
+}
 
-        // The adapter should have created 5 ValueObjects of 100_00 each
-        // We can't directly check this without exposing internal methods,
-        // but the balance should be correct
-    }
+#[tokio::test]
+async fn test_preload_single_pivot_collect_with_target() {
+    let (_resource, pool) = setup_test_db().await;
+    let adapter = PostgresAdapter::from_pool(pool);
+    adapter.init_schema().await.unwrap();
+    let engine = Engine::new(Box::new(adapter));
 
-    #[tokio::test]
-    async fn test_balance_with_mixed_states() {
-        let (_container, pool) = setup_test_db().await;
-        let adapter = PostgresAdapter::from_pool(pool);
-        adapter.init_schema().await.unwrap();
+    let mut alice = User::default();
+    alice.username = "alice".into();
+    alice.email = "alice@example.com".into();
+    engine.create_object(&alice).await.unwrap();
 
-        let system = Arc::new(LedgerSystem::new(Box::new(adapter)));
+    let mut bob = User::default();
+    bob.username = "bob".into();
+    bob.email = "bob@example.com".into();
+    engine.create_object(&bob).await.unwrap();
 
-        let usd = Asset::new("USD", 100_00);
-        system.adapter().create_asset(usd.clone()).await.unwrap();
-
-        let bob = uuid::Uuid::now_v7();
-        let marketplace = uuid::Uuid::now_v7();
-
-        // Mint to Bob
-        Money::mint("USD", bob, 500_00, "deposit".to_string(), system.clone())
-            .await
-            .unwrap();
-
-        // Reserve some
-        Money::reserve(
-            "USD",
-            bob,
-            marketplace,
-            200_00,
-            "escrow".to_string(),
-            system.clone(),
-        )
+    engine
+        .create_edge(&Follow {
+            _meta: EdgeMeta::new(alice.id(), bob.id()),
+            notification: true,
+        })
         .await
         .unwrap();
 
-        // Burn some
-        let bob_money = Money::new(system.clone(), "USD", bob);
-        let slice = bob_money.slice(50_00).unwrap();
-        slice.burn("fee".to_string()).await.unwrap();
+    let pairs = engine
+        .preload_object::<User>(alice.id())
+        .edge::<Follow, User>()
+        .collect_with_target()
+        .await
+        .unwrap();
 
-        // Check balance
-        let balance = Balance::get("USD", bob, system.clone()).await.unwrap();
-        assert_eq!(balance.available, 250_00); // 500 - 200 (reserved) - 50 (burned)
-        assert_eq!(balance.reserved, 200_00);
-        assert_eq!(balance.total, 450_00); // 250 + 200
+    assert_eq!(pairs.len(), 1);
+    assert_eq!(pairs[0].edge().from(), alice.id());
+    assert_eq!(pairs[0].edge().to(), bob.id());
+    assert!(pairs[0].edge().notification);
+    assert_eq!(pairs[0].object().username, "bob");
+}
+
+#[tokio::test]
+async fn test_preload_single_pivot_collect_both() {
+    let (_resource, pool) = setup_test_db().await;
+    let adapter = PostgresAdapter::from_pool(pool);
+    adapter.init_schema().await.unwrap();
+    let engine = Engine::new(Box::new(adapter));
+
+    let mut alice = User::default();
+    alice.username = "alice".into();
+    alice.email = "alice@example.com".into();
+    engine.create_object(&alice).await.unwrap();
+
+    let mut bob = User::default();
+    bob.username = "bob".into();
+    bob.email = "bob@example.com".into();
+    engine.create_object(&bob).await.unwrap();
+
+    let mut charlie = User::default();
+    charlie.username = "charlie".into();
+    charlie.email = "charlie@example.com".into();
+    engine.create_object(&charlie).await.unwrap();
+
+    engine
+        .create_edge(&Follow {
+            _meta: EdgeMeta::new(alice.id(), bob.id()),
+            notification: true,
+        })
+        .await
+        .unwrap();
+    engine
+        .create_edge(&Follow {
+            _meta: EdgeMeta::new(charlie.id(), alice.id()),
+            notification: false,
+        })
+        .await
+        .unwrap();
+
+    let (following, followers) = engine
+        .preload_object::<User>(alice.id())
+        .edge::<Follow, User>()
+        .collect_both()
+        .await
+        .unwrap();
+
+    assert_eq!(following.len(), 1);
+    assert_eq!(following[0].username, "bob");
+    assert_eq!(followers.len(), 1);
+    assert_eq!(followers[0].username, "charlie");
+}
+
+#[tokio::test]
+async fn test_preload_single_pivot_collect_both_with_target() {
+    let (_resource, pool) = setup_test_db().await;
+    let adapter = PostgresAdapter::from_pool(pool);
+    adapter.init_schema().await.unwrap();
+    let engine = Engine::new(Box::new(adapter));
+
+    let mut alice = User::default();
+    alice.username = "alice".into();
+    alice.email = "alice@example.com".into();
+    engine.create_object(&alice).await.unwrap();
+
+    let mut bob = User::default();
+    bob.username = "bob".into();
+    bob.email = "bob@example.com".into();
+    engine.create_object(&bob).await.unwrap();
+
+    let mut charlie = User::default();
+    charlie.username = "charlie".into();
+    charlie.email = "charlie@example.com".into();
+    engine.create_object(&charlie).await.unwrap();
+
+    engine
+        .create_edge(&Follow {
+            _meta: EdgeMeta::new(alice.id(), bob.id()),
+            notification: true,
+        })
+        .await
+        .unwrap();
+    engine
+        .create_edge(&Follow {
+            _meta: EdgeMeta::new(charlie.id(), alice.id()),
+            notification: false,
+        })
+        .await
+        .unwrap();
+
+    let (fwd_pairs, rev_pairs) = engine
+        .preload_object::<User>(alice.id())
+        .edge::<Follow, User>()
+        .collect_both_with_target()
+        .await
+        .unwrap();
+
+    assert_eq!(fwd_pairs.len(), 1);
+    assert_eq!(fwd_pairs[0].edge().from(), alice.id());
+    assert_eq!(fwd_pairs[0].object().username, "bob");
+
+    assert_eq!(rev_pairs.len(), 1);
+    assert_eq!(rev_pairs[0].edge().from(), charlie.id());
+    assert_eq!(rev_pairs[0].object().username, "charlie");
+}
+
+#[tokio::test]
+async fn test_preload_single_pivot_collect_both_edges() {
+    let (_resource, pool) = setup_test_db().await;
+    let adapter = PostgresAdapter::from_pool(pool);
+    adapter.init_schema().await.unwrap();
+    let engine = Engine::new(Box::new(adapter));
+
+    let mut alice = User::default();
+    alice.username = "alice".into();
+    alice.email = "alice@example.com".into();
+    engine.create_object(&alice).await.unwrap();
+
+    let mut bob = User::default();
+    bob.username = "bob".into();
+    bob.email = "bob@example.com".into();
+    engine.create_object(&bob).await.unwrap();
+
+    let mut charlie = User::default();
+    charlie.username = "charlie".into();
+    charlie.email = "charlie@example.com".into();
+    engine.create_object(&charlie).await.unwrap();
+
+    engine
+        .create_edge(&Follow {
+            _meta: EdgeMeta::new(alice.id(), bob.id()),
+            notification: true,
+        })
+        .await
+        .unwrap();
+    engine
+        .create_edge(&Follow {
+            _meta: EdgeMeta::new(charlie.id(), alice.id()),
+            notification: false,
+        })
+        .await
+        .unwrap();
+
+    let (fwd_edges, rev_edges): (Vec<Follow>, Vec<Follow>) = engine
+        .preload_object::<User>(alice.id())
+        .edge::<Follow, User>()
+        .collect_both_edges()
+        .await
+        .unwrap();
+
+    assert_eq!(fwd_edges.len(), 1);
+    assert_eq!(fwd_edges[0].from(), alice.id());
+    assert_eq!(fwd_edges[0].to(), bob.id());
+    assert!(fwd_edges[0].notification);
+
+    assert_eq!(rev_edges.len(), 1);
+    assert_eq!(rev_edges[0].from(), charlie.id());
+    assert_eq!(rev_edges[0].to(), alice.id());
+    assert!(!rev_edges[0].notification);
+}
+
+#[tokio::test]
+async fn test_preload_single_pivot_edge_filter() {
+    let (_resource, pool) = setup_test_db().await;
+    let adapter = PostgresAdapter::from_pool(pool);
+    adapter.init_schema().await.unwrap();
+    let engine = Engine::new(Box::new(adapter));
+
+    let mut alice = User::default();
+    alice.username = "alice".into();
+    alice.email = "alice@example.com".into();
+    engine.create_object(&alice).await.unwrap();
+
+    let mut bob = User::default();
+    bob.username = "bob".into();
+    bob.email = "bob@example.com".into();
+    engine.create_object(&bob).await.unwrap();
+
+    let mut charlie = User::default();
+    charlie.username = "charlie".into();
+    charlie.email = "charlie@example.com".into();
+    engine.create_object(&charlie).await.unwrap();
+
+    engine
+        .create_edge(&Follow {
+            _meta: EdgeMeta::new(alice.id(), bob.id()),
+            notification: true,
+        })
+        .await
+        .unwrap();
+    engine
+        .create_edge(&Follow {
+            _meta: EdgeMeta::new(alice.id(), charlie.id()),
+            notification: false,
+        })
+        .await
+        .unwrap();
+
+    let notified: Vec<User> = engine
+        .preload_object::<User>(alice.id())
+        .edge::<Follow, User>()
+        .edge_eq(&Follow::FIELDS.notification, true)
+        .collect()
+        .await
+        .unwrap();
+
+    assert_eq!(notified.len(), 1);
+    assert_eq!(notified[0].username, "bob");
+
+    let silent: Vec<User> = engine
+        .preload_object::<User>(alice.id())
+        .edge::<Follow, User>()
+        .edge_eq(&Follow::FIELDS.notification, false)
+        .collect()
+        .await
+        .unwrap();
+
+    assert_eq!(silent.len(), 1);
+    assert_eq!(silent[0].username, "charlie");
+}
+
+// ============================================================
+// Preload API — Multi-Pivot (MultiPreloadContext)
+// ============================================================
+
+#[tokio::test]
+async fn test_preload_multi_pivot_following() {
+    let (_resource, pool) = setup_test_db().await;
+    let adapter = PostgresAdapter::from_pool(pool);
+    adapter.init_schema().await.unwrap();
+    let engine = Engine::new(Box::new(adapter));
+
+    let mut alice = User::default();
+    alice.username = "alice".into();
+    alice.email = "alice@example.com".into();
+    engine.create_object(&alice).await.unwrap();
+
+    let mut bob = User::default();
+    bob.username = "bob".into();
+    bob.email = "bob@example.com".into();
+    engine.create_object(&bob).await.unwrap();
+
+    let mut charlie = User::default();
+    charlie.username = "charlie".into();
+    charlie.email = "charlie@example.com".into();
+    engine.create_object(&charlie).await.unwrap();
+
+    engine
+        .create_edge(&Follow {
+            _meta: EdgeMeta::new(alice.id(), bob.id()),
+            notification: true,
+        })
+        .await
+        .unwrap();
+    engine
+        .create_edge(&Follow {
+            _meta: EdgeMeta::new(bob.id(), charlie.id()),
+            notification: false,
+        })
+        .await
+        .unwrap();
+
+    let results: Vec<(User, Vec<User>)> = engine
+        .preload_objects::<User>(Query::default())
+        .edge::<Follow, User>()
+        .collect()
+        .await
+        .unwrap();
+
+    assert_eq!(results.len(), 3);
+
+    let alice_entry = results.iter().find(|(u, _)| u.username == "alice").unwrap();
+    assert_eq!(alice_entry.1.len(), 1);
+    assert_eq!(alice_entry.1[0].username, "bob");
+
+    let bob_entry = results.iter().find(|(u, _)| u.username == "bob").unwrap();
+    assert_eq!(bob_entry.1.len(), 1);
+    assert_eq!(bob_entry.1[0].username, "charlie");
+
+    let charlie_entry = results
+        .iter()
+        .find(|(u, _)| u.username == "charlie")
+        .unwrap();
+    assert!(charlie_entry.1.is_empty());
+}
+
+#[tokio::test]
+async fn test_preload_multi_pivot_followers() {
+    let (_resource, pool) = setup_test_db().await;
+    let adapter = PostgresAdapter::from_pool(pool);
+    adapter.init_schema().await.unwrap();
+    let engine = Engine::new(Box::new(adapter));
+
+    let mut alice = User::default();
+    alice.username = "alice".into();
+    alice.email = "alice@example.com".into();
+    engine.create_object(&alice).await.unwrap();
+
+    let mut michael = User::default();
+    michael.username = "michael".into();
+    michael.email = "michael@example.com".into();
+    engine.create_object(&michael).await.unwrap();
+
+    let mut bob = User::default();
+    bob.username = "bob".into();
+    bob.email = "bob@example.com".into();
+    engine.create_object(&bob).await.unwrap();
+
+    engine
+        .create_edge(&Follow {
+            _meta: EdgeMeta::new(alice.id(), bob.id()),
+            notification: true,
+        })
+        .await
+        .unwrap();
+    engine
+        .create_edge(&Follow {
+            _meta: EdgeMeta::new(michael.id(), bob.id()),
+            notification: false,
+        })
+        .await
+        .unwrap();
+
+    let results: Vec<(User, Vec<User>)> = engine
+        .preload_objects::<User>(Query::default())
+        .edge::<Follow, User>()
+        .collect_reverse()
+        .await
+        .unwrap();
+
+    assert_eq!(results.len(), 3);
+
+    let bob_entry = results.iter().find(|(u, _)| u.username == "bob").unwrap();
+    assert_eq!(bob_entry.1.len(), 2);
+    let follower_names: std::collections::HashSet<_> =
+        bob_entry.1.iter().map(|u| u.username.as_str()).collect();
+    assert!(follower_names.contains("alice"));
+    assert!(follower_names.contains("michael"));
+
+    let alice_entry = results.iter().find(|(u, _)| u.username == "alice").unwrap();
+    assert!(alice_entry.1.is_empty());
+}
+
+#[tokio::test]
+async fn test_preload_multi_pivot_collect_edges() {
+    let (_resource, pool) = setup_test_db().await;
+    let adapter = PostgresAdapter::from_pool(pool);
+    adapter.init_schema().await.unwrap();
+    let engine = Engine::new(Box::new(adapter));
+
+    let mut alice = User::default();
+    alice.username = "alice".into();
+    alice.email = "alice@example.com".into();
+    engine.create_object(&alice).await.unwrap();
+
+    let mut bob = User::default();
+    bob.username = "bob".into();
+    bob.email = "bob@example.com".into();
+    engine.create_object(&bob).await.unwrap();
+
+    engine
+        .create_edge(&Follow {
+            _meta: EdgeMeta::new(alice.id(), bob.id()),
+            notification: true,
+        })
+        .await
+        .unwrap();
+
+    let results: Vec<(User, Vec<Follow>)> = engine
+        .preload_objects::<User>(Query::default())
+        .edge::<Follow, User>()
+        .collect_edges()
+        .await
+        .unwrap();
+
+    assert_eq!(results.len(), 2);
+
+    let alice_entry = results.iter().find(|(u, _)| u.username == "alice").unwrap();
+    assert_eq!(alice_entry.1.len(), 1);
+    assert_eq!(alice_entry.1[0].from(), alice.id());
+    assert_eq!(alice_entry.1[0].to(), bob.id());
+    assert!(alice_entry.1[0].notification);
+
+    let bob_entry = results.iter().find(|(u, _)| u.username == "bob").unwrap();
+    assert!(bob_entry.1.is_empty());
+}
+
+#[tokio::test]
+async fn test_preload_multi_pivot_collect_with_target() {
+    let (_resource, pool) = setup_test_db().await;
+    let adapter = PostgresAdapter::from_pool(pool);
+    adapter.init_schema().await.unwrap();
+    let engine = Engine::new(Box::new(adapter));
+
+    let mut alice = User::default();
+    alice.username = "alice".into();
+    alice.email = "alice@example.com".into();
+    engine.create_object(&alice).await.unwrap();
+
+    let mut bob = User::default();
+    bob.username = "bob".into();
+    bob.email = "bob@example.com".into();
+    engine.create_object(&bob).await.unwrap();
+
+    engine
+        .create_edge(&Follow {
+            _meta: EdgeMeta::new(alice.id(), bob.id()),
+            notification: true,
+        })
+        .await
+        .unwrap();
+
+    let results = engine
+        .preload_objects::<User>(Query::default())
+        .edge::<Follow, User>()
+        .collect_with_target()
+        .await
+        .unwrap();
+
+    assert_eq!(results.len(), 2);
+
+    let alice_entry = results.iter().find(|(u, _)| u.username == "alice").unwrap();
+    assert_eq!(alice_entry.1.len(), 1);
+    assert_eq!(alice_entry.1[0].edge().from(), alice.id());
+    assert_eq!(alice_entry.1[0].edge().to(), bob.id());
+    assert!(alice_entry.1[0].edge().notification);
+    assert_eq!(alice_entry.1[0].object().username, "bob");
+
+    let bob_entry = results.iter().find(|(u, _)| u.username == "bob").unwrap();
+    assert!(bob_entry.1.is_empty());
+}
+
+#[tokio::test]
+async fn test_preload_multi_pivot_count() {
+    let (_resource, pool) = setup_test_db().await;
+    let adapter = PostgresAdapter::from_pool(pool);
+    adapter.init_schema().await.unwrap();
+    let engine = Engine::new(Box::new(adapter));
+
+    let mut alice = User::default();
+    alice.username = "alice".into();
+    alice.email = "alice@example.com".into();
+    engine.create_object(&alice).await.unwrap();
+
+    let mut bob = User::default();
+    bob.username = "bob".into();
+    bob.email = "bob@example.com".into();
+    engine.create_object(&bob).await.unwrap();
+
+    let mut charlie = User::default();
+    charlie.username = "charlie".into();
+    charlie.email = "charlie@example.com".into();
+    engine.create_object(&charlie).await.unwrap();
+
+    engine
+        .create_edge(&Follow {
+            _meta: EdgeMeta::new(alice.id(), bob.id()),
+            notification: true,
+        })
+        .await
+        .unwrap();
+    engine
+        .create_edge(&Follow {
+            _meta: EdgeMeta::new(alice.id(), charlie.id()),
+            notification: false,
+        })
+        .await
+        .unwrap();
+    engine
+        .create_edge(&Follow {
+            _meta: EdgeMeta::new(bob.id(), charlie.id()),
+            notification: true,
+        })
+        .await
+        .unwrap();
+
+    let counts: Vec<(User, u64)> = engine
+        .preload_objects::<User>(Query::default())
+        .edge::<Follow, User>()
+        .count()
+        .await
+        .unwrap();
+
+    assert_eq!(counts.len(), 3);
+
+    let alice_count = counts.iter().find(|(u, _)| u.username == "alice").unwrap();
+    assert_eq!(alice_count.1, 2);
+
+    let bob_count = counts.iter().find(|(u, _)| u.username == "bob").unwrap();
+    assert_eq!(bob_count.1, 1);
+
+    let charlie_count = counts
+        .iter()
+        .find(|(u, _)| u.username == "charlie")
+        .unwrap();
+    assert_eq!(charlie_count.1, 0);
+}
+
+#[tokio::test]
+async fn test_preload_multi_pivot_count_reverse() {
+    let (_resource, pool) = setup_test_db().await;
+    let adapter = PostgresAdapter::from_pool(pool);
+    adapter.init_schema().await.unwrap();
+    let engine = Engine::new(Box::new(adapter));
+
+    let mut alice = User::default();
+    alice.username = "alice".into();
+    alice.email = "alice@example.com".into();
+    engine.create_object(&alice).await.unwrap();
+
+    let mut bob = User::default();
+    bob.username = "bob".into();
+    bob.email = "bob@example.com".into();
+    engine.create_object(&bob).await.unwrap();
+
+    let mut charlie = User::default();
+    charlie.username = "charlie".into();
+    charlie.email = "charlie@example.com".into();
+    engine.create_object(&charlie).await.unwrap();
+
+    engine
+        .create_edge(&Follow {
+            _meta: EdgeMeta::new(alice.id(), bob.id()),
+            notification: true,
+        })
+        .await
+        .unwrap();
+    engine
+        .create_edge(&Follow {
+            _meta: EdgeMeta::new(alice.id(), charlie.id()),
+            notification: false,
+        })
+        .await
+        .unwrap();
+    engine
+        .create_edge(&Follow {
+            _meta: EdgeMeta::new(bob.id(), charlie.id()),
+            notification: true,
+        })
+        .await
+        .unwrap();
+
+    let counts: Vec<(User, u64)> = engine
+        .preload_objects::<User>(Query::default())
+        .edge::<Follow, User>()
+        .count_reverse()
+        .await
+        .unwrap();
+
+    assert_eq!(counts.len(), 3);
+
+    let alice_count = counts.iter().find(|(u, _)| u.username == "alice").unwrap();
+    assert_eq!(alice_count.1, 0);
+
+    let bob_count = counts.iter().find(|(u, _)| u.username == "bob").unwrap();
+    assert_eq!(bob_count.1, 1);
+
+    let charlie_count = counts
+        .iter()
+        .find(|(u, _)| u.username == "charlie")
+        .unwrap();
+    assert_eq!(charlie_count.1, 2);
+}
+
+#[tokio::test]
+async fn test_preload_multi_pivot_owned() {
+    let (_resource, pool) = setup_test_db().await;
+    let adapter = PostgresAdapter::from_pool(pool);
+    adapter.init_schema().await.unwrap();
+    let engine = Engine::new(Box::new(adapter));
+
+    let mut alice = User::default();
+    alice.username = "alice".into();
+    alice.email = "alice@example.com".into();
+    engine.create_object(&alice).await.unwrap();
+
+    let mut bob = User::default();
+    bob.username = "bob".into();
+    bob.email = "bob@example.com".into();
+    engine.create_object(&bob).await.unwrap();
+
+    let mut post1 = Post::default();
+    post1.set_owner(alice.id());
+    post1.title = "Alice Post 1".into();
+    engine.create_object(&post1).await.unwrap();
+
+    let mut post2 = Post::default();
+    post2.set_owner(alice.id());
+    post2.title = "Alice Post 2".into();
+    engine.create_object(&post2).await.unwrap();
+
+    let mut post3 = Post::default();
+    post3.set_owner(bob.id());
+    post3.title = "Bob Post".into();
+    engine.create_object(&post3).await.unwrap();
+
+    let results: Vec<(User, Vec<Post>)> = engine
+        .preload_objects::<User>(Query::default())
+        .preload::<Post>()
+        .collect()
+        .await
+        .unwrap();
+
+    assert_eq!(results.len(), 2);
+
+    let alice_entry = results.iter().find(|(u, _)| u.username == "alice").unwrap();
+    assert_eq!(alice_entry.1.len(), 2);
+    let alice_post_titles: std::collections::HashSet<_> =
+        alice_entry.1.iter().map(|p| p.title.as_str()).collect();
+    assert!(alice_post_titles.contains("Alice Post 1"));
+    assert!(alice_post_titles.contains("Alice Post 2"));
+
+    let bob_entry = results.iter().find(|(u, _)| u.username == "bob").unwrap();
+    assert_eq!(bob_entry.1.len(), 1);
+    assert_eq!(bob_entry.1[0].title, "Bob Post");
+}
+
+// ============================================================
+// Engine — Bulk Delete & Utility Methods
+// ============================================================
+
+#[tokio::test]
+async fn test_delete_bulk_objects() {
+    let (_resource, pool) = setup_test_db().await;
+    let adapter = PostgresAdapter::from_pool(pool);
+    adapter.init_schema().await.unwrap();
+    let engine = Engine::new(Box::new(adapter));
+
+    let mut ids = Vec::new();
+    for i in 0..5 {
+        let mut user = User::default();
+        user.username = format!("bulk{}", i);
+        user.email = format!("bulk{}@example.com", i);
+        ids.push(user.id());
+        engine.create_object(&user).await.unwrap();
     }
+
+    let count_before: u64 = engine.count_objects::<User>(None).await.unwrap();
+    assert_eq!(count_before, 5);
+
+    let deleted = engine
+        .delete_objects::<User>(ids[..3].to_vec(), system_owner())
+        .await
+        .unwrap();
+    assert_eq!(deleted, 3);
+
+    let remaining: u64 = engine.count_objects::<User>(None).await.unwrap();
+    assert_eq!(remaining, 2);
+}
+
+#[tokio::test]
+async fn test_delete_owned_objects() {
+    let (_resource, pool) = setup_test_db().await;
+    let adapter = PostgresAdapter::from_pool(pool);
+    adapter.init_schema().await.unwrap();
+    let engine = Engine::new(Box::new(adapter));
+
+    let mut owner = User::default();
+    owner.username = "owner".into();
+    owner.email = "owner@example.com".into();
+    engine.create_object(&owner).await.unwrap();
+
+    for i in 0..4 {
+        let mut post = Post::default();
+        post.set_owner(owner.id());
+        post.title = format!("Post {}", i);
+        engine.create_object(&post).await.unwrap();
+    }
+
+    let count_before: u64 = engine
+        .count_objects::<Post>(Some(Query::new(owner.id())))
+        .await
+        .unwrap();
+    assert_eq!(count_before, 4);
+
+    let deleted = engine
+        .delete_owned_objects::<Post>(owner.id())
+        .await
+        .unwrap();
+    assert_eq!(deleted, 4);
+
+    let count_after: u64 = engine
+        .count_objects::<Post>(Some(Query::new(owner.id())))
+        .await
+        .unwrap();
+    assert_eq!(count_after, 0);
+}
+
+#[tokio::test]
+async fn test_find_object_with_owner() {
+    let (_resource, pool) = setup_test_db().await;
+    let adapter = PostgresAdapter::from_pool(pool);
+    adapter.init_schema().await.unwrap();
+    let engine = Engine::new(Box::new(adapter));
+
+    let mut owner = User::default();
+    owner.username = "finder".into();
+    owner.email = "finder@example.com".into();
+    engine.create_object(&owner).await.unwrap();
+
+    let mut published = Post::default();
+    published.set_owner(owner.id());
+    published.title = "Published Post".into();
+    published.status = PostStatus::Published;
+    engine.create_object(&published).await.unwrap();
+
+    let mut draft = Post::default();
+    draft.set_owner(owner.id());
+    draft.title = "Draft Post".into();
+    engine.create_object(&draft).await.unwrap();
+
+    let found: Option<Post> = engine
+        .find_object_with_owner(
+            owner.id(),
+            &[filter!(&Post::FIELDS.status, PostStatus::Published)],
+        )
+        .await
+        .unwrap();
+    assert!(found.is_some());
+    assert_eq!(found.unwrap().title, "Published Post");
+
+    let other_owner_id = uuid::Uuid::now_v7();
+    let missing: Option<Post> = engine
+        .find_object_with_owner(
+            other_owner_id,
+            &[filter!(&Post::FIELDS.status, PostStatus::Published)],
+        )
+        .await
+        .unwrap();
+    assert!(missing.is_none());
+}
+
+#[tokio::test]
+async fn test_fetch_owned_object() {
+    let (_resource, pool) = setup_test_db().await;
+    let adapter = PostgresAdapter::from_pool(pool);
+    adapter.init_schema().await.unwrap();
+    let engine = Engine::new(Box::new(adapter));
+
+    let mut alice = User::default();
+    alice.username = "alice".into();
+    alice.email = "alice@example.com".into();
+    engine.create_object(&alice).await.unwrap();
+
+    let mut bob = User::default();
+    bob.username = "bob".into();
+    bob.email = "bob@example.com".into();
+    engine.create_object(&bob).await.unwrap();
+
+    let mut post = Post::default();
+    post.set_owner(alice.id());
+    post.title = "Alice's Post".into();
+    engine.create_object(&post).await.unwrap();
+
+    let found: Option<Post> = engine.fetch_owned_object(alice.id()).await.unwrap();
+    assert!(found.is_some());
+    assert_eq!(found.unwrap().title, "Alice's Post");
+
+    let none: Option<Post> = engine.fetch_owned_object(bob.id()).await.unwrap();
+    assert!(none.is_none());
 }
