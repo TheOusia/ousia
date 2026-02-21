@@ -97,7 +97,10 @@ use metrics::histogram;
 use std::sync::Arc;
 use std::time::Instant;
 
-pub use crate::adapters::{Adapter, EdgeRecord, ObjectRecord, Query, QueryContext};
+pub use crate::adapters::{
+    Adapter, EdgeRecord, MultiEdgeContext, MultiOwnedContext, MultiPreloadContext, ObjectRecord,
+    Query, QueryContext,
+};
 pub use crate::edge::meta::*;
 pub use crate::edge::query::EdgeQuery;
 pub use crate::edge::traits::*;
@@ -552,9 +555,18 @@ impl Engine {
 
     // ==================== Advanced Query API ====================
 
-    /// Start a query context for complex traversals
+    /// Start a single-pivot query context for edge traversals.
     pub fn preload_object<'a, T: Object>(&'a self, id: Uuid) -> QueryContext<'a, T> {
         self.inner.adapter.preload_object(id)
+    }
+
+    /// Start a multi-pivot query context. Fetches parents first, then batch-joins edges/children.
+    /// All terminal methods execute exactly 2 queries — never N+1.
+    pub fn preload_objects<'a, P: Object>(
+        &'a self,
+        query: Query,
+    ) -> MultiPreloadContext<'a, P> {
+        self.inner.adapter.preload_objects(query)
     }
 
     #[cfg(feature = "ledger")]

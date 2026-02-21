@@ -9,7 +9,7 @@ use crate::query::{
 /// Edge Query Plan (storage contract)
 /// -----------------------------
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct EdgeQuery {
     pub filters: Vec<QueryFilter>,
     pub limit: Option<u32>,

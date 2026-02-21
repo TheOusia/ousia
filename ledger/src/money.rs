@@ -34,6 +34,13 @@ pub enum Operation {
         amount: u64,
         metadata: String,
     },
+    Settle {
+        asset_id: Uuid,
+        authority: Uuid,
+        receiver: Uuid,
+        amount: u64,
+        metadata: String,
+    },
     RecordTransaction {
         transaction: Transaction,
     },
@@ -385,6 +392,52 @@ impl TransactionContext {
                 asset_obj.code,
                 Some(from),
                 Some(for_authority),
+                amount,
+                amount,
+                metadata,
+                None,
+            ),
+        });
+
+        Ok(())
+    }
+
+    pub async fn settle(
+        &self,
+        asset: &str,
+        authority: Uuid,
+        receiver: Uuid,
+        amount: u64,
+        metadata: String,
+    ) -> Result<(), MoneyError> {
+        if amount == 0 {
+            return Err(MoneyError::InvalidAmount);
+        }
+
+        let adapter = self.ctx.adapter();
+        let asset_obj = adapter.get_asset(asset).await?;
+
+        // Advisory pre-flight — the real guard is the adapter's inline lock during execute_plan
+        let balance = adapter.get_balance(asset_obj.id, authority).await?;
+        if balance.reserved < amount {
+            return Err(MoneyError::InsufficientFunds);
+        }
+
+        let mut plan = self.plan.lock().unwrap();
+        plan.add(Operation::Settle {
+            asset_id: asset_obj.id,
+            authority,
+            receiver,
+            amount,
+            metadata: metadata.clone(),
+        });
+
+        plan.add(Operation::RecordTransaction {
+            transaction: Transaction::new(
+                asset_obj.id,
+                asset_obj.code,
+                Some(authority),
+                Some(receiver),
                 amount,
                 amount,
                 metadata,

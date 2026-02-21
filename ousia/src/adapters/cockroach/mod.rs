@@ -1,11 +1,4 @@
-#[cfg(feature = "ledger")]
-use std::sync::Arc;
-
 use chrono::Utc;
-
-#[cfg(feature = "ledger")]
-use ledger::adapters::postgres::PostgresLedgerAdapter;
-
 use sqlx::{
     PgPool, Postgres, Row,
     postgres::{PgArguments, PgRow},
@@ -21,43 +14,43 @@ use crate::{
     query::{Cursor, IndexValue, IndexValueInner, QueryFilter},
 };
 
-/// PostgreSQL adapter using a unified JSON storage model
+/// CockroachDB adapter using a unified JSON storage model
 ///
 /// Schema:
 /// ```sql
 /// CREATE TABLE public.objects (
-///     id uuid PRIMARY KEY,
+///     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
 ///     type TEXT NOT NULL,
-///     owner uuid NOT NULL,
-///     created_at TIMESTAMPTZ NOT NULL,
-///     updated_at TIMESTAMPTZ NOT NULL,
+///     owner UUID NOT NULL,
+///     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+///     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
 ///     data JSONB NOT NULL,
-///     index_meta JSONB NOT NULL
+///     index_meta JSONB NOT NULL,
+///     INDEX idx_objects_type_owner (type, owner),
+///     INDEX idx_objects_owner (owner),
+///     INDEX idx_objects_created_at (created_at),
+///     INDEX idx_objects_updated_at (updated_at),
+///     INVERTED INDEX idx_objects_index_meta (index_meta)
 /// );
 ///
-/// -- type is always bound; owner on scoped queries; id DESC for default cursor pagination
-/// CREATE INDEX idx_objects_type_owner ON objects(type, owner, id DESC);
-/// -- composite date indexes: planner uses these when user sorts by created_at / updated_at
-/// CREATE INDEX idx_objects_type_owner_created ON objects(type, owner, created_at DESC);
-/// CREATE INDEX idx_objects_type_owner_updated ON objects(type, owner, updated_at DESC);
-/// -- GIN index for index_meta search/filter operations
-/// CREATE INDEX idx_objects_index_meta ON public.objects USING GIN (index_meta);
+/// CREATE TABLE public.edges (
+///     "from" UUID NOT NULL,
+///     "to" UUID NOT NULL,
+///     type TEXT NOT NULL,
+///     data JSONB NOT NULL,
+///     index_meta JSONB NOT NULL,
+///     PRIMARY KEY ("from", "to", type),
+///     INDEX idx_edges_from_type ("from", type),
+///     INDEX idx_edges_to_type ("to", type),
+///     INVERTED INDEX idx_edges_index_meta (index_meta)
+/// );
 /// ```
-pub struct PostgresAdapter {
+
+pub struct CockroachAdapter {
     pub(crate) pool: PgPool,
 }
 
-#[cfg(feature = "ledger")]
-impl PostgresLedgerAdapter for PostgresAdapter
-where
-    PostgresAdapter: Send + Sync,
-{
-    fn get_pool(&self) -> sqlx::PgPool {
-        self.pool.clone()
-    }
-}
-
-impl PostgresAdapter {
+impl CockroachAdapter {
     pub fn from_pool(pool: PgPool) -> Self {
         Self { pool }
     }
@@ -73,11 +66,11 @@ impl PostgresAdapter {
         sqlx::query(
             r#"
             CREATE TABLE IF NOT EXISTS public.objects (
-                id uuid PRIMARY KEY,
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                 type TEXT NOT NULL,
-                owner uuid NOT NULL,
-                created_at TIMESTAMPTZ NOT NULL,
-                updated_at TIMESTAMPTZ NOT NULL,
+                owner UUID NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
                 data JSONB NOT NULL,
                 index_meta JSONB NOT NULL
             );
@@ -91,7 +84,7 @@ impl PostgresAdapter {
             r#"
             CREATE INDEX IF NOT EXISTS idx_objects_type_owner
                 ON objects(type, owner, id DESC)
-                INCLUDE (created_at, updated_at);
+                STORING (created_at, updated_at);
             "#,
         )
         .execute(&mut *tx)
@@ -102,7 +95,7 @@ impl PostgresAdapter {
             r#"
             CREATE INDEX IF NOT EXISTS idx_objects_type_owner_created
                 ON objects(type, owner, created_at DESC)
-                INCLUDE (id, updated_at);
+                STORING (updated_at);
             "#,
         )
         .execute(&mut *tx)
@@ -113,17 +106,17 @@ impl PostgresAdapter {
             r#"
             CREATE INDEX IF NOT EXISTS idx_objects_type_owner_updated
                 ON objects(type, owner, updated_at DESC)
-                INCLUDE (id, created_at);
+                STORING (created_at);
             "#,
         )
         .execute(&mut *tx)
         .await
         .map_err(|e| Error::Storage(e.to_string()))?;
 
+        // CockroachDB uses INVERTED INDEX instead of GIN for JSONB
         sqlx::query(
             r#"
-            CREATE INDEX IF NOT EXISTS idx_objects_index_meta
-                ON public.objects USING GIN (index_meta jsonb_path_ops);
+            CREATE INVERTED INDEX IF NOT EXISTS idx_objects_index_meta ON public.objects (index_meta);
             "#,
         )
         .execute(&mut *tx)
@@ -133,11 +126,12 @@ impl PostgresAdapter {
         sqlx::query(
             r#"
             CREATE TABLE IF NOT EXISTS public.edges (
-                "from" uuid NOT NULL,
-                "to" uuid NOT NULL,
+                "from" UUID NOT NULL,
+                "to" UUID NOT NULL,
                 type TEXT NOT NULL,
                 data JSONB NOT NULL,
-                index_meta JSONB NOT NULL
+                index_meta JSONB NOT NULL,
+                PRIMARY KEY ("from", "to", type)
             );
             "#,
         )
@@ -147,7 +141,7 @@ impl PostgresAdapter {
 
         sqlx::query(
             r#"
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_edges_key ON public.edges("from", "to", type);
+            CREATE INDEX IF NOT EXISTS idx_edges_from_type ON public.edges("from", type);
             "#,
         )
         .execute(&mut *tx)
@@ -156,7 +150,7 @@ impl PostgresAdapter {
 
         sqlx::query(
             r#"
-            CREATE INDEX IF NOT EXISTS idx_edges_from_key ON public.edges("from", type);
+            CREATE INDEX IF NOT EXISTS idx_edges_to_type ON public.edges("to", type);
             "#,
         )
         .execute(&mut *tx)
@@ -165,17 +159,7 @@ impl PostgresAdapter {
 
         sqlx::query(
             r#"
-            CREATE INDEX IF NOT EXISTS idx_edges_to_key ON public.edges("to", type);
-            "#,
-        )
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| Error::Storage(e.to_string()))?;
-
-        sqlx::query(
-            r#"
-            CREATE INDEX IF NOT EXISTS idx_edges_index_meta
-                ON public.edges USING GIN (index_meta jsonb_path_ops);
+            CREATE INVERTED INDEX IF NOT EXISTS idx_edges_index_meta ON public.edges (index_meta);
             "#,
         )
         .execute(&mut *tx)
@@ -233,21 +217,18 @@ impl PostgresAdapter {
             .await
             .map_err(|e| Error::Storage(e.to_string()))?;
 
-        #[cfg(feature = "ledger")]
-        {
-            use ledger::adapters::postgres::PostgresSchemaLedgerAdapter;
-
-            self.init_ledger_schema().await.map_err(|me| match me {
-                ledger::MoneyError::Storage(e) => Error::Storage(e),
-                _ => Error::Storage(me.to_string()),
-            })?;
-        }
+        // #[cfg(feature = "ledger")]
+        // {
+        //     self.init_ledger_schema().await.map_err(|me| match me {
+        //         MoneyError::Storage(e) => Error::Storage(e),
+        //         _ => Error::Storage(me.to_string()),
+        //     })?;
+        // }
         Ok(())
     }
 }
 
-impl PostgresAdapter {
-    /// Slim mapper — for all read paths. Skips index_meta (not in SELECT, not needed by to_object()).
+impl CockroachAdapter {
     fn map_row_to_object_record_slim(row: PgRow) -> Result<ObjectRecord, Error> {
         let type_name = row
             .try_get::<String, _>("type")
@@ -278,6 +259,89 @@ impl PostgresAdapter {
         })
     }
 
+    fn map_row_to_edge_and_object(row: PgRow) -> Result<(EdgeRecord, ObjectRecord), Error> {
+        let de = |e: sqlx::Error| Error::Deserialize(e.to_string());
+        let edge = EdgeRecord {
+            type_name: std::borrow::Cow::Owned(row.try_get::<String, _>("edge_type").map_err(de)?),
+            from: row.try_get::<Uuid, _>("edge_from").map_err(de)?,
+            to: row.try_get::<Uuid, _>("edge_to").map_err(de)?,
+            data: row
+                .try_get::<serde_json::Value, _>("edge_data")
+                .map_err(de)?,
+            index_meta: row
+                .try_get::<serde_json::Value, _>("edge_index_meta")
+                .map_err(de)?,
+        };
+        let obj = ObjectRecord {
+            id: row.try_get::<Uuid, _>("obj_id").map_err(de)?,
+            type_name: std::borrow::Cow::Owned(row.try_get::<String, _>("obj_type").map_err(de)?),
+            owner: row.try_get::<Uuid, _>("obj_owner").map_err(de)?,
+            created_at: row.try_get("obj_created_at").map_err(de)?,
+            updated_at: row.try_get("obj_updated_at").map_err(de)?,
+            data: row
+                .try_get::<serde_json::Value, _>("obj_data")
+                .map_err(de)?,
+            index_meta: serde_json::Value::Null,
+        };
+        Ok((edge, obj))
+    }
+
+    async fn query_edges_with_objects_inner(
+        &self,
+        edge_type_name: &str,
+        type_name: &str,
+        owner: Uuid,
+        obj_filters: &[QueryFilter],
+        plan: EdgeQuery,
+        direction: TraversalDirection,
+    ) -> Result<Vec<(EdgeRecord, ObjectRecord)>, Error> {
+        let where_clause = Self::build_object_traversal_query_conditions(
+            direction.clone(),
+            obj_filters,
+            &plan.filters,
+            plan.cursor,
+        );
+        let order_clause = Self::build_edge_order_clause(&plan.filters);
+        let join_col = match direction {
+            TraversalDirection::Forward => "to",
+            TraversalDirection::Reverse => "from",
+        };
+        let mut sql = format!(
+            r#"
+            SELECT
+                e."from" AS edge_from, e."to" AS edge_to, e.type AS edge_type,
+                e.data AS edge_data, e.index_meta AS edge_index_meta,
+                o.id AS obj_id, o.type AS obj_type, o.owner AS obj_owner,
+                o.created_at AS obj_created_at, o.updated_at AS obj_updated_at,
+                o.data AS obj_data
+            FROM edges e
+            JOIN objects o ON e."{join_col}" = o.id
+            {where_clause}
+            {order_clause}
+            "#,
+        );
+        if let Some(limit) = plan.limit {
+            sql.push_str(&format!(" LIMIT {}", limit));
+        }
+        let mut query = sqlx::query(&sql)
+            .bind(type_name)
+            .bind(edge_type_name)
+            .bind(owner);
+        if let Some(cursor) = plan.cursor {
+            query = query.bind(cursor.last_id);
+        }
+        query = Self::query_bind_filters(query, obj_filters);
+        query = Self::query_bind_filters(query, &plan.filters);
+        let rows = query
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| Error::Storage(e.to_string()))?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|row| Self::map_row_to_edge_and_object(row).ok())
+            .collect())
+    }
+
     fn map_row_to_edge_record(row: PgRow) -> Result<EdgeRecord, Error> {
         let type_name = row
             .try_get::<String, _>("type")
@@ -302,8 +366,28 @@ impl PostgresAdapter {
             index_meta,
         })
     }
+}
 
-    /// Wraps a value as `{"field": value}` for use with the `@>` GIN operator.
+impl CockroachAdapter {
+    // // ── Shared SQL builder helpers ───────────────────────────────────────────
+
+    fn index_type_str(value: &IndexValue) -> &'static str {
+        match value {
+            IndexValue::String(_) => "text",
+            IndexValue::Int(_) => "bigint",
+            IndexValue::Float(_) => "double precision",
+            IndexValue::Bool(_) => "boolean",
+            IndexValue::Timestamp(_) => "timestamptz",
+            IndexValue::Uuid(_) => "uuid",
+            IndexValue::Array(arr) => match arr.first() {
+                Some(IndexValueInner::String(_)) => "text[]",
+                Some(IndexValueInner::Int(_)) => "bigint[]",
+                Some(IndexValueInner::Float(_)) => "double precision[]",
+                None => "text[]",
+            },
+        }
+    }
+
     fn make_eq_json(field: &str, val: serde_json::Value) -> serde_json::Value {
         let mut map = serde_json::Map::with_capacity(1);
         map.insert(field.to_string(), val);
@@ -348,9 +432,8 @@ impl PostgresAdapter {
 
         use crate::query::Comparison::*;
 
-        // GIN jsonb_path_ops @> path: hits the index for equality and array containment
+        // INVERTED INDEX @> path
         match (&qs.comparison, &filter.value) {
-            // Scalar equality for types with safe JSON value semantics
             (
                 Equal,
                 IndexValue::String(_)
@@ -362,17 +445,14 @@ impl PostgresAdapter {
                 *param_idx += 1;
                 return Some((cond, operator));
             }
-            // ContainsAll array: single @> with the full array
             (ContainsAll, IndexValue::Array(arr)) if !arr.is_empty() => {
                 let cond = format!("{}.index_meta @> ${}", alias, param_idx);
                 *param_idx += 1;
                 return Some((cond, operator));
             }
-            // Empty array filters: skip (vacuously true/false — no useful predicate)
             (Contains | ContainsAll, IndexValue::Array(arr)) if arr.is_empty() => {
                 return None;
             }
-            // Contains array: one @> per element, joined with OR
             (Contains, IndexValue::Array(arr)) => {
                 let conds: Vec<String> = (0..arr.len())
                     .map(|i| format!("{}.index_meta @> ${}", alias, *param_idx + i))
@@ -423,43 +503,21 @@ impl PostgresAdapter {
         out
     }
 
-    /// Maps an `IndexValue` to its Postgres cast type string.
-    fn index_type_str(value: &IndexValue) -> &'static str {
-        match value {
-            IndexValue::String(_) => "text",
-            IndexValue::Int(_) => "bigint",
-            IndexValue::Float(_) => "double precision",
-            IndexValue::Bool(_) => "boolean",
-            IndexValue::Timestamp(_) => "timestamptz",
-            IndexValue::Uuid(_) => "uuid",
-            IndexValue::Array(arr) => match arr.first() {
-                Some(IndexValueInner::String(_)) => "text[]",
-                Some(IndexValueInner::Int(_)) => "bigint[]",
-                Some(IndexValueInner::Float(_)) => "double precision[]",
-                None => "text[]",
-            },
-        }
-    }
-
     fn build_object_query_conditions(filters: &[QueryFilter], cursor: Option<Cursor>) -> String {
-        // $1 = type, $2 = owner, $3 = cursor (optional), $4+ = filter values
         let mut conditions: Vec<(String, &str)> = vec![
             ("o.type = $1".to_string(), "AND"),
             ("o.owner = $2".to_string(), "AND"),
         ];
         let mut param_idx = 3;
-
         if cursor.is_some() {
             conditions.push((format!("o.id < ${}", param_idx), "AND"));
             param_idx += 1;
         }
-
         for filter in filters {
             if let Some((cond, op)) = Self::build_filter_condition("o", filter, &mut param_idx) {
                 conditions.push((cond, op));
             }
         }
-
         format!("WHERE {}", Self::join_conditions(&conditions))
     }
     fn build_edge_query_conditions(
@@ -467,7 +525,6 @@ impl PostgresAdapter {
         cursor: Option<Cursor>,
         direction: TraversalDirection,
     ) -> String {
-        // $1 = type, $2 = from/to owner, $3 = cursor (optional), $4+ = filter values
         let anchor_col = match direction {
             TraversalDirection::Forward => r#"e."from""#,
             TraversalDirection::Reverse => r#"e."to""#,
@@ -476,29 +533,25 @@ impl PostgresAdapter {
             TraversalDirection::Forward => r#"e."to""#,
             TraversalDirection::Reverse => r#"e."from""#,
         };
-
         let mut conditions: Vec<(String, &str)> = vec![
             ("e.type = $1".to_string(), "AND"),
             (format!("{} = $2", anchor_col), "AND"),
         ];
         let mut param_idx = 3;
-
         if cursor.is_some() {
             conditions.push((format!("{} < ${}", cursor_col, param_idx), "AND"));
             param_idx += 1;
         }
-
         for filter in filters {
             if let Some((cond, op)) = Self::build_filter_condition("e", filter, &mut param_idx) {
                 conditions.push((cond, op));
             }
         }
-
         format!("WHERE {}", Self::join_conditions(&conditions))
     }
 
-    fn build_order_clause(filters: &[QueryFilter], is_edge: bool) -> String {
-        Self::build_order_clause_aliased(filters, "", is_edge)
+    fn build_order_clause(filters: &[QueryFilter]) -> String {
+        Self::build_order_clause_aliased(filters, "", false)
     }
 
     fn build_edge_order_clause(filters: &[QueryFilter]) -> String {
@@ -511,7 +564,6 @@ impl PostgresAdapter {
         } else {
             format!("{}.", alias)
         };
-
         let sort: Vec<&QueryFilter> = filters
             .iter()
             .filter(|f| f.mode.as_sort().is_some())
@@ -528,16 +580,16 @@ impl PostgresAdapter {
             .iter()
             .filter(|s| s.value.as_array().is_none())
             .map(|s| {
-                let direction = if s.mode.as_sort().unwrap().ascending {
+                let dir = if s.mode.as_sort().unwrap().ascending {
                     "ASC"
                 } else {
                     "DESC"
                 };
                 // Native columns: use direct column reference so composite indexes are hit
                 if matches!(s.field.name, "created_at" | "updated_at") {
-                    return format!("{}{} {}", prefix, s.field.name, direction);
+                    return format!("{}{} {}", prefix, s.field.name, dir);
                 }
-                let index_type = match &s.value {
+                let t = match &s.value {
                     IndexValue::String(_) => "text",
                     IndexValue::Int(_) => "bigint",
                     IndexValue::Float(_) => "double precision",
@@ -545,20 +597,16 @@ impl PostgresAdapter {
                     IndexValue::Timestamp(_) => "timestamptz",
                     _ => "text",
                 };
-                format!(
-                    "({}index_meta->>'{}')::{} {}",
-                    prefix, s.field.name, index_type, direction,
-                )
+                format!("({}index_meta->>'{}')::{} {}", prefix, s.field.name, t, dir)
             })
             .collect();
-
         format!("ORDER BY {}", order_terms.join(", "))
     }
 
     fn build_object_traversal_query_conditions(
         direction: TraversalDirection,
         obj_filters: &[QueryFilter],
-        edge_filters: &Vec<QueryFilter>,
+        edge_filters: &[QueryFilter],
         cursor: Option<Cursor>,
     ) -> String {
         // $1 = object type_name
@@ -612,7 +660,6 @@ impl PostgresAdapter {
         for filter in filters.iter().filter(|f| f.mode.as_search().is_some()) {
             let search = filter.mode.as_search().unwrap();
             match (&search.comparison, &filter.value) {
-                // GIN @> binds: {"field": value}
                 (
                     Equal,
                     IndexValue::String(_)
@@ -642,7 +689,6 @@ impl PostgresAdapter {
                         ));
                     }
                 }
-                // Extraction-based binds: range ops, ILIKE, UUID, timestamp
                 (_, IndexValue::String(s)) => {
                     query = match search.comparison {
                         BeginsWith => query.bind(format!("{}%", s)),
@@ -665,7 +711,6 @@ impl PostgresAdapter {
                 (_, IndexValue::Uuid(uid)) => {
                     query = query.bind(uid);
                 }
-                // Empty arrays and remaining array cases: condition was skipped, no bind
                 (_, IndexValue::Array(_)) => {}
             }
         }
@@ -680,7 +725,6 @@ impl PostgresAdapter {
         for filter in filters.iter().filter(|f| f.mode.as_search().is_some()) {
             let search = filter.mode.as_search().unwrap();
             match (&search.comparison, &filter.value) {
-                // GIN @> binds: {"field": value}
                 (
                     Equal,
                     IndexValue::String(_)
@@ -710,7 +754,6 @@ impl PostgresAdapter {
                         ));
                     }
                 }
-                // Extraction-based binds: range ops, ILIKE, UUID, timestamp
                 (_, IndexValue::String(s)) => {
                     query = match search.comparison {
                         BeginsWith => query.bind(format!("{}%", s)),
@@ -740,7 +783,7 @@ impl PostgresAdapter {
     }
 }
 
-impl PostgresAdapter {
+impl CockroachAdapter {
     async fn edge_traversal_inner(
         &self,
         edge_type_name: &str,
@@ -778,12 +821,6 @@ impl PostgresAdapter {
             sql.push_str(&format!(" LIMIT {}", limit));
         }
 
-        // Bind in the fixed order that build_object_traversal_query_conditions expects:
-        //   $1 = object type_name
-        //   $2 = edge type_name
-        //   $3 = owner
-        //   $4 = cursor (optional)
-        //   $5+ = filter values (object then edge, matching the WHERE clause order)
         let mut query = sqlx::query(&sql)
             .bind(type_name)
             .bind(edge_type_name)
@@ -793,7 +830,6 @@ impl PostgresAdapter {
             query = query.bind(cursor.last_id);
         }
 
-        // Bind object filters then edge filters in the same order as the WHERE clause.
         query = Self::query_bind_filters(query, filters);
         query = Self::query_bind_filters(query, &plan.filters);
 
@@ -808,6 +844,127 @@ impl PostgresAdapter {
             .collect())
     }
 
+    /// Build WHERE clause for batch traversal queries (multiple pivot IDs).
+    /// Bindings: $1=obj_type, $2=edge_type, $3=ids (Vec<Uuid>), $4+=filters.
+    fn build_batch_traversal_conditions(
+        direction: TraversalDirection,
+        obj_filters: &[QueryFilter],
+        edge_filters: &[QueryFilter],
+    ) -> String {
+        let mut param_idx: usize = 4;
+
+        let mut obj_conditions: Vec<(String, &str)> = vec![("o.type = $1".to_string(), "AND")];
+        for f in obj_filters {
+            if let Some((c, op)) = Self::build_filter_condition("o", f, &mut param_idx) {
+                obj_conditions.push((c, op));
+            }
+        }
+
+        let anchor = match direction {
+            TraversalDirection::Forward => r#"e."from""#,
+            TraversalDirection::Reverse => r#"e."to""#,
+        };
+        let mut edge_conditions: Vec<(String, &str)> = vec![
+            ("e.type = $2".to_string(), "AND"),
+            (format!("{} = ANY($3)", anchor), "AND"),
+        ];
+        for f in edge_filters {
+            if let Some((c, op)) = Self::build_filter_condition("e", f, &mut param_idx) {
+                edge_conditions.push((c, op));
+            }
+        }
+
+        format!(
+            "WHERE {} AND ({})",
+            Self::join_conditions(&obj_conditions),
+            Self::join_conditions(&edge_conditions)
+        )
+    }
+
+    /// Build WHERE clause for batch edge-only queries (no object JOIN).
+    /// Bindings: $1=edge_type, $2=ids (Vec<Uuid>), $3+=filters.
+    fn build_batch_edge_only_conditions(
+        direction: TraversalDirection,
+        edge_filters: &[QueryFilter],
+    ) -> String {
+        let anchor = match direction {
+            TraversalDirection::Forward => r#"e."from""#,
+            TraversalDirection::Reverse => r#"e."to""#,
+        };
+        let mut conditions: Vec<(String, &str)> = vec![
+            ("e.type = $1".to_string(), "AND"),
+            (format!("{} = ANY($2)", anchor), "AND"),
+        ];
+        let mut param_idx = 3;
+        for f in edge_filters {
+            if let Some((c, op)) = Self::build_filter_condition("e", f, &mut param_idx) {
+                conditions.push((c, op));
+            }
+        }
+        format!("WHERE {}", Self::join_conditions(&conditions))
+    }
+
+    /// Build WHERE clause for one branch of a UNION both-directions query (object JOIN).
+    /// Both branches share the same param slots:
+    ///   $1=obj_type, $2=edge_type, $3=pivot, $4+=filters.
+    fn build_union_branch_with_obj_conditions(
+        direction: TraversalDirection,
+        obj_filters: &[QueryFilter],
+        edge_filters: &[QueryFilter],
+    ) -> String {
+        let mut param_idx: usize = 4;
+
+        let mut obj_conditions: Vec<(String, &str)> = vec![("o.type = $1".to_string(), "AND")];
+        for f in obj_filters {
+            if let Some((c, op)) = Self::build_filter_condition("o", f, &mut param_idx) {
+                obj_conditions.push((c, op));
+            }
+        }
+
+        let anchor = match direction {
+            TraversalDirection::Forward => r#"e."from""#,
+            TraversalDirection::Reverse => r#"e."to""#,
+        };
+        let mut edge_conditions: Vec<(String, &str)> = vec![
+            ("e.type = $2".to_string(), "AND"),
+            (format!("{} = $3", anchor), "AND"),
+        ];
+        for f in edge_filters {
+            if let Some((c, op)) = Self::build_filter_condition("e", f, &mut param_idx) {
+                edge_conditions.push((c, op));
+            }
+        }
+
+        format!(
+            "WHERE {} AND ({})",
+            Self::join_conditions(&obj_conditions),
+            Self::join_conditions(&edge_conditions)
+        )
+    }
+
+    /// Build WHERE clause for one branch of a UNION both-directions edge-only query.
+    /// Both branches share: $1=edge_type, $2=pivot, $3+=filters.
+    fn build_union_branch_edge_only_conditions(
+        direction: TraversalDirection,
+        edge_filters: &[QueryFilter],
+    ) -> String {
+        let anchor = match direction {
+            TraversalDirection::Forward => r#"e."from""#,
+            TraversalDirection::Reverse => r#"e."to""#,
+        };
+        let mut conditions: Vec<(String, &str)> = vec![
+            ("e.type = $1".to_string(), "AND"),
+            (format!("{} = $2", anchor), "AND"),
+        ];
+        let mut param_idx = 3;
+        for f in edge_filters {
+            if let Some((c, op)) = Self::build_filter_condition("e", f, &mut param_idx) {
+                conditions.push((c, op));
+            }
+        }
+        format!("WHERE {}", Self::join_conditions(&conditions))
+    }
+
     async fn query_edges_internal(
         &self,
         type_name: &'static str,
@@ -817,33 +974,27 @@ impl PostgresAdapter {
     ) -> Result<Vec<EdgeRecord>, Error> {
         let where_clause = Self::build_edge_query_conditions(&plan.filters, plan.cursor, direction);
         let order_clause = Self::build_edge_order_clause(&plan.filters);
-
         let mut sql = format!(
             r#"
-            SELECT e."from", e."to", e.type, e.data, e.index_meta
+            SELECT e."from" AS "from", e."to" AS "to", e.type AS "type", e.data, e.index_meta
             FROM edges e
             {}
             {}
             "#,
             where_clause, order_clause
         );
-
         if let Some(limit) = plan.limit {
             sql.push_str(&format!(" LIMIT {}", limit));
         }
-
         let mut query = sqlx::query(&sql).bind(type_name).bind(owner);
         if let Some(cursor) = plan.cursor {
             query = query.bind(cursor.last_id);
         }
-
         query = Self::query_bind_filters(query, &plan.filters);
-
         let rows = query
             .fetch_all(&self.pool)
             .await
-            .map_err(|err| Error::Storage(err.to_string()))?;
-
+            .map_err(|e| Error::Storage(e.to_string()))?;
         Ok(rows
             .into_iter()
             .filter_map(|row| Self::map_row_to_edge_record(row).ok())
@@ -852,7 +1003,7 @@ impl PostgresAdapter {
 }
 
 #[async_trait::async_trait]
-impl Adapter for PostgresAdapter {
+impl Adapter for CockroachAdapter {
     async fn insert_object(&self, record: ObjectRecord) -> Result<(), Error> {
         let ObjectRecord {
             id,
@@ -924,7 +1075,7 @@ impl Adapter for PostgresAdapter {
             WHERE id = ANY($1) AND type = $2
             "#,
         )
-        .bind(ids)
+        .bind(ids.into_iter().map(|id| id).collect::<Vec<Uuid>>())
         .bind(type_name)
         .fetch_all(&self.pool)
         .await
@@ -993,16 +1144,19 @@ impl Adapter for PostgresAdapter {
         let row = sqlx::query(
             r#"
             DELETE FROM objects
-            WHERE id = $1 AND owner = $2 AND type = $3
+            WHERE id = $1 AND type = $2 AND owner = $3
             RETURNING id, type, owner, created_at, updated_at, data
             "#,
         )
         .bind(id)
-        .bind(owner)
         .bind(type_name)
+        .bind(owner)
         .fetch_optional(&self.pool)
         .await
-        .map_err(|err| Error::Storage(err.to_string()))?;
+        .map_err(|err| match err {
+            sqlx::Error::RowNotFound => Error::NotFound,
+            _ => Error::Storage(err.to_string()),
+        })?;
 
         match row {
             Some(r) => Self::map_row_to_object_record_slim(r).map(|o| Some(o)),
@@ -1049,7 +1203,7 @@ impl Adapter for PostgresAdapter {
         filters: &[QueryFilter],
     ) -> Result<Option<ObjectRecord>, Error> {
         let where_clause = Self::build_object_query_conditions(filters, None);
-        let order_clause = Self::build_order_clause(filters, false);
+        let order_clause = Self::build_order_clause(filters);
 
         let sql = format!(
             r#"
@@ -1080,10 +1234,10 @@ impl Adapter for PostgresAdapter {
         plan: Query,
     ) -> Result<Vec<ObjectRecord>, Error> {
         let mut where_clause = Self::build_object_query_conditions(&plan.filters, plan.cursor);
-        let order_clause = Self::build_order_clause(&plan.filters, false);
+        let order_clause = Self::build_order_clause(&plan.filters);
 
         if plan.owner.is_nil() {
-            where_clause = where_clause.replace("owner = ", "owner > ");
+            where_clause = where_clause.replace("o.owner = ", "o.owner > ");
         }
 
         let mut sql = format!(
@@ -1163,6 +1317,29 @@ impl Adapter for PostgresAdapter {
                 Ok(count as u64)
             }
         }
+    }
+
+    async fn fetch_owned_objects_batch(
+        &self,
+        type_name: &'static str,
+        owner_ids: &[Uuid],
+    ) -> Result<Vec<ObjectRecord>, Error> {
+        let rows = sqlx::query(
+            r#"
+            SELECT o.id, o.type, o.owner, o.created_at, o.updated_at, o.data
+            FROM objects o
+            WHERE type = $1 AND owner = ANY($2)
+            "#,
+        )
+        .bind(type_name)
+        .bind(owner_ids)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|err| Error::Storage(err.to_string()))?;
+
+        rows.into_iter()
+            .map(Self::map_row_to_object_record_slim)
+            .collect()
     }
 
     async fn fetch_owned_objects(
@@ -1251,7 +1428,7 @@ impl Adapter for PostgresAdapter {
             WHERE id = ANY($1) AND (type = $2 OR type = $3)
             "#,
         )
-        .bind(ids)
+        .bind(ids.into_iter().map(|id| id).collect::<Vec<Uuid>>())
         .bind(a_type_name)
         .bind(b_type_name)
         .fetch_all(&self.pool)
@@ -1424,11 +1601,49 @@ impl Adapter for PostgresAdapter {
     async fn query_reverse_edges(
         &self,
         type_name: &'static str,
-        owner: Uuid,
+        owner_reverse: Uuid,
         plan: EdgeQuery,
     ) -> Result<Vec<EdgeRecord>, Error> {
-        self.query_edges_internal(type_name, owner, plan, TraversalDirection::Reverse)
+        self.query_edges_internal(type_name, owner_reverse, plan, TraversalDirection::Reverse)
             .await
+    }
+
+    async fn query_edges_with_targets(
+        &self,
+        edge_type: &'static str,
+        obj_type: &'static str,
+        owner: Uuid,
+        obj_filters: &[QueryFilter],
+        plan: EdgeQuery,
+    ) -> Result<Vec<(EdgeRecord, ObjectRecord)>, Error> {
+        self.query_edges_with_objects_inner(
+            edge_type,
+            obj_type,
+            owner,
+            obj_filters,
+            plan,
+            TraversalDirection::Forward,
+        )
+        .await
+    }
+
+    async fn query_reverse_edges_with_sources(
+        &self,
+        edge_type: &'static str,
+        obj_type: &'static str,
+        owner: Uuid,
+        obj_filters: &[QueryFilter],
+        plan: EdgeQuery,
+    ) -> Result<Vec<(EdgeRecord, ObjectRecord)>, Error> {
+        self.query_edges_with_objects_inner(
+            edge_type,
+            obj_type,
+            owner,
+            obj_filters,
+            plan,
+            TraversalDirection::Reverse,
+        )
+        .await
     }
 
     async fn count_edges(
@@ -1545,35 +1760,26 @@ impl Adapter for PostgresAdapter {
                 .bind(&sq)
                 .fetch_one(&self.pool)
                 .await
-                .expect("Failed to fetch sequence value");
+                .expect("Failed to fetch the current sequence value");
         val as u64
     }
 
     async fn sequence_next_value(&self, sq: String) -> u64 {
-        // Upsert: insert with value=2 on first call, otherwise increment.
-        // This matches SQLite semantics: first sequence_value = 1, first next = 2.
         let next_val: i64 = sqlx::query_scalar(
-            r#"
-            INSERT INTO sequences (name, value) VALUES ($1, 2)
-            ON CONFLICT (name) DO UPDATE SET value = sequences.value + 1
-            RETURNING value
-            "#,
+            "INSERT INTO sequences (name, value) VALUES ($1, 2)
+             ON CONFLICT (name) DO UPDATE SET value = sequences.value + 1
+             RETURNING value",
         )
         .bind(&sq)
         .fetch_one(&self.pool)
         .await
-        .expect("Failed to fetch next sequence value");
+        .expect("Failed to fetch the next sequence value");
         next_val as u64
-    }
-
-    #[cfg(feature = "ledger")]
-    fn ledger_adapter(&self) -> Option<Arc<dyn ledger::LedgerAdapter>> {
-        Some(Arc::new(PostgresAdapter::from_pool(self.pool.clone())))
     }
 }
 
 #[async_trait::async_trait]
-impl UniqueAdapter for PostgresAdapter {
+impl UniqueAdapter for CockroachAdapter {
     async fn insert_unique_hashes(
         &self,
         type_name: &str,
@@ -1583,7 +1789,6 @@ impl UniqueAdapter for PostgresAdapter {
         if hashes.is_empty() {
             return Ok(());
         }
-
         let keys: Vec<&str> = hashes.iter().map(|(k, _)| k.as_str()).collect();
         let fields: Vec<&str> = hashes.iter().map(|(_, f)| *f).collect();
 
@@ -1602,24 +1807,23 @@ impl UniqueAdapter for PostgresAdapter {
 
         match result {
             Ok(_) => Ok(()),
-            Err(err) if err.to_string().contains("unique constraint") => {
-                // Find which key already exists to report the correct field name.
-                let conflicting: Vec<String> =
-                    sqlx::query_scalar("SELECT key FROM unique_constraints WHERE key = ANY($1)")
-                        .bind(&keys)
-                        .fetch_all(&self.pool)
-                        .await
-                        .unwrap_or_default();
-
-                let field = hashes
-                    .iter()
-                    .find(|(k, _)| conflicting.iter().any(|c| c == k))
-                    .map(|(_, f)| *f)
-                    .unwrap_or("unknown");
-
-                Err(Error::UniqueConstraintViolation(field.to_string()))
+            Err(err) => {
+                let msg = err.to_string();
+                if msg.contains("unique constraint") || msg.contains("duplicate") {
+                    // Identify which field caused the conflict
+                    let existing: Option<String> = sqlx::query_scalar(
+                        "SELECT field FROM unique_constraints WHERE key = ANY($1) LIMIT 1",
+                    )
+                    .bind(&keys)
+                    .fetch_optional(&self.pool)
+                    .await
+                    .unwrap_or(None);
+                    let field = existing.unwrap_or_else(|| "unknown".to_string());
+                    Err(Error::UniqueConstraintViolation(field))
+                } else {
+                    Err(Error::Storage(msg))
+                }
             }
-            Err(err) => Err(Error::Storage(err.to_string())),
         }
     }
 
@@ -1670,7 +1874,7 @@ impl UniqueAdapter for PostgresAdapter {
 }
 
 #[async_trait::async_trait]
-impl EdgeTraversal for PostgresAdapter {
+impl EdgeTraversal for CockroachAdapter {
     async fn fetch_object_from_edge_traversal_internal(
         &self,
         edge_type_name: &str,
@@ -1707,5 +1911,340 @@ impl EdgeTraversal for PostgresAdapter {
             TraversalDirection::Reverse,
         )
         .await
+    }
+    async fn query_edges_with_targets_batch(
+        &self,
+        edge_type: &'static str,
+        obj_type: &'static str,
+        from_ids: &[Uuid],
+        obj_filters: &[QueryFilter],
+        plan: EdgeQuery,
+    ) -> Result<Vec<(EdgeRecord, ObjectRecord)>, Error> {
+        let where_clause = Self::build_batch_traversal_conditions(
+            TraversalDirection::Forward,
+            obj_filters,
+            &plan.filters,
+        );
+        let order_clause = Self::build_edge_order_clause(&plan.filters);
+        let mut sql = format!(
+            r#"
+            SELECT
+                e."from" AS edge_from, e."to" AS edge_to, e.type AS edge_type,
+                e.data AS edge_data, e.index_meta AS edge_index_meta,
+                o.id AS obj_id, o.type AS obj_type, o.owner AS obj_owner,
+                o.created_at AS obj_created_at, o.updated_at AS obj_updated_at, o.data AS obj_data
+            FROM edges e
+            JOIN objects o ON e."to" = o.id
+            {where_clause}
+            {order_clause}
+            "#,
+        );
+        if let Some(limit) = plan.limit {
+            sql.push_str(&format!(" LIMIT {}", limit));
+        }
+        let mut query = sqlx::query(&sql)
+            .bind(obj_type)
+            .bind(edge_type)
+            .bind(from_ids);
+        query = Self::query_bind_filters(query, obj_filters);
+        query = Self::query_bind_filters(query, &plan.filters);
+        let rows = query
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| Error::Storage(e.to_string()))?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|row| Self::map_row_to_edge_and_object(row).ok())
+            .collect())
+    }
+
+    async fn query_reverse_edges_with_sources_batch(
+        &self,
+        edge_type: &'static str,
+        obj_type: &'static str,
+        to_ids: &[Uuid],
+        obj_filters: &[QueryFilter],
+        plan: EdgeQuery,
+    ) -> Result<Vec<(EdgeRecord, ObjectRecord)>, Error> {
+        let where_clause = Self::build_batch_traversal_conditions(
+            TraversalDirection::Reverse,
+            obj_filters,
+            &plan.filters,
+        );
+        let order_clause = Self::build_edge_order_clause(&plan.filters);
+        let mut sql = format!(
+            r#"
+            SELECT
+                e."from" AS edge_from, e."to" AS edge_to, e.type AS edge_type,
+                e.data AS edge_data, e.index_meta AS edge_index_meta,
+                o.id AS obj_id, o.type AS obj_type, o.owner AS obj_owner,
+                o.created_at AS obj_created_at, o.updated_at AS obj_updated_at, o.data AS obj_data
+            FROM edges e
+            JOIN objects o ON e."from" = o.id
+            {where_clause}
+            {order_clause}
+            "#,
+        );
+        if let Some(limit) = plan.limit {
+            sql.push_str(&format!(" LIMIT {}", limit));
+        }
+        let mut query = sqlx::query(&sql)
+            .bind(obj_type)
+            .bind(edge_type)
+            .bind(to_ids);
+        query = Self::query_bind_filters(query, obj_filters);
+        query = Self::query_bind_filters(query, &plan.filters);
+        let rows = query
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| Error::Storage(e.to_string()))?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|row| Self::map_row_to_edge_and_object(row).ok())
+            .collect())
+    }
+
+    async fn query_edges_batch(
+        &self,
+        edge_type: &'static str,
+        from_ids: &[Uuid],
+        plan: EdgeQuery,
+    ) -> Result<Vec<EdgeRecord>, Error> {
+        let where_clause =
+            Self::build_batch_edge_only_conditions(TraversalDirection::Forward, &plan.filters);
+        let order_clause = Self::build_edge_order_clause(&plan.filters);
+        let mut sql = format!(
+            r#"
+            SELECT e."from" AS "from", e."to" AS "to", e.type AS "type", e.data, e.index_meta
+            FROM edges e
+            {where_clause}
+            {order_clause}
+            "#,
+        );
+        if let Some(limit) = plan.limit {
+            sql.push_str(&format!(" LIMIT {}", limit));
+        }
+        let mut query = sqlx::query(&sql).bind(edge_type).bind(from_ids);
+        query = Self::query_bind_filters(query, &plan.filters);
+        let rows = query
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| Error::Storage(e.to_string()))?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|row| Self::map_row_to_edge_record(row).ok())
+            .collect())
+    }
+
+    async fn query_reverse_edges_batch(
+        &self,
+        edge_type: &'static str,
+        to_ids: &[Uuid],
+        plan: EdgeQuery,
+    ) -> Result<Vec<EdgeRecord>, Error> {
+        let where_clause =
+            Self::build_batch_edge_only_conditions(TraversalDirection::Reverse, &plan.filters);
+        let order_clause = Self::build_edge_order_clause(&plan.filters);
+        let mut sql = format!(
+            r#"
+            SELECT e."from" AS "from", e."to" AS "to", e.type AS "type", e.data, e.index_meta
+            FROM edges e
+            {where_clause}
+            {order_clause}
+            "#,
+        );
+        if let Some(limit) = plan.limit {
+            sql.push_str(&format!(" LIMIT {}", limit));
+        }
+        let mut query = sqlx::query(&sql).bind(edge_type).bind(to_ids);
+        query = Self::query_bind_filters(query, &plan.filters);
+        let rows = query
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| Error::Storage(e.to_string()))?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|row| Self::map_row_to_edge_record(row).ok())
+            .collect())
+    }
+
+    async fn query_edges_both_directions_with_objects(
+        &self,
+        edge_type: &'static str,
+        obj_type: &'static str,
+        pivot: Uuid,
+        obj_filters: &[QueryFilter],
+        plan: EdgeQuery,
+    ) -> Result<
+        (
+            Vec<(EdgeRecord, ObjectRecord)>,
+            Vec<(EdgeRecord, ObjectRecord)>,
+        ),
+        Error,
+    > {
+        let fwd_where = Self::build_union_branch_with_obj_conditions(
+            TraversalDirection::Forward,
+            obj_filters,
+            &plan.filters,
+        );
+        let rev_where = Self::build_union_branch_with_obj_conditions(
+            TraversalDirection::Reverse,
+            obj_filters,
+            &plan.filters,
+        );
+        let sel = r#"
+            SELECT
+                e."from" AS edge_from, e."to" AS edge_to, e.type AS edge_type,
+                e.data AS edge_data, e.index_meta AS edge_index_meta,
+                o.id AS obj_id, o.type AS obj_type, o.owner AS obj_owner,
+                o.created_at AS obj_created_at, o.updated_at AS obj_updated_at, o.data AS obj_data
+        "#;
+        let sql = format!(
+            r#"
+            {sel} FROM edges e JOIN objects o ON e."to" = o.id {fwd_where}
+            UNION ALL
+            {sel} FROM edges e JOIN objects o ON e."from" = o.id {rev_where}
+            "#,
+        );
+        let mut query = sqlx::query(&sql).bind(obj_type).bind(edge_type).bind(pivot);
+        query = Self::query_bind_filters(query, obj_filters);
+        query = Self::query_bind_filters(query, &plan.filters);
+        let rows = query
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| Error::Storage(e.to_string()))?;
+
+        let mut fwd: Vec<(EdgeRecord, ObjectRecord)> = Vec::new();
+        let mut rev: Vec<(EdgeRecord, ObjectRecord)> = Vec::new();
+        for row in rows {
+            let edge_from: Uuid = row
+                .try_get::<Uuid, _>("edge_from")
+                .map_err(|e| Error::Deserialize(e.to_string()))?;
+            let pair = Self::map_row_to_edge_and_object(row)?;
+            if edge_from == pivot {
+                fwd.push(pair);
+            } else {
+                rev.push(pair);
+            }
+        }
+        Ok((fwd, rev))
+    }
+
+    async fn query_edges_both_directions(
+        &self,
+        edge_type: &'static str,
+        pivot: Uuid,
+        plan: EdgeQuery,
+    ) -> Result<(Vec<EdgeRecord>, Vec<EdgeRecord>), Error> {
+        let fwd_where = Self::build_union_branch_edge_only_conditions(
+            TraversalDirection::Forward,
+            &plan.filters,
+        );
+        let rev_where = Self::build_union_branch_edge_only_conditions(
+            TraversalDirection::Reverse,
+            &plan.filters,
+        );
+        let sql = format!(
+            r#"
+            SELECT e."from" AS "from", e."to" AS "to", e.type AS "type", e.data, e.index_meta
+            FROM edges e {fwd_where}
+            UNION ALL
+            SELECT e."from" AS "from", e."to" AS "to", e.type AS "type", e.data, e.index_meta
+            FROM edges e {rev_where}
+            "#,
+        );
+        let mut query = sqlx::query(&sql).bind(edge_type).bind(pivot);
+        query = Self::query_bind_filters(query, &plan.filters);
+        let rows = query
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| Error::Storage(e.to_string()))?;
+
+        let mut fwd: Vec<EdgeRecord> = Vec::new();
+        let mut rev: Vec<EdgeRecord> = Vec::new();
+        for row in rows {
+            let edge_from: Uuid = row
+                .try_get::<Uuid, _>("from")
+                .map_err(|e| Error::Deserialize(e.to_string()))?;
+            let record = Self::map_row_to_edge_record(row)?;
+            if edge_from == pivot {
+                fwd.push(record);
+            } else {
+                rev.push(record);
+            }
+        }
+        Ok((fwd, rev))
+    }
+
+    async fn count_edges_batch(
+        &self,
+        edge_type: &'static str,
+        from_ids: &[Uuid],
+        plan: EdgeQuery,
+    ) -> Result<Vec<(Uuid, u64)>, Error> {
+        let where_clause =
+            Self::build_batch_edge_only_conditions(TraversalDirection::Forward, &plan.filters);
+        let sql = format!(
+            r#"
+            SELECT e."from", COUNT(*) AS cnt
+            FROM edges e
+            {where_clause}
+            GROUP BY e."from"
+            "#,
+        );
+        let mut query = sqlx::query(&sql).bind(edge_type).bind(from_ids);
+        query = Self::query_bind_filters(query, &plan.filters);
+        let rows = query
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| Error::Storage(e.to_string()))?;
+
+        rows.into_iter()
+            .map(|row| {
+                let id: Uuid = row
+                    .try_get("from")
+                    .map_err(|e| Error::Deserialize(e.to_string()))?;
+                let cnt: i64 = row
+                    .try_get("cnt")
+                    .map_err(|e| Error::Deserialize(e.to_string()))?;
+                Ok((id, cnt as u64))
+            })
+            .collect()
+    }
+
+    async fn count_reverse_edges_batch(
+        &self,
+        edge_type: &'static str,
+        to_ids: &[Uuid],
+        plan: EdgeQuery,
+    ) -> Result<Vec<(Uuid, u64)>, Error> {
+        let where_clause =
+            Self::build_batch_edge_only_conditions(TraversalDirection::Reverse, &plan.filters);
+        let sql = format!(
+            r#"
+            SELECT e."to", COUNT(*) AS cnt
+            FROM edges e
+            {where_clause}
+            GROUP BY e."to"
+            "#,
+        );
+        let mut query = sqlx::query(&sql).bind(edge_type).bind(to_ids);
+        query = Self::query_bind_filters(query, &plan.filters);
+        let rows = query
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| Error::Storage(e.to_string()))?;
+
+        rows.into_iter()
+            .map(|row| {
+                let id: Uuid = row
+                    .try_get("to")
+                    .map_err(|e| Error::Deserialize(e.to_string()))?;
+                let cnt: i64 = row
+                    .try_get("cnt")
+                    .map_err(|e| Error::Deserialize(e.to_string()))?;
+                Ok((id, cnt as u64))
+            })
+            .collect()
     }
 }

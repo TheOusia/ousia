@@ -288,6 +288,96 @@ impl SqliteAdapter {
             index_meta: index_meta_json,
         })
     }
+    fn map_row_to_edge_and_object(row: SqliteRow) -> Result<(EdgeRecord, ObjectRecord), Error> {
+        let de = |e: sqlx::Error| Error::Deserialize(e.to_string());
+        let ds = |e: serde_json::Error| Error::Deserialize(e.to_string());
+
+        let edge_data_str: String = row.try_get("edge_data").map_err(de)?;
+        let edge_im_str: String = row.try_get("edge_index_meta").map_err(de)?;
+        let obj_data_str: String = row.try_get("obj_data").map_err(de)?;
+
+        let obj_created_str: String = row.try_get("obj_created_at").map_err(de)?;
+        let obj_updated_str: String = row.try_get("obj_updated_at").map_err(de)?;
+
+        let edge = EdgeRecord {
+            type_name: std::borrow::Cow::Owned(row.try_get::<String, _>("edge_type").map_err(de)?),
+            from: row.try_get::<Uuid, _>("edge_from").map_err(de)?,
+            to: row.try_get::<Uuid, _>("edge_to").map_err(de)?,
+            data: serde_json::from_str(&edge_data_str).map_err(ds)?,
+            index_meta: serde_json::from_str(&edge_im_str).map_err(ds)?,
+        };
+        let obj = ObjectRecord {
+            id: row.try_get::<Uuid, _>("obj_id").map_err(de)?,
+            type_name: std::borrow::Cow::Owned(row.try_get::<String, _>("obj_type").map_err(de)?),
+            owner: row.try_get::<Uuid, _>("obj_owner").map_err(de)?,
+            created_at: chrono::DateTime::parse_from_rfc3339(&obj_created_str)
+                .map_err(|e| Error::Deserialize(e.to_string()))?
+                .with_timezone(&chrono::Utc),
+            updated_at: chrono::DateTime::parse_from_rfc3339(&obj_updated_str)
+                .map_err(|e| Error::Deserialize(e.to_string()))?
+                .with_timezone(&chrono::Utc),
+            data: serde_json::from_str(&obj_data_str).map_err(ds)?,
+            index_meta: serde_json::Value::Null,
+        };
+        Ok((edge, obj))
+    }
+
+    async fn query_edges_with_objects_inner(
+        &self,
+        edge_type_name: &str,
+        type_name: &str,
+        owner: Uuid,
+        obj_filters: &[QueryFilter],
+        plan: EdgeQuery,
+        direction: TraversalDirection,
+    ) -> Result<Vec<(EdgeRecord, ObjectRecord)>, Error> {
+        let where_clause = Self::build_object_traversal_query_conditions(
+            direction.clone(),
+            obj_filters,
+            &plan.filters,
+            plan.cursor,
+        );
+        let order_clause = Self::build_edge_order_clause(&plan.filters);
+        let join_col = match direction {
+            TraversalDirection::Forward => "to",
+            TraversalDirection::Reverse => "from",
+        };
+        let mut sql = format!(
+            r#"
+            SELECT
+                e."from" AS edge_from, e."to" AS edge_to, e.type AS edge_type,
+                e.data AS edge_data, e.index_meta AS edge_index_meta,
+                o.id AS obj_id, o.type AS obj_type, o.owner AS obj_owner,
+                o.created_at AS obj_created_at, o.updated_at AS obj_updated_at,
+                o.data AS obj_data
+            FROM edges e
+            JOIN objects o ON e."{join_col}" = o.id
+            {where_clause}
+            {order_clause}
+            "#,
+        );
+        if let Some(limit) = plan.limit {
+            sql.push_str(&format!(" LIMIT {}", limit));
+        }
+        let mut query = sqlx::query(&sql)
+            .bind(type_name)
+            .bind(edge_type_name)
+            .bind(owner);
+        if let Some(cursor) = plan.cursor {
+            query = query.bind(cursor.last_id);
+        }
+        query = Self::query_bind_filters(query, obj_filters);
+        query = Self::query_bind_filters(query, &plan.filters);
+        let rows = query
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| Error::Storage(e.to_string()))?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|row| Self::map_row_to_edge_and_object(row).ok())
+            .collect())
+    }
+
     // // ── Shared SQL builder helpers ───────────────────────────────────────────
 
     fn build_filter_condition(alias: &str, filter: &QueryFilter) -> Option<(String, &'static str)> {
@@ -393,11 +483,7 @@ impl SqliteAdapter {
         Self::build_order_clause_aliased(filters, "e", true)
     }
 
-    fn build_order_clause_aliased(
-        filters: &[QueryFilter],
-        alias: &str,
-        is_edge: bool,
-    ) -> String {
+    fn build_order_clause_aliased(filters: &[QueryFilter], alias: &str, is_edge: bool) -> String {
         let prefix = if alias.is_empty() {
             String::new()
         } else {
@@ -668,6 +754,126 @@ impl SqliteAdapter {
             .collect())
     }
 
+    /// Build WHERE clause for batch traversal with object JOIN.
+    /// Bindings: obj_type(?), edge_type(?), id1(?), id2(?), ..., obj_filters, edge_filters.
+    fn build_batch_traversal_conditions(
+        direction: TraversalDirection,
+        obj_filters: &[QueryFilter],
+        edge_filters: &[QueryFilter],
+        n: usize,
+    ) -> String {
+        let placeholders = std::iter::repeat("?")
+            .take(n)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let anchor = match direction {
+            TraversalDirection::Forward => r#"e."from""#,
+            TraversalDirection::Reverse => r#"e."to""#,
+        };
+        let mut obj_conditions: Vec<(String, &str)> = vec![("o.type = ?".to_string(), "AND")];
+        for f in obj_filters {
+            if let Some((c, op)) = Self::build_filter_condition("o", f) {
+                obj_conditions.push((c, op));
+            }
+        }
+        let mut edge_conditions: Vec<(String, &str)> = vec![
+            ("e.type = ?".to_string(), "AND"),
+            (format!("{} IN ({})", anchor, placeholders), "AND"),
+        ];
+        for f in edge_filters {
+            if let Some((c, op)) = Self::build_filter_condition("e", f) {
+                edge_conditions.push((c, op));
+            }
+        }
+        format!(
+            "WHERE {} AND ({})",
+            Self::join_conditions(&obj_conditions),
+            Self::join_conditions(&edge_conditions)
+        )
+    }
+
+    /// Build WHERE clause for batch edge-only queries.
+    /// Bindings: edge_type(?), id1(?), id2(?), ..., edge_filters.
+    fn build_batch_edge_only_conditions(
+        direction: TraversalDirection,
+        edge_filters: &[QueryFilter],
+        n: usize,
+    ) -> String {
+        let placeholders = std::iter::repeat("?")
+            .take(n)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let anchor = match direction {
+            TraversalDirection::Forward => r#"e."from""#,
+            TraversalDirection::Reverse => r#"e."to""#,
+        };
+        let mut conditions: Vec<(String, &str)> = vec![
+            ("e.type = ?".to_string(), "AND"),
+            (format!("{} IN ({})", anchor, placeholders), "AND"),
+        ];
+        for f in edge_filters {
+            if let Some((c, op)) = Self::build_filter_condition("e", f) {
+                conditions.push((c, op));
+            }
+        }
+        format!("WHERE {}", Self::join_conditions(&conditions))
+    }
+
+    /// Build WHERE clause for one branch of a UNION both-directions query with object JOIN.
+    /// Each branch has its own bindings: obj_type(?), edge_type(?), pivot(?), obj_filters, edge_filters.
+    fn build_union_branch_with_obj_conditions(
+        direction: TraversalDirection,
+        obj_filters: &[QueryFilter],
+        edge_filters: &[QueryFilter],
+    ) -> String {
+        let anchor = match direction {
+            TraversalDirection::Forward => r#"e."from""#,
+            TraversalDirection::Reverse => r#"e."to""#,
+        };
+        let mut obj_conditions: Vec<(String, &str)> = vec![("o.type = ?".to_string(), "AND")];
+        for f in obj_filters {
+            if let Some((c, op)) = Self::build_filter_condition("o", f) {
+                obj_conditions.push((c, op));
+            }
+        }
+        let mut edge_conditions: Vec<(String, &str)> = vec![
+            ("e.type = ?".to_string(), "AND"),
+            (format!("{} = ?", anchor), "AND"),
+        ];
+        for f in edge_filters {
+            if let Some((c, op)) = Self::build_filter_condition("e", f) {
+                edge_conditions.push((c, op));
+            }
+        }
+        format!(
+            "WHERE {} AND ({})",
+            Self::join_conditions(&obj_conditions),
+            Self::join_conditions(&edge_conditions)
+        )
+    }
+
+    /// Build WHERE clause for one branch of a UNION both-directions edge-only query.
+    /// Each branch has its own bindings: edge_type(?), pivot(?), edge_filters.
+    fn build_union_branch_edge_only_conditions(
+        direction: TraversalDirection,
+        edge_filters: &[QueryFilter],
+    ) -> String {
+        let anchor = match direction {
+            TraversalDirection::Forward => r#"e."from""#,
+            TraversalDirection::Reverse => r#"e."to""#,
+        };
+        let mut conditions: Vec<(String, &str)> = vec![
+            ("e.type = ?".to_string(), "AND"),
+            (format!("{} = ?", anchor), "AND"),
+        ];
+        for f in edge_filters {
+            if let Some((c, op)) = Self::build_filter_condition("e", f) {
+                conditions.push((c, op));
+            }
+        }
+        format!("WHERE {}", Self::join_conditions(&conditions))
+    }
+
     async fn query_edges_internal(
         &self,
         type_name: &'static str,
@@ -705,7 +911,15 @@ impl SqliteAdapter {
 #[async_trait::async_trait]
 impl Adapter for SqliteAdapter {
     async fn insert_object(&self, record: ObjectRecord) -> Result<(), Error> {
-        let ObjectRecord { id, type_name, owner, created_at, updated_at, data, index_meta } = record;
+        let ObjectRecord {
+            id,
+            type_name,
+            owner,
+            created_at,
+            updated_at,
+            data,
+            index_meta,
+        } = record;
         let _ = sqlx::query(
             r#"
             INSERT INTO objects (id, type, owner, created_at, updated_at, data, index_meta)
@@ -718,10 +932,7 @@ impl Adapter for SqliteAdapter {
         .bind(created_at.to_rfc3339())
         .bind(updated_at.to_rfc3339())
         .bind(serde_json::to_string(&data).map_err(|e| Error::Serialize(e.to_string()))?)
-        .bind(
-            serde_json::to_string(&index_meta)
-                .map_err(|e| Error::Serialize(e.to_string()))?,
-        )
+        .bind(serde_json::to_string(&index_meta).map_err(|e| Error::Serialize(e.to_string()))?)
         .execute(&self.pool)
         .await
         .map_err(|err| {
@@ -1035,6 +1246,33 @@ impl Adapter for SqliteAdapter {
         }
     }
 
+    async fn fetch_owned_objects_batch(
+        &self,
+        type_name: &'static str,
+        owner_ids: &[Uuid],
+    ) -> Result<Vec<ObjectRecord>, Error> {
+        if owner_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let placeholders = owner_ids.iter().map(|_| "?").collect::<Vec<_>>().join(", ");
+        let sql = format!(
+            "SELECT o.id, o.type, o.owner, o.created_at, o.updated_at, o.data FROM objects o WHERE type = ? AND owner IN ({})",
+            placeholders
+        );
+        let mut query = sqlx::query(&sql).bind(type_name);
+        for id in owner_ids {
+            query = query.bind(*id);
+        }
+        let rows = query
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|err| Error::Storage(err.to_string()))?;
+
+        rows.into_iter()
+            .map(Self::map_row_to_object_record_slim)
+            .collect()
+    }
+
     async fn fetch_owned_objects(
         &self,
         type_name: &'static str,
@@ -1195,11 +1433,16 @@ impl Adapter for SqliteAdapter {
 
     /* ---------------- EDGES ---------------- */
     async fn insert_edge(&self, record: EdgeRecord) -> Result<(), Error> {
-        let EdgeRecord { from, to, type_name, data, index_meta } = record;
-        let data_str =
-            serde_json::to_string(&data).map_err(|e| Error::Serialize(e.to_string()))?;
-        let index_meta_str = serde_json::to_string(&index_meta)
-            .map_err(|e| Error::Serialize(e.to_string()))?;
+        let EdgeRecord {
+            from,
+            to,
+            type_name,
+            data,
+            index_meta,
+        } = record;
+        let data_str = serde_json::to_string(&data).map_err(|e| Error::Serialize(e.to_string()))?;
+        let index_meta_str =
+            serde_json::to_string(&index_meta).map_err(|e| Error::Serialize(e.to_string()))?;
 
         let _ = sqlx::query(
             r#"
@@ -1229,7 +1472,12 @@ impl Adapter for SqliteAdapter {
         old_to: Uuid,
         to: Option<Uuid>,
     ) -> Result<(), Error> {
-        let EdgeRecord { from, type_name, data, .. } = record;
+        let EdgeRecord {
+            from,
+            type_name,
+            data,
+            ..
+        } = record;
         let _ = sqlx::query(
             r#"
         UPDATE edges SET data = ?, "to" = ?
@@ -1304,6 +1552,44 @@ impl Adapter for SqliteAdapter {
     ) -> Result<Vec<EdgeRecord>, Error> {
         self.query_edges_internal(type_name, owner_reverse, plan, TraversalDirection::Reverse)
             .await
+    }
+
+    async fn query_edges_with_targets(
+        &self,
+        edge_type: &'static str,
+        obj_type: &'static str,
+        owner: Uuid,
+        obj_filters: &[QueryFilter],
+        plan: EdgeQuery,
+    ) -> Result<Vec<(EdgeRecord, ObjectRecord)>, Error> {
+        self.query_edges_with_objects_inner(
+            edge_type,
+            obj_type,
+            owner,
+            obj_filters,
+            plan,
+            TraversalDirection::Forward,
+        )
+        .await
+    }
+
+    async fn query_reverse_edges_with_sources(
+        &self,
+        edge_type: &'static str,
+        obj_type: &'static str,
+        owner: Uuid,
+        obj_filters: &[QueryFilter],
+        plan: EdgeQuery,
+    ) -> Result<Vec<(EdgeRecord, ObjectRecord)>, Error> {
+        self.query_edges_with_objects_inner(
+            edge_type,
+            obj_type,
+            owner,
+            obj_filters,
+            plan,
+            TraversalDirection::Reverse,
+        )
+        .await
     }
 
     async fn count_edges(
@@ -1582,5 +1868,379 @@ impl EdgeTraversal for SqliteAdapter {
             TraversalDirection::Reverse,
         )
         .await
+    }
+
+    async fn query_edges_with_targets_batch(
+        &self,
+        edge_type: &'static str,
+        obj_type: &'static str,
+        from_ids: &[Uuid],
+        obj_filters: &[QueryFilter],
+        plan: EdgeQuery,
+    ) -> Result<Vec<(EdgeRecord, ObjectRecord)>, Error> {
+        if from_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let where_clause = Self::build_batch_traversal_conditions(
+            TraversalDirection::Forward,
+            obj_filters,
+            &plan.filters,
+            from_ids.len(),
+        );
+        let order_clause = Self::build_edge_order_clause(&plan.filters);
+        let mut sql = format!(
+            r#"
+            SELECT
+                e."from" AS edge_from, e."to" AS edge_to, e.type AS edge_type,
+                e.data AS edge_data, e.index_meta AS edge_index_meta,
+                o.id AS obj_id, o.type AS obj_type, o.owner AS obj_owner,
+                o.created_at AS obj_created_at, o.updated_at AS obj_updated_at, o.data AS obj_data
+            FROM edges e
+            JOIN objects o ON e."to" = o.id
+            {where_clause}
+            {order_clause}
+            "#,
+        );
+        if let Some(limit) = plan.limit {
+            sql.push_str(&format!(" LIMIT {}", limit));
+        }
+        let mut query = sqlx::query(&sql).bind(obj_type).bind(edge_type);
+        for id in from_ids {
+            query = query.bind(*id);
+        }
+        query = Self::query_bind_filters(query, obj_filters);
+        query = Self::query_bind_filters(query, &plan.filters);
+        let rows = query
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| Error::Storage(e.to_string()))?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|row| Self::map_row_to_edge_and_object(row).ok())
+            .collect())
+    }
+
+    async fn query_reverse_edges_with_sources_batch(
+        &self,
+        edge_type: &'static str,
+        obj_type: &'static str,
+        to_ids: &[Uuid],
+        obj_filters: &[QueryFilter],
+        plan: EdgeQuery,
+    ) -> Result<Vec<(EdgeRecord, ObjectRecord)>, Error> {
+        if to_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let where_clause = Self::build_batch_traversal_conditions(
+            TraversalDirection::Reverse,
+            obj_filters,
+            &plan.filters,
+            to_ids.len(),
+        );
+        let order_clause = Self::build_edge_order_clause(&plan.filters);
+        let mut sql = format!(
+            r#"
+            SELECT
+                e."from" AS edge_from, e."to" AS edge_to, e.type AS edge_type,
+                e.data AS edge_data, e.index_meta AS edge_index_meta,
+                o.id AS obj_id, o.type AS obj_type, o.owner AS obj_owner,
+                o.created_at AS obj_created_at, o.updated_at AS obj_updated_at, o.data AS obj_data
+            FROM edges e
+            JOIN objects o ON e."from" = o.id
+            {where_clause}
+            {order_clause}
+            "#,
+        );
+        if let Some(limit) = plan.limit {
+            sql.push_str(&format!(" LIMIT {}", limit));
+        }
+        let mut query = sqlx::query(&sql).bind(obj_type).bind(edge_type);
+        for id in to_ids {
+            query = query.bind(*id);
+        }
+        query = Self::query_bind_filters(query, obj_filters);
+        query = Self::query_bind_filters(query, &plan.filters);
+        let rows = query
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| Error::Storage(e.to_string()))?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|row| Self::map_row_to_edge_and_object(row).ok())
+            .collect())
+    }
+
+    async fn query_edges_batch(
+        &self,
+        edge_type: &'static str,
+        from_ids: &[Uuid],
+        plan: EdgeQuery,
+    ) -> Result<Vec<EdgeRecord>, Error> {
+        if from_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let where_clause = Self::build_batch_edge_only_conditions(
+            TraversalDirection::Forward,
+            &plan.filters,
+            from_ids.len(),
+        );
+        let order_clause = Self::build_edge_order_clause(&plan.filters);
+        let mut sql = format!(
+            r#"
+            SELECT e."from", e."to", e.type, e.data, e.index_meta
+            FROM edges e
+            {where_clause}
+            {order_clause}
+            "#,
+        );
+        if let Some(limit) = plan.limit {
+            sql.push_str(&format!(" LIMIT {}", limit));
+        }
+        let mut query = sqlx::query(&sql).bind(edge_type);
+        for id in from_ids {
+            query = query.bind(*id);
+        }
+        query = Self::query_bind_filters(query, &plan.filters);
+        let rows = query
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| Error::Storage(e.to_string()))?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|row| Self::map_row_to_edge_record(row).ok())
+            .collect())
+    }
+
+    async fn query_reverse_edges_batch(
+        &self,
+        edge_type: &'static str,
+        to_ids: &[Uuid],
+        plan: EdgeQuery,
+    ) -> Result<Vec<EdgeRecord>, Error> {
+        if to_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let where_clause = Self::build_batch_edge_only_conditions(
+            TraversalDirection::Reverse,
+            &plan.filters,
+            to_ids.len(),
+        );
+        let order_clause = Self::build_edge_order_clause(&plan.filters);
+        let mut sql = format!(
+            r#"
+            SELECT e."from", e."to", e.type, e.data, e.index_meta
+            FROM edges e
+            {where_clause}
+            {order_clause}
+            "#,
+        );
+        if let Some(limit) = plan.limit {
+            sql.push_str(&format!(" LIMIT {}", limit));
+        }
+        let mut query = sqlx::query(&sql).bind(edge_type);
+        for id in to_ids {
+            query = query.bind(*id);
+        }
+        query = Self::query_bind_filters(query, &plan.filters);
+        let rows = query
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| Error::Storage(e.to_string()))?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|row| Self::map_row_to_edge_record(row).ok())
+            .collect())
+    }
+
+    async fn query_edges_both_directions_with_objects(
+        &self,
+        edge_type: &'static str,
+        obj_type: &'static str,
+        pivot: Uuid,
+        obj_filters: &[QueryFilter],
+        plan: EdgeQuery,
+    ) -> Result<
+        (
+            Vec<(EdgeRecord, ObjectRecord)>,
+            Vec<(EdgeRecord, ObjectRecord)>,
+        ),
+        Error,
+    > {
+        let fwd_where = Self::build_union_branch_with_obj_conditions(
+            TraversalDirection::Forward,
+            obj_filters,
+            &plan.filters,
+        );
+        let rev_where = Self::build_union_branch_with_obj_conditions(
+            TraversalDirection::Reverse,
+            obj_filters,
+            &plan.filters,
+        );
+        let sel = r#"
+            SELECT
+                e."from" AS edge_from, e."to" AS edge_to, e.type AS edge_type,
+                e.data AS edge_data, e.index_meta AS edge_index_meta,
+                o.id AS obj_id, o.type AS obj_type, o.owner AS obj_owner,
+                o.created_at AS obj_created_at, o.updated_at AS obj_updated_at, o.data AS obj_data
+        "#;
+        let sql = format!(
+            "{sel} FROM edges e JOIN objects o ON e.\"to\" = o.id {fwd_where}
+            UNION ALL
+            {sel} FROM edges e JOIN objects o ON e.\"from\" = o.id {rev_where}",
+        );
+        // SQLite ?-params are positional — bind each branch independently
+        let mut query = sqlx::query(&sql).bind(obj_type).bind(edge_type).bind(pivot);
+        query = Self::query_bind_filters(query, obj_filters);
+        query = Self::query_bind_filters(query, &plan.filters);
+        // reverse branch
+        query = query.bind(obj_type).bind(edge_type).bind(pivot);
+        query = Self::query_bind_filters(query, obj_filters);
+        query = Self::query_bind_filters(query, &plan.filters);
+
+        let rows = query
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| Error::Storage(e.to_string()))?;
+
+        let mut fwd: Vec<(EdgeRecord, ObjectRecord)> = Vec::new();
+        let mut rev: Vec<(EdgeRecord, ObjectRecord)> = Vec::new();
+        for row in rows {
+            let edge_from: Uuid = row
+                .try_get::<Uuid, _>("edge_from")
+                .map_err(|e| Error::Deserialize(e.to_string()))?;
+            let pair = Self::map_row_to_edge_and_object(row)?;
+            if edge_from == pivot {
+                fwd.push(pair);
+            } else {
+                rev.push(pair);
+            }
+        }
+        Ok((fwd, rev))
+    }
+
+    async fn query_edges_both_directions(
+        &self,
+        edge_type: &'static str,
+        pivot: Uuid,
+        plan: EdgeQuery,
+    ) -> Result<(Vec<EdgeRecord>, Vec<EdgeRecord>), Error> {
+        let fwd_where = Self::build_union_branch_edge_only_conditions(
+            TraversalDirection::Forward,
+            &plan.filters,
+        );
+        let rev_where = Self::build_union_branch_edge_only_conditions(
+            TraversalDirection::Reverse,
+            &plan.filters,
+        );
+        let sql = format!(
+            r#"SELECT e."from", e."to", e.type, e.data, e.index_meta FROM edges e {fwd_where}
+            UNION ALL
+            SELECT e."from", e."to", e.type, e.data, e.index_meta FROM edges e {rev_where}"#,
+        );
+        // Bind each branch separately (positional ?)
+        let mut query = sqlx::query(&sql).bind(edge_type).bind(pivot);
+        query = Self::query_bind_filters(query, &plan.filters);
+        query = query.bind(edge_type).bind(pivot);
+        query = Self::query_bind_filters(query, &plan.filters);
+
+        let rows = query
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| Error::Storage(e.to_string()))?;
+
+        let mut fwd: Vec<EdgeRecord> = Vec::new();
+        let mut rev: Vec<EdgeRecord> = Vec::new();
+        for row in rows {
+            let edge_from: Uuid = row
+                .try_get::<Uuid, _>("from")
+                .map_err(|e| Error::Deserialize(e.to_string()))?;
+            let record = Self::map_row_to_edge_record(row)?;
+            if edge_from == pivot {
+                fwd.push(record);
+            } else {
+                rev.push(record);
+            }
+        }
+        Ok((fwd, rev))
+    }
+
+    async fn count_edges_batch(
+        &self,
+        edge_type: &'static str,
+        from_ids: &[Uuid],
+        plan: EdgeQuery,
+    ) -> Result<Vec<(Uuid, u64)>, Error> {
+        if from_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let where_clause = Self::build_batch_edge_only_conditions(
+            TraversalDirection::Forward,
+            &plan.filters,
+            from_ids.len(),
+        );
+        let sql = format!(
+            r#"SELECT e."from", COUNT(*) AS cnt FROM edges e {where_clause} GROUP BY e."from""#,
+        );
+        let mut query = sqlx::query(&sql).bind(edge_type);
+        for id in from_ids {
+            query = query.bind(*id);
+        }
+        query = Self::query_bind_filters(query, &plan.filters);
+        let rows = query
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| Error::Storage(e.to_string()))?;
+
+        rows.into_iter()
+            .map(|row| {
+                let id: Uuid = row
+                    .try_get("from")
+                    .map_err(|e| Error::Deserialize(e.to_string()))?;
+                let cnt: i64 = row
+                    .try_get("cnt")
+                    .map_err(|e| Error::Deserialize(e.to_string()))?;
+                Ok((id, cnt as u64))
+            })
+            .collect()
+    }
+
+    async fn count_reverse_edges_batch(
+        &self,
+        edge_type: &'static str,
+        to_ids: &[Uuid],
+        plan: EdgeQuery,
+    ) -> Result<Vec<(Uuid, u64)>, Error> {
+        if to_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let where_clause = Self::build_batch_edge_only_conditions(
+            TraversalDirection::Reverse,
+            &plan.filters,
+            to_ids.len(),
+        );
+        let sql = format!(
+            r#"SELECT e."to", COUNT(*) AS cnt FROM edges e {where_clause} GROUP BY e."to""#,
+        );
+        let mut query = sqlx::query(&sql).bind(edge_type);
+        for id in to_ids {
+            query = query.bind(*id);
+        }
+        query = Self::query_bind_filters(query, &plan.filters);
+        let rows = query
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| Error::Storage(e.to_string()))?;
+
+        rows.into_iter()
+            .map(|row| {
+                let id: Uuid = row
+                    .try_get("to")
+                    .map_err(|e| Error::Deserialize(e.to_string()))?;
+                let cnt: i64 = row
+                    .try_get("cnt")
+                    .map_err(|e| Error::Deserialize(e.to_string()))?;
+                Ok((id, cnt as u64))
+            })
+            .collect()
     }
 }

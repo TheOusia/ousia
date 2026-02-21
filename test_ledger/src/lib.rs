@@ -1,3 +1,5 @@
+pub mod test_postgres_ledger_standalone;
+
 use std::sync::Arc;
 
 use chrono::{Days, Utc};
@@ -281,6 +283,124 @@ async fn test_reserve_operation() {
 
     assert_eq!(user_balance.available, 40_00);
     assert_eq!(authority_balance.reserved, 60_00);
+}
+
+#[tokio::test]
+async fn test_settle_operation() {
+    let (_resource, engine, user) = setup().await;
+    let authority = Uuid::now_v7();
+    let receiver = Uuid::now_v7();
+    create_usd_asset(&engine.ledger()).await;
+
+    let ctx = engine.ledger_ctx();
+    Money::atomic(&ctx, |tx| async move {
+        tx.mint("USD", user, 100_00, "deposit".to_string()).await?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+
+    Money::atomic(&ctx, |tx| async move {
+        tx.reserve("USD", user, authority, 60_00, "escrow".to_string())
+            .await?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+
+    Money::atomic(&ctx, |tx| async move {
+        tx.settle("USD", authority, receiver, 60_00, "settle".to_string())
+            .await?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+
+    let authority_balance = Balance::get("USD", authority, &ctx).await.unwrap();
+    let receiver_balance = Balance::get("USD", receiver, &ctx).await.unwrap();
+
+    assert_eq!(authority_balance.reserved, 0);
+    assert_eq!(authority_balance.available, 0);
+    assert_eq!(receiver_balance.available, 60_00);
+}
+
+#[tokio::test]
+async fn test_settle_with_change() {
+    let (_resource, engine, user) = setup().await;
+    let authority = Uuid::now_v7();
+    let receiver = Uuid::now_v7();
+    create_usd_asset(&engine.ledger()).await;
+
+    let ctx = engine.ledger_ctx();
+    Money::atomic(&ctx, |tx| async move {
+        tx.mint("USD", user, 100_00, "deposit".to_string()).await?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+
+    Money::atomic(&ctx, |tx| async move {
+        tx.reserve("USD", user, authority, 60_00, "escrow".to_string())
+            .await?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+
+    // Settle only $40 — $20 should remain reserved for authority
+    Money::atomic(&ctx, |tx| async move {
+        tx.settle(
+            "USD",
+            authority,
+            receiver,
+            40_00,
+            "partial_settle".to_string(),
+        )
+        .await?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+
+    let authority_balance = Balance::get("USD", authority, &ctx).await.unwrap();
+    let receiver_balance = Balance::get("USD", receiver, &ctx).await.unwrap();
+
+    assert_eq!(authority_balance.reserved, 20_00);
+    assert_eq!(receiver_balance.available, 40_00);
+    assert_eq!(authority_balance.reserved + receiver_balance.available, 60_00);
+}
+
+#[tokio::test]
+async fn test_settle_insufficient_reserved() {
+    let (_resource, engine, user) = setup().await;
+    let authority = Uuid::now_v7();
+    let receiver = Uuid::now_v7();
+    create_usd_asset(&engine.ledger()).await;
+
+    let ctx = engine.ledger_ctx();
+    Money::atomic(&ctx, |tx| async move {
+        tx.mint("USD", user, 100_00, "deposit".to_string()).await?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+
+    Money::atomic(&ctx, |tx| async move {
+        tx.reserve("USD", user, authority, 40_00, "escrow".to_string())
+            .await?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+
+    let result = Money::atomic(&ctx, |tx| async move {
+        tx.settle("USD", authority, receiver, 60_00, "settle".to_string())
+            .await?;
+        Ok(())
+    })
+    .await;
+
+    assert!(matches!(result, Err(MoneyError::InsufficientFunds)));
 }
 
 #[tokio::test]

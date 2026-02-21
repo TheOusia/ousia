@@ -173,6 +173,74 @@ impl LedgerAdapter for MemoryAdapter {
                     }
                 }
 
+                Operation::Settle {
+                    asset_id,
+                    authority,
+                    receiver,
+                    amount,
+                    ..
+                } => {
+                    // Select reserved VOs owned by authority, smallest-first
+                    let mut candidates: Vec<(Uuid, u64)> = value_objects
+                        .values()
+                        .filter(|vo| {
+                            vo.asset == *asset_id
+                                && vo.owner == *authority
+                                && vo.state.is_reserved()
+                        })
+                        .map(|vo| (vo.id, vo.amount))
+                        .collect();
+                    candidates.sort_by_key(|(_, amt)| *amt);
+
+                    let mut ids_to_burn = Vec::new();
+                    let mut total_reserved = 0u64;
+                    for (id, amt) in candidates {
+                        ids_to_burn.push(id);
+                        total_reserved += amt;
+                        if total_reserved >= *amount {
+                            break;
+                        }
+                    }
+
+                    if total_reserved < *amount {
+                        return Err(MoneyError::InsufficientFunds);
+                    }
+
+                    // Burn the selected reserved VOs
+                    for id in &ids_to_burn {
+                        if let Some(vo) = value_objects.get_mut(id) {
+                            vo.state = ValueObjectState::Burned;
+                        }
+                    }
+
+                    let asset = assets
+                        .values()
+                        .find(|a| a.id == *asset_id)
+                        .ok_or_else(|| MoneyError::AssetNotFound(asset_id.to_string()))?;
+
+                    // Return change as reserved VOs for authority
+                    let change = total_reserved - *amount;
+                    if change > 0 {
+                        let mut remaining = change;
+                        while remaining > 0 {
+                            let chunk = remaining.min(asset.unit);
+                            let vo =
+                                ValueObject::new_reserved(*asset_id, *authority, chunk, *authority);
+                            value_objects.insert(vo.id, vo);
+                            remaining -= chunk;
+                        }
+                    }
+
+                    // Mint alive VOs for receiver
+                    let mut remaining = *amount;
+                    while remaining > 0 {
+                        let chunk = remaining.min(asset.unit);
+                        let vo = ValueObject::new_alive(*asset_id, *receiver, chunk);
+                        value_objects.insert(vo.id, vo);
+                        remaining -= chunk;
+                    }
+                }
+
                 Operation::RecordTransaction { transaction } => {
                     if let Some(ref raw_key) = transaction.idempotency_key {
                         let hash = crate::hash_idempotency_key(raw_key);

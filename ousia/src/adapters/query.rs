@@ -27,7 +27,7 @@ pub(crate) enum TraversalDirection {
 /// Object Query Plan (storage contract)
 /// -----------------------------
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Query {
     pub owner: Uuid, // enforced, never optional
     pub filters: Vec<QueryFilter>,
@@ -1099,7 +1099,7 @@ impl<'a, E: Edge, O: Object> EdgeQueryContext<'a, E, O> {
             .collect::<Result<Vec<E>, Error>>()
     }
 
-    /// Collect the edges with their targets
+    /// Collect edges with their forward targets in a single JOIN query.
     pub async fn collect_with_target(&self) -> Result<Vec<ObjectEdge<E, O>>, Error> {
         let mut edge_query = EdgeQuery::default();
         edge_query.filters = self.edge_filters.clone();
@@ -1110,9 +1110,33 @@ impl<'a, E: Edge, O: Object> EdgeQueryContext<'a, E, O> {
             edge_query.cursor = Some(offset);
         }
 
-        // proposal: prefix the select columns with edge_ or object_, unwrap them seperately
-        // return ObjectEdge<E, O> where E is the edge type and O is the object type
-        todo!()
+        self.adapter
+            .query_edges_with_targets(E::TYPE, O::TYPE, self.owner, &self.filters, edge_query)
+            .await?
+            .into_iter()
+            .map(|(er, or)| Ok(ObjectEdge::new(er.to_edge::<E>()?, or.to_object::<O>()?)))
+            .collect()
+    }
+
+    /// Collect edges with their reverse sources in a single JOIN query.
+    pub async fn collect_reverse_with_target(&self) -> Result<Vec<ObjectEdge<E, O>>, Error> {
+        let mut edge_query = EdgeQuery::default();
+        edge_query.filters = self.edge_filters.clone();
+        if let Some(limit) = self.limit {
+            edge_query.limit = Some(limit);
+        }
+        if let Some(offset) = self.cursor {
+            edge_query.cursor = Some(offset);
+        }
+
+        self.adapter
+            .query_reverse_edges_with_sources(
+                E::TYPE, O::TYPE, self.owner, &self.filters, edge_query,
+            )
+            .await?
+            .into_iter()
+            .map(|(er, or)| Ok(ObjectEdge::new(er.to_edge::<E>()?, or.to_object::<O>()?)))
+            .collect()
     }
 
     /// Paginate using a cursor
@@ -1122,5 +1146,478 @@ impl<'a, E: Edge, O: Object> EdgeQueryContext<'a, E, O> {
             self.cursor = Some(_cursor);
         }
         self
+    }
+
+    fn build_edge_query(&self) -> EdgeQuery {
+        let mut eq = EdgeQuery::default();
+        eq.filters = self.edge_filters.clone();
+        if let Some(limit) = self.limit {
+            eq.limit = Some(limit);
+        }
+        if let Some(cursor) = self.cursor {
+            eq.cursor = Some(cursor);
+        }
+        eq
+    }
+
+    /// Collect both forward and reverse objects in one UNION query.
+    /// Returns (following, followers) — forward traversal first, reverse second.
+    pub async fn collect_both(&self) -> Result<(Vec<O>, Vec<O>), Error> {
+        let edge_query = self.build_edge_query();
+        let (fwd, rev) = self
+            .adapter
+            .query_edges_both_directions_with_objects(
+                E::TYPE,
+                O::TYPE,
+                self.owner,
+                &self.filters,
+                edge_query,
+            )
+            .await?;
+
+        let fwd = fwd
+            .into_iter()
+            .map(|(_, or)| or.to_object::<O>())
+            .collect::<Result<Vec<O>, Error>>()?;
+        let rev = rev
+            .into_iter()
+            .map(|(_, or)| or.to_object::<O>())
+            .collect::<Result<Vec<O>, Error>>()?;
+        Ok((fwd, rev))
+    }
+
+    /// Collect both directions with edge+object pairs in one UNION query.
+    pub async fn collect_both_with_target(
+        &self,
+    ) -> Result<(Vec<ObjectEdge<E, O>>, Vec<ObjectEdge<E, O>>), Error> {
+        let edge_query = self.build_edge_query();
+        let (fwd, rev) = self
+            .adapter
+            .query_edges_both_directions_with_objects(
+                E::TYPE,
+                O::TYPE,
+                self.owner,
+                &self.filters,
+                edge_query,
+            )
+            .await?;
+
+        let fwd = fwd
+            .into_iter()
+            .map(|(er, or)| Ok(ObjectEdge::new(er.to_edge::<E>()?, or.to_object::<O>()?)))
+            .collect::<Result<Vec<_>, Error>>()?;
+        let rev = rev
+            .into_iter()
+            .map(|(er, or)| Ok(ObjectEdge::new(er.to_edge::<E>()?, or.to_object::<O>()?)))
+            .collect::<Result<Vec<_>, Error>>()?;
+        Ok((fwd, rev))
+    }
+
+    /// Collect edges in both directions in one UNION query.
+    /// Returns (forward_edges, reverse_edges).
+    pub async fn collect_both_edges(&self) -> Result<(Vec<E>, Vec<E>), Error> {
+        let edge_query = self.build_edge_query();
+        let (fwd, rev) = self
+            .adapter
+            .query_edges_both_directions(E::TYPE, self.owner, edge_query)
+            .await?;
+
+        let fwd = fwd
+            .into_iter()
+            .map(|r| r.to_edge::<E>())
+            .collect::<Result<Vec<E>, Error>>()?;
+        let rev = rev
+            .into_iter()
+            .map(|r| r.to_edge::<E>())
+            .collect::<Result<Vec<E>, Error>>()?;
+        Ok((fwd, rev))
+    }
+}
+
+// ============================================================
+// Multi-Pivot Preload API
+// ============================================================
+
+/// Entry point for multi-pivot queries.
+/// Created via `Engine::preload_objects::<P>(query)` or `adapter.preload_objects(query)`.
+pub struct MultiPreloadContext<'a, P: Object> {
+    adapter: &'a dyn Adapter,
+    query: Query,
+    _marker: std::marker::PhantomData<P>,
+}
+
+impl<'a, P: Object> MultiPreloadContext<'a, P> {
+    pub(crate) fn new(adapter: &'a dyn Adapter, query: Query) -> Self {
+        Self {
+            adapter,
+            query,
+            _marker: std::marker::PhantomData,
+        }
+    }
+
+    /// Traverse typed edges from each parent. Configurable with edge/object filters.
+    /// Call `.collect()`, `.collect_reverse()`, `.count()`, etc. on the returned context.
+    pub fn edge<E: Edge, C: Object>(self) -> MultiEdgeContext<'a, E, P, C> {
+        MultiEdgeContext::new(self.adapter, self.query)
+    }
+
+    /// Fetch ownership-children for each parent. Parent IDs become owner IDs on children.
+    pub fn preload<C: Object>(self) -> MultiOwnedContext<'a, P, C> {
+        MultiOwnedContext::new(self.adapter, self.query)
+    }
+}
+
+/// Multi-pivot edge context: executes exactly 2 queries — one for parents, one batch join.
+pub struct MultiEdgeContext<'a, E: Edge, P: Object, C: Object> {
+    adapter: &'a dyn Adapter,
+    parent_query: Query,
+    edge_query: EdgeQuery,
+    obj_filters: Vec<QueryFilter>,
+    _marker: std::marker::PhantomData<(E, P, C)>,
+}
+
+impl<'a, E: Edge, P: Object, C: Object> MultiEdgeContext<'a, E, P, C> {
+    pub(crate) fn new(adapter: &'a dyn Adapter, parent_query: Query) -> Self {
+        Self {
+            adapter,
+            parent_query,
+            edge_query: EdgeQuery::default(),
+            obj_filters: Vec::new(),
+            _marker: std::marker::PhantomData,
+        }
+    }
+
+    /// Apply a complete EdgeQuery (filters + limit + cursor) for edge traversal.
+    pub fn with_edge_query(mut self, edge_query: EdgeQuery) -> Self {
+        self.edge_query = edge_query;
+        self
+    }
+
+    /// Filter the connected objects (not the edges).
+    pub fn obj_eq(mut self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
+        self.obj_filters.push(QueryFilter {
+            field,
+            value: value.to_index_value(),
+            mode: QueryMode::Search(QuerySearch {
+                comparison: Comparison::Equal,
+                operator: Operator::default(),
+            }),
+        });
+        self
+    }
+
+    /// Forward: edges WHERE "from" IN parent_ids → joined target objects.
+    /// Returns Vec<(P, Vec<C>)> — exactly 2 queries.
+    pub async fn collect(self) -> Result<Vec<(P, Vec<C>)>, Error> {
+        let parents = self.adapter.query_objects(P::TYPE, self.parent_query).await?;
+        if parents.is_empty() {
+            return Ok(Vec::new());
+        }
+        let parent_ids: Vec<Uuid> = parents.iter().map(|p| p.id).collect();
+
+        let pairs = self
+            .adapter
+            .query_edges_with_targets_batch(
+                E::TYPE,
+                C::TYPE,
+                &parent_ids,
+                &self.obj_filters,
+                self.edge_query,
+            )
+            .await?;
+
+        let mut grouped: std::collections::HashMap<Uuid, Vec<C>> =
+            std::collections::HashMap::new();
+        for (er, or) in pairs {
+            grouped.entry(er.from).or_default().push(or.to_object::<C>()?);
+        }
+
+        parents
+            .into_iter()
+            .map(|pr| {
+                let p = pr.to_object::<P>()?;
+                let children = grouped.remove(&p.meta().id()).unwrap_or_default();
+                Ok((p, children))
+            })
+            .collect()
+    }
+
+    /// Reverse: edges WHERE "to" IN parent_ids → joined source objects.
+    /// Returns Vec<(P, Vec<C>)> — exactly 2 queries.
+    pub async fn collect_reverse(self) -> Result<Vec<(P, Vec<C>)>, Error> {
+        let parents = self.adapter.query_objects(P::TYPE, self.parent_query).await?;
+        if parents.is_empty() {
+            return Ok(Vec::new());
+        }
+        let parent_ids: Vec<Uuid> = parents.iter().map(|p| p.id).collect();
+
+        let pairs = self
+            .adapter
+            .query_reverse_edges_with_sources_batch(
+                E::TYPE,
+                C::TYPE,
+                &parent_ids,
+                &self.obj_filters,
+                self.edge_query,
+            )
+            .await?;
+
+        let mut grouped: std::collections::HashMap<Uuid, Vec<C>> =
+            std::collections::HashMap::new();
+        for (er, or) in pairs {
+            grouped.entry(er.to).or_default().push(or.to_object::<C>()?);
+        }
+
+        parents
+            .into_iter()
+            .map(|pr| {
+                let p = pr.to_object::<P>()?;
+                let children = grouped.remove(&p.meta().id()).unwrap_or_default();
+                Ok((p, children))
+            })
+            .collect()
+    }
+
+    /// Forward edges only — no object JOIN.
+    /// Returns Vec<(P, Vec<E>)> — exactly 2 queries.
+    pub async fn collect_edges(self) -> Result<Vec<(P, Vec<E>)>, Error> {
+        let parents = self.adapter.query_objects(P::TYPE, self.parent_query).await?;
+        if parents.is_empty() {
+            return Ok(Vec::new());
+        }
+        let parent_ids: Vec<Uuid> = parents.iter().map(|p| p.id).collect();
+
+        let edge_records = self
+            .adapter
+            .query_edges_batch(E::TYPE, &parent_ids, self.edge_query)
+            .await?;
+
+        let mut grouped: std::collections::HashMap<Uuid, Vec<E>> =
+            std::collections::HashMap::new();
+        for er in edge_records {
+            grouped.entry(er.from).or_default().push(er.to_edge::<E>()?);
+        }
+
+        parents
+            .into_iter()
+            .map(|pr| {
+                let p = pr.to_object::<P>()?;
+                let edges = grouped.remove(&p.meta().id()).unwrap_or_default();
+                Ok((p, edges))
+            })
+            .collect()
+    }
+
+    /// Reverse edges only — no object JOIN.
+    /// Returns Vec<(P, Vec<E>)> — exactly 2 queries.
+    pub async fn collect_reverse_edges(self) -> Result<Vec<(P, Vec<E>)>, Error> {
+        let parents = self.adapter.query_objects(P::TYPE, self.parent_query).await?;
+        if parents.is_empty() {
+            return Ok(Vec::new());
+        }
+        let parent_ids: Vec<Uuid> = parents.iter().map(|p| p.id).collect();
+
+        let edge_records = self
+            .adapter
+            .query_reverse_edges_batch(E::TYPE, &parent_ids, self.edge_query)
+            .await?;
+
+        let mut grouped: std::collections::HashMap<Uuid, Vec<E>> =
+            std::collections::HashMap::new();
+        for er in edge_records {
+            grouped.entry(er.to).or_default().push(er.to_edge::<E>()?);
+        }
+
+        parents
+            .into_iter()
+            .map(|pr| {
+                let p = pr.to_object::<P>()?;
+                let edges = grouped.remove(&p.meta().id()).unwrap_or_default();
+                Ok((p, edges))
+            })
+            .collect()
+    }
+
+    /// Forward join: edges + target objects per parent.
+    /// Returns Vec<(P, Vec<ObjectEdge<E, C>>)> — exactly 2 queries.
+    pub async fn collect_with_target(self) -> Result<Vec<(P, Vec<ObjectEdge<E, C>>)>, Error> {
+        let parents = self.adapter.query_objects(P::TYPE, self.parent_query).await?;
+        if parents.is_empty() {
+            return Ok(Vec::new());
+        }
+        let parent_ids: Vec<Uuid> = parents.iter().map(|p| p.id).collect();
+
+        let pairs = self
+            .adapter
+            .query_edges_with_targets_batch(
+                E::TYPE,
+                C::TYPE,
+                &parent_ids,
+                &self.obj_filters,
+                self.edge_query,
+            )
+            .await?;
+
+        let mut grouped: std::collections::HashMap<Uuid, Vec<ObjectEdge<E, C>>> =
+            std::collections::HashMap::new();
+        for (er, or) in pairs {
+            let from = er.from;
+            grouped
+                .entry(from)
+                .or_default()
+                .push(ObjectEdge::new(er.to_edge::<E>()?, or.to_object::<C>()?));
+        }
+
+        parents
+            .into_iter()
+            .map(|pr| {
+                let p = pr.to_object::<P>()?;
+                let items = grouped.remove(&p.meta().id()).unwrap_or_default();
+                Ok((p, items))
+            })
+            .collect()
+    }
+
+    /// Reverse join: edges + source objects per parent.
+    /// Returns Vec<(P, Vec<ObjectEdge<E, C>>)> — exactly 2 queries.
+    pub async fn collect_reverse_with_target(
+        self,
+    ) -> Result<Vec<(P, Vec<ObjectEdge<E, C>>)>, Error> {
+        let parents = self.adapter.query_objects(P::TYPE, self.parent_query).await?;
+        if parents.is_empty() {
+            return Ok(Vec::new());
+        }
+        let parent_ids: Vec<Uuid> = parents.iter().map(|p| p.id).collect();
+
+        let pairs = self
+            .adapter
+            .query_reverse_edges_with_sources_batch(
+                E::TYPE,
+                C::TYPE,
+                &parent_ids,
+                &self.obj_filters,
+                self.edge_query,
+            )
+            .await?;
+
+        let mut grouped: std::collections::HashMap<Uuid, Vec<ObjectEdge<E, C>>> =
+            std::collections::HashMap::new();
+        for (er, or) in pairs {
+            let to = er.to;
+            grouped
+                .entry(to)
+                .or_default()
+                .push(ObjectEdge::new(er.to_edge::<E>()?, or.to_object::<C>()?));
+        }
+
+        parents
+            .into_iter()
+            .map(|pr| {
+                let p = pr.to_object::<P>()?;
+                let items = grouped.remove(&p.meta().id()).unwrap_or_default();
+                Ok((p, items))
+            })
+            .collect()
+    }
+
+    /// Forward edge count per parent — GROUP BY, exactly 2 queries.
+    /// Returns Vec<(P, u64)>.
+    pub async fn count(self) -> Result<Vec<(P, u64)>, Error> {
+        let parents = self.adapter.query_objects(P::TYPE, self.parent_query).await?;
+        if parents.is_empty() {
+            return Ok(Vec::new());
+        }
+        let parent_ids: Vec<Uuid> = parents.iter().map(|p| p.id).collect();
+
+        let counts = self
+            .adapter
+            .count_edges_batch(E::TYPE, &parent_ids, self.edge_query)
+            .await?;
+
+        let count_map: std::collections::HashMap<Uuid, u64> = counts.into_iter().collect();
+
+        parents
+            .into_iter()
+            .map(|pr| {
+                let p = pr.to_object::<P>()?;
+                let n = count_map.get(&p.meta().id()).copied().unwrap_or(0);
+                Ok((p, n))
+            })
+            .collect()
+    }
+
+    /// Reverse edge count per parent — GROUP BY, exactly 2 queries.
+    /// Returns Vec<(P, u64)>.
+    pub async fn count_reverse(self) -> Result<Vec<(P, u64)>, Error> {
+        let parents = self.adapter.query_objects(P::TYPE, self.parent_query).await?;
+        if parents.is_empty() {
+            return Ok(Vec::new());
+        }
+        let parent_ids: Vec<Uuid> = parents.iter().map(|p| p.id).collect();
+
+        let counts = self
+            .adapter
+            .count_reverse_edges_batch(E::TYPE, &parent_ids, self.edge_query)
+            .await?;
+
+        let count_map: std::collections::HashMap<Uuid, u64> = counts.into_iter().collect();
+
+        parents
+            .into_iter()
+            .map(|pr| {
+                let p = pr.to_object::<P>()?;
+                let n = count_map.get(&p.meta().id()).copied().unwrap_or(0);
+                Ok((p, n))
+            })
+            .collect()
+    }
+}
+
+/// Multi-pivot ownership context: fetch owned children for each parent.
+/// Executes exactly 2 queries — one for parents, one batch ownership fetch.
+pub struct MultiOwnedContext<'a, P: Object, C: Object> {
+    adapter: &'a dyn Adapter,
+    parent_query: Query,
+    _marker: std::marker::PhantomData<(P, C)>,
+}
+
+impl<'a, P: Object, C: Object> MultiOwnedContext<'a, P, C> {
+    pub(crate) fn new(adapter: &'a dyn Adapter, parent_query: Query) -> Self {
+        Self {
+            adapter,
+            parent_query,
+            _marker: std::marker::PhantomData,
+        }
+    }
+
+    /// Fetch all children owned by each parent.
+    /// Returns Vec<(P, Vec<C>)> — exactly 2 queries.
+    pub async fn collect(self) -> Result<Vec<(P, Vec<C>)>, Error> {
+        let parents = self.adapter.query_objects(P::TYPE, self.parent_query).await?;
+        if parents.is_empty() {
+            return Ok(Vec::new());
+        }
+        let owner_ids: Vec<Uuid> = parents.iter().map(|p| p.id).collect();
+
+        let children = self
+            .adapter
+            .fetch_owned_objects_batch(C::TYPE, &owner_ids)
+            .await?;
+
+        let mut grouped: std::collections::HashMap<Uuid, Vec<C>> =
+            std::collections::HashMap::new();
+        for cr in children {
+            let owner = cr.owner;
+            grouped.entry(owner).or_default().push(cr.to_object::<C>()?);
+        }
+
+        parents
+            .into_iter()
+            .map(|pr| {
+                let p = pr.to_object::<P>()?;
+                let children = grouped.remove(&p.meta().id()).unwrap_or_default();
+                Ok((p, children))
+            })
+            .collect()
     }
 }
