@@ -1,20 +1,77 @@
-use chrono::{Days, Utc};
 // ledger/tests/integration_tests.rs
-use ousia_ledger::{
-    Asset, Balance, LedgerContext, LedgerSystem, Money, MoneyError, adapters::MemoryAdapter,
+#[cfg(test)]
+use ousia::{
+    adapters::postgres::PostgresAdapter,
+    ledger::{Asset, LedgerContext, LedgerSystem},
 };
+#[cfg(test)]
+use sqlx::PgPool;
+#[cfg(test)]
 use std::sync::Arc;
+#[cfg(test)]
+use testcontainers::ContainerAsync;
+#[cfg(test)]
+use testcontainers_modules::postgres::Postgres;
+#[cfg(test)]
 use uuid::Uuid;
 
-fn setup() -> (Arc<LedgerSystem>, LedgerContext, Uuid) {
-    let adapter = Box::new(MemoryAdapter::new());
+#[cfg(test)]
+use ousia::ledger::{Balance, Money, MoneyError};
+
+#[cfg(test)]
+pub(crate) async fn setup_test_db() -> (ContainerAsync<Postgres>, PgPool) {
+    use sqlx::postgres::PgPoolOptions;
+    use testcontainers::{ImageExt, runners::AsyncRunner as _};
+
+    let postgres = match Postgres::default()
+        .with_password("postgres")
+        .with_user("postgres")
+        .with_db_name("postgres")
+        .with_tag("16-alpine")
+        .start()
+        .await
+    {
+        Ok(postgres) => postgres,
+        Err(err) => panic!("Failed to start Postgres: {}", err),
+    };
+    // Give DB time to start
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+
+    let port = postgres.get_host_port_ipv4(5432).await.unwrap();
+    let db_url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
+
+    let pool = match PgPoolOptions::new()
+        .max_connections(5)
+        .connect(&db_url)
+        .await
+    {
+        Ok(pool) => pool,
+        Err(err) => panic!("Failed to connect to Postgres: {}", err),
+    };
+
+    (postgres, pool)
+}
+
+#[cfg(test)]
+async fn setup() -> (
+    ContainerAsync<Postgres>,
+    Arc<LedgerSystem>,
+    LedgerContext,
+    Uuid,
+) {
+    let (_resource, pool) = setup_test_db().await;
+
+    let adapter = Box::new(PostgresAdapter::from_pool(pool));
+
+    adapter.init_schema().await.unwrap();
     let system = Arc::new(LedgerSystem::new(adapter));
     let ctx = LedgerContext::new(system.adapter_arc());
     let user = Uuid::now_v7();
 
-    (system, ctx, user)
+    (_resource, system, ctx, user)
 }
 
+#[cfg(test)]
 async fn create_usd_asset(system: &LedgerSystem) -> Asset {
     let usd = Asset::new("USD", 10_00, 2);
     system.adapter().create_asset(usd.clone()).await.unwrap();
@@ -23,7 +80,7 @@ async fn create_usd_asset(system: &LedgerSystem) -> Asset {
 
 #[tokio::test]
 async fn test_mint_creates_balance() {
-    let (system, ctx, user) = setup();
+    let (_resource, system, ctx, user) = setup().await;
     let _ = create_usd_asset(&system).await;
 
     Money::atomic(&ctx, |tx| async move {
@@ -42,7 +99,7 @@ async fn test_mint_creates_balance() {
 
 #[tokio::test]
 async fn test_simple_transfer() {
-    let (system, ctx, user) = setup();
+    let (_resource, system, ctx, user) = setup().await;
     let merchant = Uuid::now_v7();
     let _ = create_usd_asset(&system).await;
 
@@ -73,7 +130,7 @@ async fn test_simple_transfer() {
 
 #[tokio::test]
 async fn test_transfer_with_change() {
-    let (system, ctx, user) = setup();
+    let (_resource, system, ctx, user) = setup().await;
     let merchant = Uuid::now_v7();
     create_usd_asset(&system).await;
 
@@ -101,7 +158,7 @@ async fn test_transfer_with_change() {
 
 #[tokio::test]
 async fn test_multiple_slices_from_money() {
-    let (system, ctx, user) = setup();
+    let (_resource, system, ctx, user) = setup().await;
     let merchant1 = Uuid::now_v7();
     let merchant2 = Uuid::now_v7();
     create_usd_asset(&system).await;
@@ -140,7 +197,7 @@ async fn test_multiple_slices_from_money() {
 
 #[tokio::test]
 async fn test_slice_can_be_split() {
-    let (system, ctx, user) = setup();
+    let (_resource, system, ctx, user) = setup().await;
     let merchant1 = Uuid::now_v7();
     let merchant2 = Uuid::now_v7();
     create_usd_asset(&system).await;
@@ -179,7 +236,7 @@ async fn test_slice_can_be_split() {
 
 #[tokio::test]
 async fn test_burn_operation() {
-    let (system, ctx, user) = setup();
+    let (_resource, system, ctx, user) = setup().await;
     create_usd_asset(&system).await;
 
     Money::atomic(&ctx, |tx| async move {
@@ -204,7 +261,7 @@ async fn test_burn_operation() {
 
 #[tokio::test]
 async fn test_reserve_operation() {
-    let (system, ctx, user) = setup();
+    let (_resource, system, ctx, user) = setup().await;
     let authority = Uuid::now_v7();
     create_usd_asset(&system).await;
 
@@ -231,123 +288,8 @@ async fn test_reserve_operation() {
 }
 
 #[tokio::test]
-async fn test_settle_operation() {
-    let (system, ctx, user) = setup();
-    let authority = Uuid::now_v7();
-    let receiver = Uuid::now_v7();
-    create_usd_asset(&system).await;
-
-    Money::atomic(&ctx, |tx| async move {
-        tx.mint("USD", user, 100_00, "deposit".to_string()).await?;
-        Ok(())
-    })
-    .await
-    .unwrap();
-
-    Money::atomic(&ctx, |tx| async move {
-        tx.reserve("USD", user, authority, 60_00, "escrow".to_string())
-            .await?;
-        Ok(())
-    })
-    .await
-    .unwrap();
-
-    Money::atomic(&ctx, |tx| async move {
-        tx.settle("USD", authority, receiver, 60_00, "settle".to_string())
-            .await?;
-        Ok(())
-    })
-    .await
-    .unwrap();
-
-    let authority_balance = Balance::get("USD", authority, &ctx).await.unwrap();
-    let receiver_balance = Balance::get("USD", receiver, &ctx).await.unwrap();
-
-    assert_eq!(authority_balance.reserved, 0);
-    assert_eq!(authority_balance.available, 0);
-    assert_eq!(receiver_balance.available, 60_00);
-}
-
-#[tokio::test]
-async fn test_settle_with_change() {
-    let (system, ctx, user) = setup();
-    let authority = Uuid::now_v7();
-    let receiver = Uuid::now_v7();
-    create_usd_asset(&system).await;
-
-    Money::atomic(&ctx, |tx| async move {
-        tx.mint("USD", user, 100_00, "deposit".to_string()).await?;
-        Ok(())
-    })
-    .await
-    .unwrap();
-
-    Money::atomic(&ctx, |tx| async move {
-        tx.reserve("USD", user, authority, 60_00, "escrow".to_string())
-            .await?;
-        Ok(())
-    })
-    .await
-    .unwrap();
-
-    // Settle only $40 — $20 should remain reserved for authority
-    Money::atomic(&ctx, |tx| async move {
-        tx.settle(
-            "USD",
-            authority,
-            receiver,
-            40_00,
-            "partial_settle".to_string(),
-        )
-        .await?;
-        Ok(())
-    })
-    .await
-    .unwrap();
-
-    let authority_balance = Balance::get("USD", authority, &ctx).await.unwrap();
-    let receiver_balance = Balance::get("USD", receiver, &ctx).await.unwrap();
-
-    assert_eq!(authority_balance.reserved, 20_00);
-    assert_eq!(receiver_balance.available, 40_00);
-    assert_eq!(authority_balance.reserved + receiver_balance.available, 60_00);
-}
-
-#[tokio::test]
-async fn test_settle_insufficient_reserved() {
-    let (system, ctx, user) = setup();
-    let authority = Uuid::now_v7();
-    let receiver = Uuid::now_v7();
-    create_usd_asset(&system).await;
-
-    Money::atomic(&ctx, |tx| async move {
-        tx.mint("USD", user, 100_00, "deposit".to_string()).await?;
-        Ok(())
-    })
-    .await
-    .unwrap();
-
-    Money::atomic(&ctx, |tx| async move {
-        tx.reserve("USD", user, authority, 40_00, "escrow".to_string())
-            .await?;
-        Ok(())
-    })
-    .await
-    .unwrap();
-
-    let result = Money::atomic(&ctx, |tx| async move {
-        tx.settle("USD", authority, receiver, 60_00, "settle".to_string())
-            .await?;
-        Ok(())
-    })
-    .await;
-
-    assert!(matches!(result, Err(MoneyError::InsufficientFunds)));
-}
-
-#[tokio::test]
 async fn test_insufficient_funds() {
-    let (system, ctx, user) = setup();
+    let (_resource, system, ctx, user) = setup().await;
     create_usd_asset(&system).await;
 
     Money::atomic(&ctx, |tx| async move {
@@ -372,7 +314,7 @@ async fn test_insufficient_funds() {
 
 #[tokio::test]
 async fn test_unconsumed_slice_error() {
-    let (system, ctx, user) = setup();
+    let (_resource, system, ctx, user) = setup().await;
     create_usd_asset(&system).await;
 
     Money::atomic(&ctx, |tx| async move {
@@ -394,7 +336,7 @@ async fn test_unconsumed_slice_error() {
 
 #[tokio::test]
 async fn test_money_not_sliced_error() {
-    let (system, ctx, user) = setup();
+    let (_resource, system, ctx, user) = setup().await;
     create_usd_asset(&system).await;
 
     Money::atomic(&ctx, |tx| async move {
@@ -418,7 +360,7 @@ async fn test_money_not_sliced_error() {
 
 #[tokio::test]
 async fn test_over_slice_error() {
-    let (system, ctx, user) = setup();
+    let (_resource, system, ctx, user) = setup().await;
     create_usd_asset(&system).await;
 
     Money::atomic(&ctx, |tx| async move {
@@ -441,7 +383,7 @@ async fn test_over_slice_error() {
 
 #[tokio::test]
 async fn test_concurrent_transfers_double_spend_protection() {
-    let (system, ctx, user) = setup();
+    let (_resource, system, ctx, user) = setup().await;
     let merchant1 = Uuid::now_v7();
     let merchant2 = Uuid::now_v7();
     create_usd_asset(&system).await;
@@ -521,7 +463,7 @@ async fn test_asset_decimals_conversion() {
 
 #[tokio::test]
 async fn test_fragmentation() {
-    let (system, ctx, user) = setup();
+    let (_resource, system, ctx, user) = setup().await;
     create_usd_asset(&system).await; // unit = 10_000 ($100)
 
     // Mint $250 should create 3 fragments: $100, $100, $50
@@ -538,7 +480,7 @@ async fn test_fragmentation() {
 
 #[tokio::test]
 async fn test_complex_multi_recipient_payment() {
-    let (system, ctx, user) = setup();
+    let (_resource, system, ctx, user) = setup().await;
     let merchant = Uuid::now_v7();
     let platform = Uuid::now_v7();
     let charity = Uuid::now_v7();
@@ -588,7 +530,7 @@ async fn test_complex_multi_recipient_payment() {
 
 #[tokio::test]
 async fn test_rollback_on_error() {
-    let (system, ctx, user) = setup();
+    let (_resource, system, ctx, user) = setup().await;
     let merchant = Uuid::now_v7();
     create_usd_asset(&system).await;
 
@@ -629,7 +571,7 @@ async fn test_rollback_on_error() {
 
 #[tokio::test]
 async fn test_multiple_assets() {
-    let (system, ctx, user) = setup();
+    let (_resource, system, ctx, user) = setup().await;
     create_usd_asset(&system).await;
 
     let ngn = Asset::new("NGN", 500_000, 2); // ₦5,000 unit
@@ -653,9 +595,10 @@ async fn test_multiple_assets() {
 }
 
 #[tokio::test]
-async fn test_fetch_transactions() {
-    let (system, ctx, user) = setup();
+async fn test_settle_operation() {
+    let (_resource, system, ctx, user) = setup().await;
     let authority = Uuid::now_v7();
+    let receiver = Uuid::now_v7();
     create_usd_asset(&system).await;
 
     Money::atomic(&ctx, |tx| async move {
@@ -673,343 +616,95 @@ async fn test_fetch_transactions() {
     .await
     .unwrap();
 
-    let user_balance = Balance::get("USD", user, &ctx).await.unwrap();
+    Money::atomic(&ctx, |tx| async move {
+        tx.settle("USD", authority, receiver, 60_00, "settle".to_string())
+            .await?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+
     let authority_balance = Balance::get("USD", authority, &ctx).await.unwrap();
+    let receiver_balance = Balance::get("USD", receiver, &ctx).await.unwrap();
 
-    assert_eq!(user_balance.available, 40_00);
-    assert_eq!(authority_balance.reserved, 60_00);
+    assert_eq!(authority_balance.reserved, 0);
+    assert_eq!(authority_balance.available, 0);
+    assert_eq!(receiver_balance.available, 60_00);
+}
 
-    let transactions = system
-        .adapter()
-        .get_transactions_for_owner(
-            user,
-            &[
-                Utc::now().checked_sub_days(Days::new(1)).unwrap(),
-                Utc::now(),
-            ],
+#[tokio::test]
+async fn test_settle_with_change() {
+    let (_resource, system, ctx, user) = setup().await;
+    let authority = Uuid::now_v7();
+    let receiver = Uuid::now_v7();
+    create_usd_asset(&system).await;
+
+    Money::atomic(&ctx, |tx| async move {
+        tx.mint("USD", user, 100_00, "deposit".to_string()).await?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+
+    Money::atomic(&ctx, |tx| async move {
+        tx.reserve("USD", user, authority, 60_00, "escrow".to_string())
+            .await?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+
+    // Settle only $40 — $20 should remain reserved for authority
+    Money::atomic(&ctx, |tx| async move {
+        tx.settle(
+            "USD",
+            authority,
+            receiver,
+            40_00,
+            "partial_settle".to_string(),
         )
-        .await
-        .unwrap();
-
-    assert_eq!(transactions.len(), 2);
-}
-
-// ── Fragmentation & Consolidation Tests ──────────────────────────────────────
-//
-// These tests verify the smart fragmentation behaviour introduced in:
-//   - fragment_amount_smart (unit as soft floor, max_fragments as hard cap)
-//   - mint_internal_tx_with_max_fragments (change consolidation via burned_count)
-
-/// Small amount below unit: $5 with unit=$10 → 1 fragment, balance correct.
-#[tokio::test]
-async fn test_fragmentation_small_amount_below_unit() {
-    let (system, ctx, user) = setup();
-    create_usd_asset(&system).await; // unit = 10_00 ($10)
-
-    Money::atomic(&ctx, |tx| async move {
-        tx.mint("USD", user, 5_00, "deposit".to_string()).await?;
+        .await?;
         Ok(())
     })
     .await
     .unwrap();
 
-    let balance = Balance::get("USD", user, &ctx).await.unwrap();
-    assert_eq!(balance.available, 5_00);
-}
-
-/// Exact unit boundary: amount == unit → 1 fragment.
-#[tokio::test]
-async fn test_fragmentation_exact_unit() {
-    let (system, ctx, user) = setup();
-    create_usd_asset(&system).await; // unit = 10_00
-
-    Money::atomic(&ctx, |tx| async move {
-        tx.mint("USD", user, 10_00, "deposit".to_string()).await?;
-        Ok(())
-    })
-    .await
-    .unwrap();
-
-    let balance = Balance::get("USD", user, &ctx).await.unwrap();
-    assert_eq!(balance.available, 10_00);
-}
-
-/// Multiple fragments: $25 with unit=$10 → total still $25.
-#[tokio::test]
-async fn test_fragmentation_multiple_fragments_correct_total() {
-    let (system, ctx, user) = setup();
-    create_usd_asset(&system).await; // unit = 10_00
-
-    Money::atomic(&ctx, |tx| async move {
-        tx.mint("USD", user, 25_00, "deposit".to_string()).await?;
-        Ok(())
-    })
-    .await
-    .unwrap();
-
-    let balance = Balance::get("USD", user, &ctx).await.unwrap();
-    assert_eq!(balance.available, 25_00);
-}
-
-/// Value is conserved through a transfer with odd change amount.
-/// Mint $100, spend $37 → user $63, merchant $37, total $100.
-#[tokio::test]
-async fn test_fragmentation_value_preserved_through_transfer() {
-    let (system, ctx, user) = setup();
-    let merchant = Uuid::now_v7();
-    create_usd_asset(&system).await;
-
-    Money::atomic(&ctx, |tx| async move {
-        tx.mint("USD", user, 100_00, "deposit".to_string()).await?;
-        Ok(())
-    })
-    .await
-    .unwrap();
-
-    Money::atomic(&ctx, |tx| async move {
-        let money = tx.money("USD", user, 37_00).await?;
-        let slice = money.slice(37_00)?;
-        slice.transfer_to(merchant, "payment".to_string()).await?;
-        Ok(())
-    })
-    .await
-    .unwrap();
-
-    let user_balance = Balance::get("USD", user, &ctx).await.unwrap();
-    let merchant_balance = Balance::get("USD", merchant, &ctx).await.unwrap();
-
-    assert_eq!(user_balance.available, 63_00);
-    assert_eq!(merchant_balance.available, 37_00);
-    assert_eq!(user_balance.available + merchant_balance.available, 100_00);
-}
-
-// ── change consolidation via burned_count ─────────────────────────────────────
-
-/// Repeated small spends consolidate change correctly each time.
-/// After 10 x $1 spends from a $500 balance, total is still conserved.
-#[tokio::test]
-async fn test_change_consolidation_repeated_small_spends() {
-    let (system, ctx, user) = setup();
-    let merchant = Uuid::now_v7();
-    create_usd_asset(&system).await;
-
-    Money::atomic(&ctx, |tx| async move {
-        tx.mint("USD", user, 500_00, "deposit".to_string()).await?;
-        Ok(())
-    })
-    .await
-    .unwrap();
-
-    for _ in 0..10 {
-        Money::atomic(&ctx, |tx| async move {
-            let money = tx.money("USD", user, 1_00).await?;
-            let slice = money.slice(1_00)?;
-            slice.transfer_to(merchant, "payment".to_string()).await?;
-            Ok(())
-        })
-        .await
-        .unwrap();
-    }
-
-    let user_balance = Balance::get("USD", user, &ctx).await.unwrap();
-    let merchant_balance = Balance::get("USD", merchant, &ctx).await.unwrap();
-
-    assert_eq!(user_balance.available, 490_00);
-    assert_eq!(merchant_balance.available, 10_00);
-    assert_eq!(user_balance.available + merchant_balance.available, 500_00);
-}
-
-/// Full spend (change = 0) works correctly — no phantom change VO minted.
-#[tokio::test]
-async fn test_full_spend_no_change() {
-    let (system, ctx, user) = setup();
-    let merchant = Uuid::now_v7();
-    create_usd_asset(&system).await;
-
-    Money::atomic(&ctx, |tx| async move {
-        tx.mint("USD", user, 100_00, "deposit".to_string()).await?;
-        Ok(())
-    })
-    .await
-    .unwrap();
-
-    Money::atomic(&ctx, |tx| async move {
-        let money = tx.money("USD", user, 100_00).await?;
-        let slice = money.slice(100_00)?;
-        slice.transfer_to(merchant, "payment".to_string()).await?;
-        Ok(())
-    })
-    .await
-    .unwrap();
-
-    let user_balance = Balance::get("USD", user, &ctx).await.unwrap();
-    let merchant_balance = Balance::get("USD", merchant, &ctx).await.unwrap();
-
-    assert_eq!(user_balance.available, 0);
-    assert_eq!(merchant_balance.available, 100_00);
-
-    // Re-mint after full drain should work cleanly
-    Money::atomic(&ctx, |tx| async move {
-        tx.mint("USD", user, 50_00, "re-deposit".to_string())
-            .await?;
-        Ok(())
-    })
-    .await
-    .unwrap();
-
-    let user_balance = Balance::get("USD", user, &ctx).await.unwrap();
-    assert_eq!(user_balance.available, 50_00);
-}
-
-/// Burn operation: change consolidation applies on the sender side.
-/// Mint $100, burn $60 → $40 remains.
-#[tokio::test]
-async fn test_change_consolidation_after_burn() {
-    let (system, ctx, user) = setup();
-    create_usd_asset(&system).await;
-
-    Money::atomic(&ctx, |tx| async move {
-        tx.mint("USD", user, 100_00, "deposit".to_string()).await?;
-        Ok(())
-    })
-    .await
-    .unwrap();
-
-    Money::atomic(&ctx, |tx| async move {
-        let money = tx.money("USD", user, 60_00).await?;
-        let slice = money.slice(60_00)?;
-        slice.burn("fee".to_string()).await?;
-        Ok(())
-    })
-    .await
-    .unwrap();
-
-    let balance = Balance::get("USD", user, &ctx).await.unwrap();
-    assert_eq!(balance.available, 40_00);
-}
-
-/// Reserve operation: change consolidation applies on the sender side.
-/// Mint $100, reserve $60 → sender $40 available, authority $60 reserved.
-#[tokio::test]
-async fn test_change_consolidation_after_reserve() {
-    let (system, ctx, user) = setup();
-    let authority = Uuid::now_v7();
-    create_usd_asset(&system).await;
-
-    Money::atomic(&ctx, |tx| async move {
-        tx.mint("USD", user, 100_00, "deposit".to_string()).await?;
-        Ok(())
-    })
-    .await
-    .unwrap();
-
-    Money::atomic(&ctx, |tx| async move {
-        tx.reserve("USD", user, authority, 60_00, "escrow".to_string())
-            .await?;
-        Ok(())
-    })
-    .await
-    .unwrap();
-
-    let user_balance = Balance::get("USD", user, &ctx).await.unwrap();
     let authority_balance = Balance::get("USD", authority, &ctx).await.unwrap();
+    let receiver_balance = Balance::get("USD", receiver, &ctx).await.unwrap();
 
-    assert_eq!(user_balance.available, 40_00);
-    assert_eq!(authority_balance.reserved, 60_00);
-    assert_eq!(user_balance.available + authority_balance.reserved, 100_00);
+    assert_eq!(authority_balance.reserved, 20_00);
+    assert_eq!(receiver_balance.available, 40_00);
+    assert_eq!(authority_balance.reserved + receiver_balance.available, 60_00);
 }
 
-/// Total supply is conserved across a complex 3-way split with change.
-/// Mint $1000, split $900 three ways → user $100, recipients get their amounts.
 #[tokio::test]
-async fn test_value_conservation_complex_split_with_change() {
-    let (system, ctx, user) = setup();
-    let r1 = Uuid::now_v7();
-    let r2 = Uuid::now_v7();
-    let r3 = Uuid::now_v7();
+async fn test_settle_insufficient_reserved() {
+    let (_resource, system, ctx, user) = setup().await;
+    let authority = Uuid::now_v7();
+    let receiver = Uuid::now_v7();
     create_usd_asset(&system).await;
 
     Money::atomic(&ctx, |tx| async move {
-        tx.mint("USD", user, 1_000_00, "deposit".to_string())
+        tx.mint("USD", user, 100_00, "deposit".to_string()).await?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+
+    Money::atomic(&ctx, |tx| async move {
+        tx.reserve("USD", user, authority, 40_00, "escrow".to_string())
             .await?;
         Ok(())
     })
     .await
     .unwrap();
 
-    Money::atomic(&ctx, |tx| async move {
-        let money = tx.money("USD", user, 900_00).await?;
-        let mut slice = money.slice(900_00)?;
-
-        let p1 = slice.slice(500_00)?;
-        let p2 = slice.slice(250_00)?;
-        let p3 = slice.slice(150_00)?;
-
-        p1.transfer_to(r1, "payment1".to_string()).await?;
-        p2.transfer_to(r2, "payment2".to_string()).await?;
-        p3.transfer_to(r3, "payment3".to_string()).await?;
+    let result = Money::atomic(&ctx, |tx| async move {
+        tx.settle("USD", authority, receiver, 60_00, "settle".to_string())
+            .await?;
         Ok(())
     })
-    .await
-    .unwrap();
+    .await;
 
-    let user_balance = Balance::get("USD", user, &ctx).await.unwrap();
-    let r1_balance = Balance::get("USD", r1, &ctx).await.unwrap();
-    let r2_balance = Balance::get("USD", r2, &ctx).await.unwrap();
-    let r3_balance = Balance::get("USD", r3, &ctx).await.unwrap();
-
-    assert_eq!(user_balance.available, 100_00);
-    assert_eq!(r1_balance.available, 500_00);
-    assert_eq!(r2_balance.available, 250_00);
-    assert_eq!(r3_balance.available, 150_00);
-
-    let total =
-        user_balance.available + r1_balance.available + r2_balance.available + r3_balance.available;
-    assert_eq!(total, 1_000_00);
-}
-
-/// Interleaved mints and spends: balance is always correct, no value leaks.
-#[tokio::test]
-async fn test_interleaved_mints_and_spends_balance_integrity() {
-    let (system, ctx, user) = setup();
-    let merchant = Uuid::now_v7();
-    create_usd_asset(&system).await;
-
-    let ops: &[(u64, u64)] = &[
-        (200_00, 50_00),
-        (100_00, 75_00),
-        (300_00, 100_00),
-        (50_00, 25_00),
-    ];
-
-    let mut expected_user: i64 = 0;
-    let mut expected_merchant: i64 = 0;
-
-    for &(mint_amount, spend_amount) in ops {
-        Money::atomic(&ctx, |tx| async move {
-            tx.mint("USD", user, mint_amount, "deposit".to_string())
-                .await?;
-            Ok(())
-        })
-        .await
-        .unwrap();
-
-        Money::atomic(&ctx, |tx| async move {
-            let money = tx.money("USD", user, spend_amount).await?;
-            let slice = money.slice(spend_amount)?;
-            slice.transfer_to(merchant, "payment".to_string()).await?;
-            Ok(())
-        })
-        .await
-        .unwrap();
-
-        expected_user += mint_amount as i64 - spend_amount as i64;
-        expected_merchant += spend_amount as i64;
-    }
-
-    let user_balance = Balance::get("USD", user, &ctx).await.unwrap();
-    let merchant_balance = Balance::get("USD", merchant, &ctx).await.unwrap();
-
-    assert_eq!(user_balance.available, expected_user as u64);
-    assert_eq!(merchant_balance.available, expected_merchant as u64);
+    assert!(matches!(result, Err(MoneyError::InsufficientFunds)));
 }

@@ -571,6 +571,82 @@ where
                     )
                     .await?;
                 }
+                Operation::Settle {
+                    asset_id,
+                    authority,
+                    receiver,
+                    amount,
+                    ..
+                } => {
+                    // Lock reserved VOs owned by authority, FIFO order
+                    let rows = sqlx::query(
+                        r#"
+                        SELECT id, amount
+                        FROM ledger_value_objects
+                        WHERE asset = $1 AND owner = $2 AND state = 'reserved'
+                        ORDER BY created_at ASC
+                        FOR UPDATE SKIP LOCKED
+                        "#,
+                    )
+                    .bind(asset_id)
+                    .bind(authority)
+                    .fetch_all(&mut *tx)
+                    .await
+                    .map_err(|e| MoneyError::Storage(e.to_string()))?;
+
+                    let mut ids_to_burn: Vec<Uuid> = Vec::new();
+                    let mut total_reserved = 0u64;
+
+                    for row in rows {
+                        let id: Uuid = row
+                            .try_get("id")
+                            .map_err(|e| MoneyError::Storage(e.to_string()))?;
+                        let amt: i64 = row
+                            .try_get("amount")
+                            .map_err(|e| MoneyError::Storage(e.to_string()))?;
+                        ids_to_burn.push(id);
+                        total_reserved += amt as u64;
+                        if total_reserved >= *amount {
+                            break;
+                        }
+                    }
+
+                    if total_reserved < *amount {
+                        tx.rollback().await.ok();
+                        return Err(MoneyError::InsufficientFunds);
+                    }
+
+                    let burned_count = ids_to_burn.len() as u64;
+
+                    // Burn selected reserved VOs
+                    for id in &ids_to_burn {
+                        sqlx::query(
+                            "UPDATE ledger_value_objects SET state = 'burned' WHERE id = $1",
+                        )
+                        .bind(id)
+                        .execute(&mut *tx)
+                        .await
+                        .map_err(|e| MoneyError::Storage(e.to_string()))?;
+                    }
+
+                    // Return change as reserved VOs for authority
+                    let change = total_reserved - *amount;
+                    if change > 0 {
+                        self.mint_reserved_internal_tx(&mut tx, *asset_id, *authority, change, *authority)
+                            .await?;
+                    }
+
+                    // Mint alive VOs for receiver, consolidated into at most burned_count fragments
+                    self.mint_internal_tx_with_max_fragments(
+                        &mut tx,
+                        *asset_id,
+                        *receiver,
+                        *amount,
+                        burned_count,
+                    )
+                    .await?;
+                }
+
                 Operation::RecordTransaction { transaction } => {
                     self.record_transaction_internal_tx(&mut tx, transaction.clone())
                         .await?;
