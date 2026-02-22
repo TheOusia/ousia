@@ -9,7 +9,7 @@ repository = "https://github.com/theousia/ousia"
 documentation = "https://docs.rs/ousia"
 homepage = "https://github.com/theousia/ousia"
 keywords = ["orm", "postgres", "ledger", "graph", "finance"]
-categories = ["database", "object", "finance", "data-structures"]
+categories = ["database", "graph", "finance", "data-structures"]
 exclude = ["tests/", ".github/", "Cargo.lock"]
 rust-version = "1.85"
 
