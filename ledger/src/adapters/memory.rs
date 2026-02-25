@@ -1,7 +1,7 @@
 // ledger/src/adapters/memory.rs
 use crate::{
-    Asset, Balance, ExecutionPlan, LedgerAdapter, MoneyError, Operation, Transaction, ValueObject,
-    ValueObjectState,
+    Asset, Balance, ExecutionPlan, Holding, LedgerAdapter, MoneyError, Operation, Transaction,
+    ValueObject, ValueObjectState,
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -380,6 +380,59 @@ impl LedgerAdapter for MemoryAdapter {
         let mut assets = self.store.assets.lock().unwrap();
         assets.insert(asset.code.clone(), asset);
         Ok(())
+    }
+
+    async fn get_holdings(&self, owner: Uuid) -> Result<Vec<Holding>, MoneyError> {
+        let vos = self.store.value_objects.lock().unwrap();
+        let assets = self.store.assets.lock().unwrap();
+
+        let mut alive: HashMap<Uuid, u64> = HashMap::new();
+        let mut reserved: HashMap<Uuid, u64> = HashMap::new();
+
+        for vo in vos.values().filter(|vo| vo.owner == owner) {
+            if vo.state.is_alive() {
+                *alive.entry(vo.asset).or_insert(0) += vo.amount;
+            } else if vo.state.is_reserved() {
+                *reserved.entry(vo.asset).or_insert(0) += vo.amount;
+            }
+        }
+
+        let mut asset_ids: std::collections::HashSet<Uuid> =
+            alive.keys().chain(reserved.keys()).copied().collect();
+        asset_ids.retain(|id| alive.get(id).copied().unwrap_or(0) + reserved.get(id).copied().unwrap_or(0) > 0);
+
+        let holdings = asset_ids
+            .into_iter()
+            .filter_map(|asset_id| {
+                let asset = assets.values().find(|a| a.id == asset_id)?.clone();
+                let balance = Balance::from_value_objects(
+                    owner,
+                    asset_id,
+                    alive.get(&asset_id).copied().unwrap_or(0),
+                    reserved.get(&asset_id).copied().unwrap_or(0),
+                );
+                Some(Holding::new(asset, balance))
+            })
+            .collect();
+
+        Ok(holdings)
+    }
+
+    async fn get_transactions_for_asset(
+        &self,
+        asset_id: Uuid,
+        timespan: &[DateTime<Utc>; 2],
+    ) -> Result<Vec<Transaction>, MoneyError> {
+        let txs = self.store.transactions.lock().unwrap();
+        Ok(txs
+            .values()
+            .filter(|tx| {
+                tx.asset == asset_id
+                    && tx.created_at.timestamp() >= timespan[0].timestamp()
+                    && tx.created_at.timestamp() <= timespan[1].timestamp()
+            })
+            .cloned()
+            .collect())
     }
 }
 

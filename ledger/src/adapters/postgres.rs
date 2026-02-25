@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 
 use crate::{
-    Asset, Balance, ExecutionPlan, LedgerAdapter, MoneyError, Operation, Transaction, ValueObject,
+    Asset, Balance, ExecutionPlan, Holding, LedgerAdapter, MoneyError, Operation, Transaction,
+    ValueObject,
 };
 use chrono::{DateTime, Utc};
 use sqlx::Row;
@@ -979,5 +980,116 @@ where
         .map_err(|e| MoneyError::Storage(e.to_string()))?;
 
         Ok(())
+    }
+
+    async fn get_holdings(&self, owner: Uuid) -> Result<Vec<Holding>, MoneyError> {
+        let rows = sqlx::query(
+            r#"
+            SELECT
+                la.id, la.code, la.unit, la.decimals,
+                COALESCE(SUM(vo.amount) FILTER (WHERE vo.state = 'alive'), 0)::BIGINT  AS alive_sum,
+                COALESCE(SUM(vo.amount) FILTER (WHERE vo.state = 'reserved'), 0)::BIGINT AS reserved_sum
+            FROM ledger_value_objects vo
+            JOIN ledger_assets la ON vo.asset = la.id
+            WHERE vo.owner = $1
+            GROUP BY la.id, la.code, la.unit, la.decimals
+            HAVING COALESCE(SUM(vo.amount), 0) > 0
+            "#,
+        )
+        .bind(owner)
+        .fetch_all(&self.get_pool())
+        .await
+        .map_err(|e| MoneyError::Storage(e.to_string()))?;
+
+        let mut holdings = Vec::new();
+        for row in rows {
+            let asset_id: Uuid = row
+                .try_get("id")
+                .map_err(|e| MoneyError::Storage(e.to_string()))?;
+            let asset = Asset {
+                id: asset_id,
+                code: row
+                    .try_get("code")
+                    .map_err(|e| MoneyError::Storage(e.to_string()))?,
+                unit: row
+                    .try_get::<i64, _>("unit")
+                    .map_err(|e| MoneyError::Storage(e.to_string()))? as u64,
+                decimals: row
+                    .try_get::<i16, _>("decimals")
+                    .map_err(|e| MoneyError::Storage(e.to_string()))? as u8,
+            };
+            let alive = row
+                .try_get::<i64, _>("alive_sum")
+                .map_err(|e| MoneyError::Storage(e.to_string()))? as u64;
+            let reserved = row
+                .try_get::<i64, _>("reserved_sum")
+                .map_err(|e| MoneyError::Storage(e.to_string()))? as u64;
+            let balance = Balance::from_value_objects(owner, asset_id, alive, reserved);
+            holdings.push(Holding::new(asset, balance));
+        }
+
+        Ok(holdings)
+    }
+
+    async fn get_transactions_for_asset(
+        &self,
+        asset_id: Uuid,
+        timespan: &[DateTime<Utc>; 2],
+    ) -> Result<Vec<Transaction>, MoneyError> {
+        let rows = sqlx::query(
+            r#"
+            SELECT lt.id, ik.key as idempotency_key, lt.asset, la.code,
+                   lt.sender, lt.receiver, lt.burned_amount, lt.minted_amount,
+                   lt.metadata, lt.created_at
+            FROM ledger_transactions lt
+            LEFT JOIN ledger_assets la ON lt.asset = la.id
+            LEFT JOIN ledger_transaction_idempotency_keys ik ON ik.transaction_id = lt.id
+            WHERE lt.asset = $1 AND lt.created_at BETWEEN $2 AND $3
+            "#,
+        )
+        .bind(asset_id)
+        .bind(timespan[0])
+        .bind(timespan[1])
+        .fetch_all(&self.get_pool())
+        .await
+        .map_err(|e| MoneyError::Storage(e.to_string()))?;
+
+        let mut transactions = Vec::new();
+        for row in rows {
+            transactions.push(Transaction {
+                id: row
+                    .try_get("id")
+                    .map_err(|e| MoneyError::Storage(e.to_string()))?,
+                idempotency_key: row
+                    .try_get("idempotency_key")
+                    .map_err(|e| MoneyError::Storage(e.to_string()))?,
+                asset: row
+                    .try_get("asset")
+                    .map_err(|e| MoneyError::Storage(e.to_string()))?,
+                code: row
+                    .try_get("code")
+                    .map_err(|e| MoneyError::Storage(e.to_string()))?,
+                sender: row
+                    .try_get("sender")
+                    .map_err(|e| MoneyError::Storage(e.to_string()))?,
+                receiver: row
+                    .try_get("receiver")
+                    .map_err(|e| MoneyError::Storage(e.to_string()))?,
+                burned_amount: row
+                    .try_get::<i64, _>("burned_amount")
+                    .map_err(|e| MoneyError::Storage(e.to_string()))? as u64,
+                minted_amount: row
+                    .try_get::<i64, _>("minted_amount")
+                    .map_err(|e| MoneyError::Storage(e.to_string()))? as u64,
+                metadata: row
+                    .try_get("metadata")
+                    .map_err(|e| MoneyError::Storage(e.to_string()))?,
+                created_at: row
+                    .try_get("created_at")
+                    .map_err(|e| MoneyError::Storage(e.to_string()))?,
+            });
+        }
+
+        Ok(transactions)
     }
 }

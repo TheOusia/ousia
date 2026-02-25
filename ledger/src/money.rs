@@ -1,5 +1,6 @@
 // ledger/src/money.rs
-use super::{Balance, LedgerAdapter, MoneyError, Transaction};
+use super::{Balance, Holding, LedgerAdapter, MoneyError, Transaction};
+use chrono::{DateTime, Utc};
 use metrics::{counter, histogram};
 use std::sync::{Arc, Mutex};
 use uuid::Uuid;
@@ -119,6 +120,36 @@ impl LedgerContext {
 
     pub fn adapter(&self) -> &dyn LedgerAdapter {
         self.adapter.as_ref()
+    }
+
+    /// Balance for a single asset by code — no round-trip needed from the caller.
+    pub async fn balance(&self, asset_code: &str, owner: Uuid) -> Result<Balance, MoneyError> {
+        let asset = self.adapter.get_asset(asset_code).await?;
+        self.adapter.get_balance(asset.id, owner).await
+    }
+
+    /// All assets held by `owner` with a non-zero balance.
+    pub async fn holdings(&self, owner: Uuid) -> Result<Vec<Holding>, MoneyError> {
+        self.adapter.get_holdings(owner).await
+    }
+
+    /// Transactions involving `owner` within `timespan`.
+    pub async fn transactions(
+        &self,
+        owner: Uuid,
+        timespan: &[DateTime<Utc>; 2],
+    ) -> Result<Vec<Transaction>, MoneyError> {
+        self.adapter.get_transactions_for_owner(owner, timespan).await
+    }
+
+    /// Transactions for a specific asset (by code) within `timespan`.
+    pub async fn transactions_for_asset(
+        &self,
+        asset_code: &str,
+        timespan: &[DateTime<Utc>; 2],
+    ) -> Result<Vec<Transaction>, MoneyError> {
+        let asset = self.adapter.get_asset(asset_code).await?;
+        self.adapter.get_transactions_for_asset(asset.id, timespan).await
     }
 }
 

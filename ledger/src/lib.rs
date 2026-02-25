@@ -3,6 +3,7 @@ pub mod adapters;
 pub mod asset;
 pub mod balance;
 pub mod error;
+pub mod holding;
 pub mod money;
 pub mod transaction;
 pub mod value_object;
@@ -11,6 +12,7 @@ pub use asset::Asset;
 pub use balance::Balance;
 use chrono::{DateTime, Utc};
 pub use error::MoneyError;
+pub use holding::{Holding, Portfolio};
 pub use money::{ExecutionPlan, LedgerContext, Money, MoneySlice, Operation, TransactionContext};
 pub use transaction::Transaction;
 pub use value_object::{ValueObject, ValueObjectState};
@@ -54,6 +56,16 @@ pub trait LedgerAdapter: Send + Sync {
     ) -> Result<Transaction, MoneyError>;
     async fn get_asset(&self, code: &str) -> Result<Asset, MoneyError>;
     async fn create_asset(&self, asset: Asset) -> Result<(), MoneyError>;
+
+    /// All assets held by `owner` with a non-zero balance.
+    async fn get_holdings(&self, owner: Uuid) -> Result<Vec<Holding>, MoneyError>;
+
+    /// All transactions that touched `asset_id` within `timespan`.
+    async fn get_transactions_for_asset(
+        &self,
+        asset_id: Uuid,
+        timespan: &[DateTime<Utc>; 2],
+    ) -> Result<Vec<Transaction>, MoneyError>;
 }
 
 /// Initialize the ledger system with an adapter

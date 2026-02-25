@@ -401,6 +401,10 @@ impl<'a, T: Object> QueryContext<'a, T> {
     pub fn edge<E: Edge, O: Object>(self) -> EdgeQueryContext<'a, E, O> {
         EdgeQueryContext::new(self.adapter, self.root)
     }
+
+    pub fn preload<C: Object>(self) -> OwnedContext<'a, C> {
+        OwnedContext::new(self.adapter, self.root)
+    }
 }
 
 /// ==========================
@@ -1570,6 +1574,33 @@ impl<'a, E: Edge, P: Object, C: Object> MultiEdgeContext<'a, E, P, C> {
                 Ok((p, n))
             })
             .collect()
+    }
+}
+
+/// Single-pivot ownership context: fetch owned children for one parent.
+/// Mirrors `MultiOwnedContext` but for a single known parent ID.
+pub struct OwnedContext<'a, C: Object> {
+    adapter: &'a dyn Adapter,
+    owner: Uuid,
+    _marker: std::marker::PhantomData<C>,
+}
+
+impl<'a, C: Object> OwnedContext<'a, C> {
+    pub(crate) fn new(adapter: &'a dyn Adapter, owner: Uuid) -> Self {
+        Self {
+            adapter,
+            owner,
+            _marker: std::marker::PhantomData,
+        }
+    }
+
+    /// Fetch all objects owned by this parent.
+    pub async fn collect(self) -> Result<Vec<C>, Error> {
+        let records = self.adapter.fetch_owned_objects(C::TYPE, self.owner).await?;
+        records
+            .into_iter()
+            .map(|or| or.to_object())
+            .collect::<Result<Vec<C>, Error>>()
     }
 }
 
