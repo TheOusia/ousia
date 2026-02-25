@@ -1,6 +1,6 @@
 [package]
 name = "ousia"
-version = "1.2.0"
+version = "1.2.1"
 edition = "2024"
 description = "Postgres ORM with native double-entry ledger, graph relations, and atomic money operations for Rust"
 license = "MIT"
