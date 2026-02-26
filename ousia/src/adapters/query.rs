@@ -402,7 +402,7 @@ impl<'a, T: Object> QueryContext<'a, T> {
         EdgeQueryContext::new(self.adapter, self.root)
     }
 
-    pub fn preload<C: Object>(self) -> OwnedContext<'a, C> {
+    pub fn preload<C: Object>(self) -> OwnedContext<'a, T, C> {
         OwnedContext::new(self.adapter, self.root)
     }
 }
@@ -1135,7 +1135,11 @@ impl<'a, E: Edge, O: Object> EdgeQueryContext<'a, E, O> {
 
         self.adapter
             .query_reverse_edges_with_sources(
-                E::TYPE, O::TYPE, self.owner, &self.filters, edge_query,
+                E::TYPE,
+                O::TYPE,
+                self.owner,
+                &self.filters,
+                edge_query,
             )
             .await?
             .into_iter()
@@ -1313,7 +1317,10 @@ impl<'a, E: Edge, P: Object, C: Object> MultiEdgeContext<'a, E, P, C> {
     /// Forward: edges WHERE "from" IN parent_ids → joined target objects.
     /// Returns Vec<(P, Vec<C>)> — exactly 2 queries.
     pub async fn collect(self) -> Result<Vec<(P, Vec<C>)>, Error> {
-        let parents = self.adapter.query_objects(P::TYPE, self.parent_query).await?;
+        let parents = self
+            .adapter
+            .query_objects(P::TYPE, self.parent_query)
+            .await?;
         if parents.is_empty() {
             return Ok(Vec::new());
         }
@@ -1330,10 +1337,12 @@ impl<'a, E: Edge, P: Object, C: Object> MultiEdgeContext<'a, E, P, C> {
             )
             .await?;
 
-        let mut grouped: std::collections::HashMap<Uuid, Vec<C>> =
-            std::collections::HashMap::new();
+        let mut grouped: std::collections::HashMap<Uuid, Vec<C>> = std::collections::HashMap::new();
         for (er, or) in pairs {
-            grouped.entry(er.from).or_default().push(or.to_object::<C>()?);
+            grouped
+                .entry(er.from)
+                .or_default()
+                .push(or.to_object::<C>()?);
         }
 
         parents
@@ -1349,7 +1358,10 @@ impl<'a, E: Edge, P: Object, C: Object> MultiEdgeContext<'a, E, P, C> {
     /// Reverse: edges WHERE "to" IN parent_ids → joined source objects.
     /// Returns Vec<(P, Vec<C>)> — exactly 2 queries.
     pub async fn collect_reverse(self) -> Result<Vec<(P, Vec<C>)>, Error> {
-        let parents = self.adapter.query_objects(P::TYPE, self.parent_query).await?;
+        let parents = self
+            .adapter
+            .query_objects(P::TYPE, self.parent_query)
+            .await?;
         if parents.is_empty() {
             return Ok(Vec::new());
         }
@@ -1366,8 +1378,7 @@ impl<'a, E: Edge, P: Object, C: Object> MultiEdgeContext<'a, E, P, C> {
             )
             .await?;
 
-        let mut grouped: std::collections::HashMap<Uuid, Vec<C>> =
-            std::collections::HashMap::new();
+        let mut grouped: std::collections::HashMap<Uuid, Vec<C>> = std::collections::HashMap::new();
         for (er, or) in pairs {
             grouped.entry(er.to).or_default().push(or.to_object::<C>()?);
         }
@@ -1385,7 +1396,10 @@ impl<'a, E: Edge, P: Object, C: Object> MultiEdgeContext<'a, E, P, C> {
     /// Forward edges only — no object JOIN.
     /// Returns Vec<(P, Vec<E>)> — exactly 2 queries.
     pub async fn collect_edges(self) -> Result<Vec<(P, Vec<E>)>, Error> {
-        let parents = self.adapter.query_objects(P::TYPE, self.parent_query).await?;
+        let parents = self
+            .adapter
+            .query_objects(P::TYPE, self.parent_query)
+            .await?;
         if parents.is_empty() {
             return Ok(Vec::new());
         }
@@ -1396,8 +1410,7 @@ impl<'a, E: Edge, P: Object, C: Object> MultiEdgeContext<'a, E, P, C> {
             .query_edges_batch(E::TYPE, &parent_ids, self.edge_query)
             .await?;
 
-        let mut grouped: std::collections::HashMap<Uuid, Vec<E>> =
-            std::collections::HashMap::new();
+        let mut grouped: std::collections::HashMap<Uuid, Vec<E>> = std::collections::HashMap::new();
         for er in edge_records {
             grouped.entry(er.from).or_default().push(er.to_edge::<E>()?);
         }
@@ -1415,7 +1428,10 @@ impl<'a, E: Edge, P: Object, C: Object> MultiEdgeContext<'a, E, P, C> {
     /// Reverse edges only — no object JOIN.
     /// Returns Vec<(P, Vec<E>)> — exactly 2 queries.
     pub async fn collect_reverse_edges(self) -> Result<Vec<(P, Vec<E>)>, Error> {
-        let parents = self.adapter.query_objects(P::TYPE, self.parent_query).await?;
+        let parents = self
+            .adapter
+            .query_objects(P::TYPE, self.parent_query)
+            .await?;
         if parents.is_empty() {
             return Ok(Vec::new());
         }
@@ -1426,8 +1442,7 @@ impl<'a, E: Edge, P: Object, C: Object> MultiEdgeContext<'a, E, P, C> {
             .query_reverse_edges_batch(E::TYPE, &parent_ids, self.edge_query)
             .await?;
 
-        let mut grouped: std::collections::HashMap<Uuid, Vec<E>> =
-            std::collections::HashMap::new();
+        let mut grouped: std::collections::HashMap<Uuid, Vec<E>> = std::collections::HashMap::new();
         for er in edge_records {
             grouped.entry(er.to).or_default().push(er.to_edge::<E>()?);
         }
@@ -1445,7 +1460,10 @@ impl<'a, E: Edge, P: Object, C: Object> MultiEdgeContext<'a, E, P, C> {
     /// Forward join: edges + target objects per parent.
     /// Returns Vec<(P, Vec<ObjectEdge<E, C>>)> — exactly 2 queries.
     pub async fn collect_with_target(self) -> Result<Vec<(P, Vec<ObjectEdge<E, C>>)>, Error> {
-        let parents = self.adapter.query_objects(P::TYPE, self.parent_query).await?;
+        let parents = self
+            .adapter
+            .query_objects(P::TYPE, self.parent_query)
+            .await?;
         if parents.is_empty() {
             return Ok(Vec::new());
         }
@@ -1487,7 +1505,10 @@ impl<'a, E: Edge, P: Object, C: Object> MultiEdgeContext<'a, E, P, C> {
     pub async fn collect_reverse_with_target(
         self,
     ) -> Result<Vec<(P, Vec<ObjectEdge<E, C>>)>, Error> {
-        let parents = self.adapter.query_objects(P::TYPE, self.parent_query).await?;
+        let parents = self
+            .adapter
+            .query_objects(P::TYPE, self.parent_query)
+            .await?;
         if parents.is_empty() {
             return Ok(Vec::new());
         }
@@ -1527,7 +1548,10 @@ impl<'a, E: Edge, P: Object, C: Object> MultiEdgeContext<'a, E, P, C> {
     /// Forward edge count per parent — GROUP BY, exactly 2 queries.
     /// Returns Vec<(P, u64)>.
     pub async fn count(self) -> Result<Vec<(P, u64)>, Error> {
-        let parents = self.adapter.query_objects(P::TYPE, self.parent_query).await?;
+        let parents = self
+            .adapter
+            .query_objects(P::TYPE, self.parent_query)
+            .await?;
         if parents.is_empty() {
             return Ok(Vec::new());
         }
@@ -1553,7 +1577,10 @@ impl<'a, E: Edge, P: Object, C: Object> MultiEdgeContext<'a, E, P, C> {
     /// Reverse edge count per parent — GROUP BY, exactly 2 queries.
     /// Returns Vec<(P, u64)>.
     pub async fn count_reverse(self) -> Result<Vec<(P, u64)>, Error> {
-        let parents = self.adapter.query_objects(P::TYPE, self.parent_query).await?;
+        let parents = self
+            .adapter
+            .query_objects(P::TYPE, self.parent_query)
+            .await?;
         if parents.is_empty() {
             return Ok(Vec::new());
         }
@@ -1579,28 +1606,43 @@ impl<'a, E: Edge, P: Object, C: Object> MultiEdgeContext<'a, E, P, C> {
 
 /// Single-pivot ownership context: fetch owned children for one parent.
 /// Mirrors `MultiOwnedContext` but for a single known parent ID.
-pub struct OwnedContext<'a, C: Object> {
+pub struct OwnedContext<'a, P: Object, C: Object> {
     adapter: &'a dyn Adapter,
     owner: Uuid,
-    _marker: std::marker::PhantomData<C>,
+    _parent_marker: std::marker::PhantomData<P>,
+    _children_marker: std::marker::PhantomData<C>,
 }
 
-impl<'a, C: Object> OwnedContext<'a, C> {
+impl<'a, P: Object, C: Object> OwnedContext<'a, P, C> {
     pub(crate) fn new(adapter: &'a dyn Adapter, owner: Uuid) -> Self {
         Self {
             adapter,
             owner,
-            _marker: std::marker::PhantomData,
+            _parent_marker: std::marker::PhantomData,
+            _children_marker: std::marker::PhantomData,
         }
     }
 
-    /// Fetch all objects owned by this parent.
-    pub async fn collect(self) -> Result<Vec<C>, Error> {
-        let records = self.adapter.fetch_owned_objects(C::TYPE, self.owner).await?;
-        records
+    /// Fetch parent and all objects owned by this parent.
+    pub async fn collect(self) -> Result<Option<(P, Vec<C>)>, Error> {
+        let parent = self.adapter.fetch_object(P::TYPE, self.owner).await?;
+
+        let Some(parent) = parent else {
+            return Ok(None);
+        };
+
+        let parent = parent.to_object()?;
+
+        let records = self
+            .adapter
+            .fetch_owned_objects(C::TYPE, self.owner)
+            .await?;
+        let chilren = records
             .into_iter()
             .map(|or| or.to_object())
-            .collect::<Result<Vec<C>, Error>>()
+            .collect::<Result<Vec<C>, Error>>()?;
+
+        Ok(Some((parent, chilren)))
     }
 }
 
@@ -1624,7 +1666,10 @@ impl<'a, P: Object, C: Object> MultiOwnedContext<'a, P, C> {
     /// Fetch all children owned by each parent.
     /// Returns Vec<(P, Vec<C>)> — exactly 2 queries.
     pub async fn collect(self) -> Result<Vec<(P, Vec<C>)>, Error> {
-        let parents = self.adapter.query_objects(P::TYPE, self.parent_query).await?;
+        let parents = self
+            .adapter
+            .query_objects(P::TYPE, self.parent_query)
+            .await?;
         if parents.is_empty() {
             return Ok(Vec::new());
         }
@@ -1635,8 +1680,7 @@ impl<'a, P: Object, C: Object> MultiOwnedContext<'a, P, C> {
             .fetch_owned_objects_batch(C::TYPE, &owner_ids)
             .await?;
 
-        let mut grouped: std::collections::HashMap<Uuid, Vec<C>> =
-            std::collections::HashMap::new();
+        let mut grouped: std::collections::HashMap<Uuid, Vec<C>> = std::collections::HashMap::new();
         for cr in children {
             let owner = cr.owner;
             grouped.entry(owner).or_default().push(cr.to_object::<C>()?);
