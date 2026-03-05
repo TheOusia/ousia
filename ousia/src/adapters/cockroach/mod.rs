@@ -1588,6 +1588,33 @@ impl Adapter for CockroachAdapter {
         Ok(())
     }
 
+    async fn fetch_edge(
+        &self,
+        type_name: &'static str,
+        from: Uuid,
+        to: Uuid,
+    ) -> Result<Option<EdgeRecord>, Error> {
+        let row = sqlx::query(
+            r#"
+        SELECT e."from", e."to", e.type, e.data
+        FROM edges e
+        WHERE type = $1 AND "from" = $2 AND "to" = $3
+        "#,
+        )
+        .bind(type_name)
+        .bind(from)
+        .bind(to)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|err| Error::Storage(err.to_string()))?;
+
+        let Some(row) = row else {
+            return Ok(None);
+        };
+
+        Self::map_row_to_edge_record(row).map(|e| Some(e))
+    }
+
     async fn query_edges(
         &self,
         type_name: &'static str,

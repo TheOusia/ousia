@@ -106,7 +106,13 @@ pub trait EdgeTraversal {
         pivot: Uuid,
         obj_filters: &[QueryFilter],
         plan: EdgeQuery,
-    ) -> Result<(Vec<(EdgeRecord, ObjectRecord)>, Vec<(EdgeRecord, ObjectRecord)>), Error>;
+    ) -> Result<
+        (
+            Vec<(EdgeRecord, ObjectRecord)>,
+            Vec<(EdgeRecord, ObjectRecord)>,
+        ),
+        Error,
+    >;
 
     /// Single pivot, both directions in one UNION query, edges only.
     /// Returns (forward_edges, reverse_edges).
@@ -263,6 +269,13 @@ pub trait Adapter: UniqueAdapter + EdgeTraversal + Send + Sync + 'static {
     -> Result<(), Error>;
 
     async fn delete_object_edge(&self, type_name: &'static str, from: Uuid) -> Result<(), Error>;
+
+    async fn fetch_edge(
+        &self,
+        type_name: &'static str,
+        from: Uuid,
+        to: Uuid,
+    ) -> Result<Option<EdgeRecord>, Error>;
 
     async fn query_edges(
         &self,
