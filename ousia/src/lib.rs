@@ -489,6 +489,15 @@ impl Engine {
         self.inner.adapter.delete_object_edge(E::TYPE, from).await
     }
 
+    /// Fetch a known edge
+    pub async fn fetch_edge<E: Edge>(&self, from: Uuid, to: Uuid) -> Result<Option<E>, Error> {
+        let edge_record = self.inner.adapter.fetch_edge(E::TYPE, from, to).await?;
+        let Some(edge_record) = edge_record else {
+            return Ok(None);
+        };
+        edge_record.to_edge().map(|edge| Some(edge))
+    }
+
     /// Query edges
     pub async fn query_edges<E: Edge>(
         &self,
@@ -562,10 +571,7 @@ impl Engine {
 
     /// Start a multi-pivot query context. Fetches parents first, then batch-joins edges/children.
     /// All terminal methods execute exactly 2 queries — never N+1.
-    pub fn preload_objects<'a, P: Object>(
-        &'a self,
-        query: Query,
-    ) -> MultiPreloadContext<'a, P> {
+    pub fn preload_objects<'a, P: Object>(&'a self, query: Query) -> MultiPreloadContext<'a, P> {
         self.inner.adapter.preload_objects(query)
     }
 
