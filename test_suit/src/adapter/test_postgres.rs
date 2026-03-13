@@ -1190,6 +1190,40 @@ async fn test_preload_single_pivot_collect_edges() {
 }
 
 #[tokio::test]
+async fn test_fetch_edge() {
+    let (_resource, pool) = setup_test_db().await;
+    let adapter = PostgresAdapter::from_pool(pool);
+    adapter.init_schema().await.unwrap();
+    let engine = Engine::new(Box::new(adapter));
+
+    let mut alice = User::default();
+    alice.username = "alice".into();
+    alice.email = "alice@example.com".into();
+    engine.create_object(&alice).await.unwrap();
+
+    let mut bob = User::default();
+    bob.username = "bob".into();
+    bob.email = "bob@example.com".into();
+    engine.create_object(&bob).await.unwrap();
+
+    engine
+        .create_edge(&Follow {
+            _meta: EdgeMeta::new(alice.id(), bob.id()),
+            notification: true,
+        })
+        .await
+        .unwrap();
+
+    let edge = engine
+        .fetch_edge::<Follow>(alice.id(), bob.id())
+        .await
+        .unwrap();
+
+    assert!(edge.is_some());
+    assert!(edge.unwrap().notification);
+}
+
+#[tokio::test]
 async fn test_preload_single_pivot_collect_with_target() {
     let (_resource, pool) = setup_test_db().await;
     let adapter = PostgresAdapter::from_pool(pool);

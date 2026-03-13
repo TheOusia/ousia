@@ -258,15 +258,8 @@ impl SqliteAdapter {
             .try_get("data")
             .map_err(|e| Error::Deserialize(e.to_string()))?;
 
-        let index_meta_str: String = row
-            .try_get("index_meta")
-            .map_err(|e| Error::Deserialize(e.to_string()))?;
-
         let data_json: serde_json::Value =
             serde_json::from_str(&data_str).map_err(|e| Error::Deserialize(e.to_string()))?;
-
-        let index_meta_json: serde_json::Value =
-            serde_json::from_str(&index_meta_str).map_err(|e| Error::Deserialize(e.to_string()))?;
 
         let type_name = row
             .try_get::<String, _>("type")
@@ -285,7 +278,7 @@ impl SqliteAdapter {
             from,
             to,
             data: data_json,
-            index_meta: index_meta_json,
+            index_meta: serde_json::Value::Null,
         })
     }
     fn map_row_to_edge_and_object(row: SqliteRow) -> Result<(EdgeRecord, ObjectRecord), Error> {
@@ -293,7 +286,6 @@ impl SqliteAdapter {
         let ds = |e: serde_json::Error| Error::Deserialize(e.to_string());
 
         let edge_data_str: String = row.try_get("edge_data").map_err(de)?;
-        let edge_im_str: String = row.try_get("edge_index_meta").map_err(de)?;
         let obj_data_str: String = row.try_get("obj_data").map_err(de)?;
 
         let obj_created_str: String = row.try_get("obj_created_at").map_err(de)?;
@@ -304,7 +296,7 @@ impl SqliteAdapter {
             from: row.try_get::<Uuid, _>("edge_from").map_err(de)?,
             to: row.try_get::<Uuid, _>("edge_to").map_err(de)?,
             data: serde_json::from_str(&edge_data_str).map_err(ds)?,
-            index_meta: serde_json::from_str(&edge_im_str).map_err(ds)?,
+            index_meta: serde_json::Value::Null,
         };
         let obj = ObjectRecord {
             id: row.try_get::<Uuid, _>("obj_id").map_err(de)?,
@@ -346,7 +338,7 @@ impl SqliteAdapter {
             r#"
             SELECT
                 e."from" AS edge_from, e."to" AS edge_to, e.type AS edge_type,
-                e.data AS edge_data, e.index_meta AS edge_index_meta,
+                e.data AS edge_data,
                 o.id AS obj_id, o.type AS obj_type, o.owner AS obj_owner,
                 o.created_at AS obj_created_at, o.updated_at AS obj_updated_at,
                 o.data AS obj_data
@@ -1919,7 +1911,7 @@ impl EdgeTraversal for SqliteAdapter {
             r#"
             SELECT
                 e."from" AS edge_from, e."to" AS edge_to, e.type AS edge_type,
-                e.data AS edge_data, e.index_meta AS edge_index_meta,
+                e.data AS edge_data,
                 o.id AS obj_id, o.type AS obj_type, o.owner AS obj_owner,
                 o.created_at AS obj_created_at, o.updated_at AS obj_updated_at, o.data AS obj_data
             FROM edges e
@@ -1969,7 +1961,7 @@ impl EdgeTraversal for SqliteAdapter {
             r#"
             SELECT
                 e."from" AS edge_from, e."to" AS edge_to, e.type AS edge_type,
-                e.data AS edge_data, e.index_meta AS edge_index_meta,
+                e.data AS edge_data,
                 o.id AS obj_id, o.type AS obj_type, o.owner AS obj_owner,
                 o.created_at AS obj_created_at, o.updated_at AS obj_updated_at, o.data AS obj_data
             FROM edges e
@@ -2106,7 +2098,7 @@ impl EdgeTraversal for SqliteAdapter {
         let sel = r#"
             SELECT
                 e."from" AS edge_from, e."to" AS edge_to, e.type AS edge_type,
-                e.data AS edge_data, e.index_meta AS edge_index_meta,
+                e.data AS edge_data,
                 o.id AS obj_id, o.type AS obj_type, o.owner AS obj_owner,
                 o.created_at AS obj_created_at, o.updated_at AS obj_updated_at, o.data AS obj_data
         "#;

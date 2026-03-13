@@ -268,9 +268,7 @@ impl CockroachAdapter {
             data: row
                 .try_get::<serde_json::Value, _>("edge_data")
                 .map_err(de)?,
-            index_meta: row
-                .try_get::<serde_json::Value, _>("edge_index_meta")
-                .map_err(de)?,
+            index_meta: serde_json::Value::Null,
         };
         let obj = ObjectRecord {
             id: row.try_get::<Uuid, _>("obj_id").map_err(de)?,
@@ -310,7 +308,7 @@ impl CockroachAdapter {
             r#"
             SELECT
                 e."from" AS edge_from, e."to" AS edge_to, e.type AS edge_type,
-                e.data AS edge_data, e.index_meta AS edge_index_meta,
+                e.data AS edge_data,
                 o.id AS obj_id, o.type AS obj_type, o.owner AS obj_owner,
                 o.created_at AS obj_created_at, o.updated_at AS obj_updated_at,
                 o.data AS obj_data
@@ -355,15 +353,12 @@ impl CockroachAdapter {
         let data: serde_json::Value = row
             .try_get("data")
             .map_err(|e| Error::Deserialize(e.to_string()))?;
-        let index_meta: serde_json::Value = row
-            .try_get("index_meta")
-            .map_err(|e| Error::Deserialize(e.to_string()))?;
         Ok(EdgeRecord {
             type_name: std::borrow::Cow::Owned(type_name),
             from,
             to,
             data,
-            index_meta,
+            index_meta: serde_json::Value::Null,
         })
     }
 }
@@ -1957,7 +1952,7 @@ impl EdgeTraversal for CockroachAdapter {
             r#"
             SELECT
                 e."from" AS edge_from, e."to" AS edge_to, e.type AS edge_type,
-                e.data AS edge_data, e.index_meta AS edge_index_meta,
+                e.data AS edge_data,
                 o.id AS obj_id, o.type AS obj_type, o.owner AS obj_owner,
                 o.created_at AS obj_created_at, o.updated_at AS obj_updated_at, o.data AS obj_data
             FROM edges e
@@ -2003,7 +1998,7 @@ impl EdgeTraversal for CockroachAdapter {
             r#"
             SELECT
                 e."from" AS edge_from, e."to" AS edge_to, e.type AS edge_type,
-                e.data AS edge_data, e.index_meta AS edge_index_meta,
+                e.data AS edge_data,
                 o.id AS obj_id, o.type AS obj_type, o.owner AS obj_owner,
                 o.created_at AS obj_created_at, o.updated_at AS obj_updated_at, o.data AS obj_data
             FROM edges e
@@ -2122,7 +2117,7 @@ impl EdgeTraversal for CockroachAdapter {
         let sel = r#"
             SELECT
                 e."from" AS edge_from, e."to" AS edge_to, e.type AS edge_type,
-                e.data AS edge_data, e.index_meta AS edge_index_meta,
+                e.data AS edge_data,
                 o.id AS obj_id, o.type AS obj_type, o.owner AS obj_owner,
                 o.created_at AS obj_created_at, o.updated_at AS obj_updated_at, o.data AS obj_data
         "#;

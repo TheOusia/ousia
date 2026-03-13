@@ -1059,8 +1059,20 @@ async fn test_preload_single_pivot_following() {
     charlie.email = "charlie@example.com".into();
     engine.create_object(&charlie).await.unwrap();
 
-    engine.create_edge(&Follow { _meta: EdgeMeta::new(alice.id(), bob.id()), notification: true }).await.unwrap();
-    engine.create_edge(&Follow { _meta: EdgeMeta::new(alice.id(), charlie.id()), notification: false }).await.unwrap();
+    engine
+        .create_edge(&Follow {
+            _meta: EdgeMeta::new(alice.id(), bob.id()),
+            notification: true,
+        })
+        .await
+        .unwrap();
+    engine
+        .create_edge(&Follow {
+            _meta: EdgeMeta::new(alice.id(), charlie.id()),
+            notification: false,
+        })
+        .await
+        .unwrap();
 
     let following: Vec<User> = engine
         .preload_object::<User>(alice.id())
@@ -1105,8 +1117,20 @@ async fn test_preload_single_pivot_followers() {
     bob.email = "bob@example.com".into();
     engine.create_object(&bob).await.unwrap();
 
-    engine.create_edge(&Follow { _meta: EdgeMeta::new(alice.id(), bob.id()), notification: true }).await.unwrap();
-    engine.create_edge(&Follow { _meta: EdgeMeta::new(michael.id(), bob.id()), notification: false }).await.unwrap();
+    engine
+        .create_edge(&Follow {
+            _meta: EdgeMeta::new(alice.id(), bob.id()),
+            notification: true,
+        })
+        .await
+        .unwrap();
+    engine
+        .create_edge(&Follow {
+            _meta: EdgeMeta::new(michael.id(), bob.id()),
+            notification: false,
+        })
+        .await
+        .unwrap();
 
     let followers: Vec<User> = engine
         .preload_object::<User>(bob.id())
@@ -1138,7 +1162,13 @@ async fn test_preload_single_pivot_collect_edges() {
     bob.email = "bob@example.com".into();
     engine.create_object(&bob).await.unwrap();
 
-    engine.create_edge(&Follow { _meta: EdgeMeta::new(alice.id(), bob.id()), notification: true }).await.unwrap();
+    engine
+        .create_edge(&Follow {
+            _meta: EdgeMeta::new(alice.id(), bob.id()),
+            notification: true,
+        })
+        .await
+        .unwrap();
 
     let edges: Vec<Follow> = engine
         .preload_object::<User>(alice.id())
@@ -1151,6 +1181,40 @@ async fn test_preload_single_pivot_collect_edges() {
     assert_eq!(edges[0].from(), alice.id());
     assert_eq!(edges[0].to(), bob.id());
     assert!(edges[0].notification);
+}
+
+#[tokio::test]
+async fn test_fetch_edge() {
+    let (_resource, pool) = setup_test_db().await;
+    let adapter = CockroachAdapter::from_pool(pool);
+    adapter.init_schema().await.unwrap();
+    let engine = Engine::new(Box::new(adapter));
+
+    let mut alice = User::default();
+    alice.username = "alice".into();
+    alice.email = "alice@example.com".into();
+    engine.create_object(&alice).await.unwrap();
+
+    let mut bob = User::default();
+    bob.username = "bob".into();
+    bob.email = "bob@example.com".into();
+    engine.create_object(&bob).await.unwrap();
+
+    engine
+        .create_edge(&Follow {
+            _meta: EdgeMeta::new(alice.id(), bob.id()),
+            notification: true,
+        })
+        .await
+        .unwrap();
+
+    let edge = engine
+        .fetch_edge::<Follow>(alice.id(), bob.id())
+        .await
+        .unwrap();
+
+    assert!(edge.is_some());
+    assert!(edge.unwrap().notification);
 }
 
 #[tokio::test]
@@ -1170,7 +1234,13 @@ async fn test_preload_single_pivot_collect_with_target() {
     bob.email = "bob@example.com".into();
     engine.create_object(&bob).await.unwrap();
 
-    engine.create_edge(&Follow { _meta: EdgeMeta::new(alice.id(), bob.id()), notification: true }).await.unwrap();
+    engine
+        .create_edge(&Follow {
+            _meta: EdgeMeta::new(alice.id(), bob.id()),
+            notification: true,
+        })
+        .await
+        .unwrap();
 
     let pairs = engine
         .preload_object::<User>(alice.id())
@@ -1208,8 +1278,20 @@ async fn test_preload_single_pivot_collect_both() {
     charlie.email = "charlie@example.com".into();
     engine.create_object(&charlie).await.unwrap();
 
-    engine.create_edge(&Follow { _meta: EdgeMeta::new(alice.id(), bob.id()), notification: true }).await.unwrap();
-    engine.create_edge(&Follow { _meta: EdgeMeta::new(charlie.id(), alice.id()), notification: false }).await.unwrap();
+    engine
+        .create_edge(&Follow {
+            _meta: EdgeMeta::new(alice.id(), bob.id()),
+            notification: true,
+        })
+        .await
+        .unwrap();
+    engine
+        .create_edge(&Follow {
+            _meta: EdgeMeta::new(charlie.id(), alice.id()),
+            notification: false,
+        })
+        .await
+        .unwrap();
 
     let (following, followers) = engine
         .preload_object::<User>(alice.id())
@@ -1246,8 +1328,20 @@ async fn test_preload_single_pivot_collect_both_with_target() {
     charlie.email = "charlie@example.com".into();
     engine.create_object(&charlie).await.unwrap();
 
-    engine.create_edge(&Follow { _meta: EdgeMeta::new(alice.id(), bob.id()), notification: true }).await.unwrap();
-    engine.create_edge(&Follow { _meta: EdgeMeta::new(charlie.id(), alice.id()), notification: false }).await.unwrap();
+    engine
+        .create_edge(&Follow {
+            _meta: EdgeMeta::new(alice.id(), bob.id()),
+            notification: true,
+        })
+        .await
+        .unwrap();
+    engine
+        .create_edge(&Follow {
+            _meta: EdgeMeta::new(charlie.id(), alice.id()),
+            notification: false,
+        })
+        .await
+        .unwrap();
 
     let (fwd_pairs, rev_pairs) = engine
         .preload_object::<User>(alice.id())
@@ -1287,8 +1381,20 @@ async fn test_preload_single_pivot_collect_both_edges() {
     charlie.email = "charlie@example.com".into();
     engine.create_object(&charlie).await.unwrap();
 
-    engine.create_edge(&Follow { _meta: EdgeMeta::new(alice.id(), bob.id()), notification: true }).await.unwrap();
-    engine.create_edge(&Follow { _meta: EdgeMeta::new(charlie.id(), alice.id()), notification: false }).await.unwrap();
+    engine
+        .create_edge(&Follow {
+            _meta: EdgeMeta::new(alice.id(), bob.id()),
+            notification: true,
+        })
+        .await
+        .unwrap();
+    engine
+        .create_edge(&Follow {
+            _meta: EdgeMeta::new(charlie.id(), alice.id()),
+            notification: false,
+        })
+        .await
+        .unwrap();
 
     let (fwd_edges, rev_edges): (Vec<Follow>, Vec<Follow>) = engine
         .preload_object::<User>(alice.id())
@@ -1330,8 +1436,20 @@ async fn test_preload_single_pivot_edge_filter() {
     charlie.email = "charlie@example.com".into();
     engine.create_object(&charlie).await.unwrap();
 
-    engine.create_edge(&Follow { _meta: EdgeMeta::new(alice.id(), bob.id()), notification: true }).await.unwrap();
-    engine.create_edge(&Follow { _meta: EdgeMeta::new(alice.id(), charlie.id()), notification: false }).await.unwrap();
+    engine
+        .create_edge(&Follow {
+            _meta: EdgeMeta::new(alice.id(), bob.id()),
+            notification: true,
+        })
+        .await
+        .unwrap();
+    engine
+        .create_edge(&Follow {
+            _meta: EdgeMeta::new(alice.id(), charlie.id()),
+            notification: false,
+        })
+        .await
+        .unwrap();
 
     let notified: Vec<User> = engine
         .preload_object::<User>(alice.id())
@@ -1382,8 +1500,20 @@ async fn test_preload_multi_pivot_following() {
     charlie.email = "charlie@example.com".into();
     engine.create_object(&charlie).await.unwrap();
 
-    engine.create_edge(&Follow { _meta: EdgeMeta::new(alice.id(), bob.id()), notification: true }).await.unwrap();
-    engine.create_edge(&Follow { _meta: EdgeMeta::new(bob.id(), charlie.id()), notification: false }).await.unwrap();
+    engine
+        .create_edge(&Follow {
+            _meta: EdgeMeta::new(alice.id(), bob.id()),
+            notification: true,
+        })
+        .await
+        .unwrap();
+    engine
+        .create_edge(&Follow {
+            _meta: EdgeMeta::new(bob.id(), charlie.id()),
+            notification: false,
+        })
+        .await
+        .unwrap();
 
     let results: Vec<(User, Vec<User>)> = engine
         .preload_objects::<User>(Query::default())
@@ -1402,7 +1532,10 @@ async fn test_preload_multi_pivot_following() {
     assert_eq!(bob_entry.1.len(), 1);
     assert_eq!(bob_entry.1[0].username, "charlie");
 
-    let charlie_entry = results.iter().find(|(u, _)| u.username == "charlie").unwrap();
+    let charlie_entry = results
+        .iter()
+        .find(|(u, _)| u.username == "charlie")
+        .unwrap();
     assert!(charlie_entry.1.is_empty());
 }
 
@@ -1428,8 +1561,20 @@ async fn test_preload_multi_pivot_followers() {
     bob.email = "bob@example.com".into();
     engine.create_object(&bob).await.unwrap();
 
-    engine.create_edge(&Follow { _meta: EdgeMeta::new(alice.id(), bob.id()), notification: true }).await.unwrap();
-    engine.create_edge(&Follow { _meta: EdgeMeta::new(michael.id(), bob.id()), notification: false }).await.unwrap();
+    engine
+        .create_edge(&Follow {
+            _meta: EdgeMeta::new(alice.id(), bob.id()),
+            notification: true,
+        })
+        .await
+        .unwrap();
+    engine
+        .create_edge(&Follow {
+            _meta: EdgeMeta::new(michael.id(), bob.id()),
+            notification: false,
+        })
+        .await
+        .unwrap();
 
     let results: Vec<(User, Vec<User>)> = engine
         .preload_objects::<User>(Query::default())
@@ -1468,7 +1613,13 @@ async fn test_preload_multi_pivot_collect_edges() {
     bob.email = "bob@example.com".into();
     engine.create_object(&bob).await.unwrap();
 
-    engine.create_edge(&Follow { _meta: EdgeMeta::new(alice.id(), bob.id()), notification: true }).await.unwrap();
+    engine
+        .create_edge(&Follow {
+            _meta: EdgeMeta::new(alice.id(), bob.id()),
+            notification: true,
+        })
+        .await
+        .unwrap();
 
     let results: Vec<(User, Vec<Follow>)> = engine
         .preload_objects::<User>(Query::default())
@@ -1506,7 +1657,13 @@ async fn test_preload_multi_pivot_collect_with_target() {
     bob.email = "bob@example.com".into();
     engine.create_object(&bob).await.unwrap();
 
-    engine.create_edge(&Follow { _meta: EdgeMeta::new(alice.id(), bob.id()), notification: true }).await.unwrap();
+    engine
+        .create_edge(&Follow {
+            _meta: EdgeMeta::new(alice.id(), bob.id()),
+            notification: true,
+        })
+        .await
+        .unwrap();
 
     let results = engine
         .preload_objects::<User>(Query::default())
@@ -1550,9 +1707,27 @@ async fn test_preload_multi_pivot_count() {
     charlie.email = "charlie@example.com".into();
     engine.create_object(&charlie).await.unwrap();
 
-    engine.create_edge(&Follow { _meta: EdgeMeta::new(alice.id(), bob.id()), notification: true }).await.unwrap();
-    engine.create_edge(&Follow { _meta: EdgeMeta::new(alice.id(), charlie.id()), notification: false }).await.unwrap();
-    engine.create_edge(&Follow { _meta: EdgeMeta::new(bob.id(), charlie.id()), notification: true }).await.unwrap();
+    engine
+        .create_edge(&Follow {
+            _meta: EdgeMeta::new(alice.id(), bob.id()),
+            notification: true,
+        })
+        .await
+        .unwrap();
+    engine
+        .create_edge(&Follow {
+            _meta: EdgeMeta::new(alice.id(), charlie.id()),
+            notification: false,
+        })
+        .await
+        .unwrap();
+    engine
+        .create_edge(&Follow {
+            _meta: EdgeMeta::new(bob.id(), charlie.id()),
+            notification: true,
+        })
+        .await
+        .unwrap();
 
     let counts: Vec<(User, u64)> = engine
         .preload_objects::<User>(Query::default())
@@ -1569,7 +1744,10 @@ async fn test_preload_multi_pivot_count() {
     let bob_count = counts.iter().find(|(u, _)| u.username == "bob").unwrap();
     assert_eq!(bob_count.1, 1);
 
-    let charlie_count = counts.iter().find(|(u, _)| u.username == "charlie").unwrap();
+    let charlie_count = counts
+        .iter()
+        .find(|(u, _)| u.username == "charlie")
+        .unwrap();
     assert_eq!(charlie_count.1, 0);
 }
 
@@ -1595,9 +1773,27 @@ async fn test_preload_multi_pivot_count_reverse() {
     charlie.email = "charlie@example.com".into();
     engine.create_object(&charlie).await.unwrap();
 
-    engine.create_edge(&Follow { _meta: EdgeMeta::new(alice.id(), bob.id()), notification: true }).await.unwrap();
-    engine.create_edge(&Follow { _meta: EdgeMeta::new(alice.id(), charlie.id()), notification: false }).await.unwrap();
-    engine.create_edge(&Follow { _meta: EdgeMeta::new(bob.id(), charlie.id()), notification: true }).await.unwrap();
+    engine
+        .create_edge(&Follow {
+            _meta: EdgeMeta::new(alice.id(), bob.id()),
+            notification: true,
+        })
+        .await
+        .unwrap();
+    engine
+        .create_edge(&Follow {
+            _meta: EdgeMeta::new(alice.id(), charlie.id()),
+            notification: false,
+        })
+        .await
+        .unwrap();
+    engine
+        .create_edge(&Follow {
+            _meta: EdgeMeta::new(bob.id(), charlie.id()),
+            notification: true,
+        })
+        .await
+        .unwrap();
 
     let counts: Vec<(User, u64)> = engine
         .preload_objects::<User>(Query::default())
@@ -1614,7 +1810,10 @@ async fn test_preload_multi_pivot_count_reverse() {
     let bob_count = counts.iter().find(|(u, _)| u.username == "bob").unwrap();
     assert_eq!(bob_count.1, 1);
 
-    let charlie_count = counts.iter().find(|(u, _)| u.username == "charlie").unwrap();
+    let charlie_count = counts
+        .iter()
+        .find(|(u, _)| u.username == "charlie")
+        .unwrap();
     assert_eq!(charlie_count.1, 2);
 }
 
@@ -1729,7 +1928,10 @@ async fn test_delete_owned_objects() {
         .unwrap();
     assert_eq!(count_before, 4);
 
-    let deleted = engine.delete_owned_objects::<Post>(owner.id()).await.unwrap();
+    let deleted = engine
+        .delete_owned_objects::<Post>(owner.id())
+        .await
+        .unwrap();
     assert_eq!(deleted, 4);
 
     let count_after: u64 = engine
