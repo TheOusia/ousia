@@ -23,10 +23,28 @@ pub(crate) enum TraversalDirection {
     Reverse,
 }
 
-/// -----------------------------
-/// Object Query Plan (storage contract)
-/// -----------------------------
-
+/// Builder for object queries. Scopes every query to an owner partition.
+///
+/// All filter and sort methods consume `self` and return `Self`, so calls chain
+/// naturally:
+///
+/// ```rust,ignore
+/// let query = Query::new(user_id)
+///     .where_eq(User::FIELDS.status, "active")
+///     .sort_desc(User::FIELDS.created_at)
+///     .with_limit(20);
+/// ```
+///
+/// Filters operate on fields declared with `index = "field:search"` or
+/// `index = "field:sort"` in the `OusiaObject` derive macro. Use
+/// `T::FIELDS.field_name` to obtain the `&'static IndexField` reference
+/// required by every filter and sort method.
+///
+/// Ownership scoping is always enforced:
+/// - `Query::new(owner)` — restricts to objects owned by `owner`.
+/// - `Query::default()` — restricts to system-owned objects (`system_owner()`).
+/// - `Query::wide()` — scans across all owners; expensive on large tables.
+///   Only use when a cross-owner search is intentional.
 #[derive(Debug, Clone)]
 pub struct Query {
     pub owner: Uuid, // enforced, never optional
@@ -36,8 +54,10 @@ pub struct Query {
 }
 
 impl Default for Query {
-    /// Use this for objects owned by system
-    /// For Global search see `Query::wide`
+    /// Returns a query scoped to system-owned objects (`system_owner()`).
+    ///
+    /// Use this when querying global/shared objects that have no user owner.
+    /// For cross-owner search see [`Query::wide`].
     fn default() -> Self {
         Self {
             owner: system_owner(),
@@ -49,6 +69,11 @@ impl Default for Query {
 }
 
 impl Query {
+    /// Create a query scoped to a specific owner.
+    ///
+    /// Every returned object will have `owner == owner`. This maps to a
+    /// partition-level WHERE clause, making it the most efficient way to
+    /// query when the owner UUID is known.
     pub fn new(owner: Uuid) -> Self {
         Self {
             owner,
@@ -58,8 +83,12 @@ impl Query {
         }
     }
 
-    /// Global search.
-    /// For optimized search use `Query::default` or `Query::new(owner)` if owner is known
+    /// Create a cross-owner (wide) query that scans across all partitions.
+    ///
+    /// No owner filter is applied; every row in the table is a candidate.
+    /// This is significantly more expensive than `Query::new` or
+    /// `Query::default` on large tables. Only use it when a cross-owner
+    /// search is explicitly required.
     pub fn wide() -> Self {
         Self {
             owner: Uuid::nil(),
@@ -69,6 +98,11 @@ impl Query {
         }
     }
 
+    /// Low-level filter insertion. Prefer the typed `where_*` helpers when possible.
+    ///
+    /// Appends a [`QueryFilter`] with the given field, value, and mode directly
+    /// to the filter list. Useful for constructing filters programmatically or
+    /// passing a pre-built [`QueryMode`].
     pub fn filter(
         self,
         field: &'static IndexField,
@@ -84,7 +118,7 @@ impl Query {
         consumed_self
     }
 
-    // Equality
+    /// Filter objects where `field = value` (B-tree equality).
     pub fn where_eq(self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
         let mut consumed_self = self;
         consumed_self.filters.push(QueryFilter {
@@ -98,7 +132,7 @@ impl Query {
         consumed_self
     }
 
-    // Not Equal
+    /// Filter objects where `field != value`.
     pub fn where_ne(self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
         let mut consumed_self = self;
         consumed_self.filters.push(QueryFilter {
@@ -112,7 +146,7 @@ impl Query {
         consumed_self
     }
 
-    // Greater Than
+    /// Filter objects where `field > value`.
     pub fn where_gt(self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
         let mut consumed_self = self;
         consumed_self.filters.push(QueryFilter {
@@ -126,7 +160,7 @@ impl Query {
         consumed_self
     }
 
-    // Greater Than or Equal
+    /// Filter objects where `field >= value`.
     pub fn where_gte(self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
         let mut consumed_self = self;
         consumed_self.filters.push(QueryFilter {
@@ -140,7 +174,7 @@ impl Query {
         consumed_self
     }
 
-    // Less Than
+    /// Filter objects where `field < value`.
     pub fn where_lt(self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
         let mut consumed_self = self;
         consumed_self.filters.push(QueryFilter {
@@ -154,7 +188,7 @@ impl Query {
         consumed_self
     }
 
-    // Less Than or Equal
+    /// Filter objects where `field <= value`.
     pub fn where_lte(self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
         let mut consumed_self = self;
         consumed_self.filters.push(QueryFilter {
@@ -168,7 +202,12 @@ impl Query {
         consumed_self
     }
 
-    // Contains
+    /// Filter objects where `field` contains `value`.
+    ///
+    /// For string fields: generates `ILIKE '%value%'`. Uses a GIN-backed
+    /// trigram index when available.
+    /// For array fields: checks that the array contains at least one of the
+    /// provided values (`field && value`). Uses the GIN index on the column.
     pub fn where_contains(self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
         let mut consumed_self = self;
         consumed_self.filters.push(QueryFilter {
@@ -182,7 +221,10 @@ impl Query {
         consumed_self
     }
 
-    // Contains All
+    /// Filter objects where an array field contains ALL of the provided values.
+    ///
+    /// Translates to a GIN `@>` containment check: `field @> value`. Every
+    /// element in `value` must be present in the stored array.
     pub fn where_contains_all(self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
         let mut consumed_self = self;
         consumed_self.filters.push(QueryFilter {
@@ -196,7 +238,9 @@ impl Query {
         consumed_self
     }
 
-    // Begins With (for strings)
+    /// Filter objects where a string field starts with `value` (`ILIKE 'value%'`).
+    ///
+    /// Uses the GIN-backed prefix extraction index when available.
     pub fn where_begins_with(self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
         let mut consumed_self = self;
         consumed_self.filters.push(QueryFilter {
@@ -210,7 +254,92 @@ impl Query {
         consumed_self
     }
 
-    // Sorting
+    /// Filter objects where a string field does NOT start with `value`.
+    ///
+    /// Postgres has no GIN support for negated prefix matches, so this
+    /// performs a full partition scan. Use with a tight owner scope or a
+    /// complementary equality filter to limit row count.
+    pub fn where_not_begins_with(
+        self,
+        field: &'static IndexField,
+        value: impl ToIndexValue,
+    ) -> Self {
+        let mut consumed_self = self;
+        consumed_self.filters.push(QueryFilter {
+            field,
+            value: value.to_index_value(),
+            mode: QueryMode::Search(QuerySearch {
+                comparison: Comparison::NotBeginsWith,
+                operator: Operator::default(),
+            }),
+        });
+        consumed_self
+    }
+
+    /// Filter objects where `field` does NOT contain `value`.
+    ///
+    /// GIN indexes cannot accelerate NOT LIKE or exclusion array checks, so
+    /// this performs a full partition scan. Combine with other indexed filters
+    /// to reduce the scanned row count.
+    pub fn where_not_contains(
+        self,
+        field: &'static IndexField,
+        value: impl ToIndexValue,
+    ) -> Self {
+        let mut consumed_self = self;
+        consumed_self.filters.push(QueryFilter {
+            field,
+            value: value.to_index_value(),
+            mode: QueryMode::Search(QuerySearch {
+                comparison: Comparison::NotContains,
+                operator: Operator::default(),
+            }),
+        });
+        consumed_self
+    }
+
+    /// Filter objects where an array field does NOT contain all of the provided values.
+    ///
+    /// Negation of `where_contains_all`. GIN indexes cannot accelerate this
+    /// check, so a full partition scan is performed.
+    pub fn where_not_contains_all(
+        self,
+        field: &'static IndexField,
+        value: impl ToIndexValue,
+    ) -> Self {
+        let mut consumed_self = self;
+        consumed_self.filters.push(QueryFilter {
+            field,
+            value: value.to_index_value(),
+            mode: QueryMode::Search(QuerySearch {
+                comparison: Comparison::NotContainsAll,
+                operator: Operator::default(),
+            }),
+        });
+        consumed_self
+    }
+
+    /// Filter objects where a scalar field is NOT IN the supplied array.
+    ///
+    /// On Postgres/CockroachDB the value is bound as a typed array parameter
+    /// (`!= ALL($N)`). Uses a B-tree index on the field when one exists;
+    /// otherwise falls back to a partition scan.
+    pub fn where_not_in(self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
+        let mut consumed_self = self;
+        consumed_self.filters.push(QueryFilter {
+            field,
+            value: value.to_index_value(),
+            mode: QueryMode::Search(QuerySearch {
+                comparison: Comparison::NotIn,
+                operator: Operator::default(),
+            }),
+        });
+        consumed_self
+    }
+
+    /// Sort results by `field` in ascending order (`ORDER BY field ASC`).
+    ///
+    /// The field must be declared with `index = "field:sort"`.
     pub fn sort_asc(self, field: &'static IndexField) -> Self {
         let mut consumed_self = self;
         consumed_self.filters.push(QueryFilter {
@@ -221,6 +350,9 @@ impl Query {
         consumed_self
     }
 
+    /// Sort results by `field` in descending order (`ORDER BY field DESC`).
+    ///
+    /// The field must be declared with `index = "field:sort"`.
     pub fn sort_desc(self, field: &'static IndexField) -> Self {
         let mut consumed_self = self;
         consumed_self.filters.push(QueryFilter {
@@ -231,7 +363,21 @@ impl Query {
         consumed_self
     }
 
-    // OR operator variants
+    /// Sort results randomly (`ORDER BY RANDOM()`).
+    ///
+    /// Requires a full partition scan and must evaluate a random value for
+    /// every candidate row. Never use on large result sets without pairing
+    /// with a `with_limit` call.
+    pub fn sort_random(self) -> Self {
+        let mut consumed_self = self;
+        consumed_self.filters.push(QueryFilter::random_sort());
+        consumed_self
+    }
+
+    // OR operator variants — same semantics as the `where_*` methods but the
+    // condition is joined to the previous filter with OR instead of AND.
+
+    /// Add an OR `field = value` condition.
     pub fn or_eq(self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
         let mut consumed_self = self;
         consumed_self.filters.push(QueryFilter {
@@ -245,6 +391,7 @@ impl Query {
         consumed_self
     }
 
+    /// Add an OR `field != value` condition.
     pub fn or_ne(self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
         let mut consumed_self = self;
         consumed_self.filters.push(QueryFilter {
@@ -258,6 +405,7 @@ impl Query {
         consumed_self
     }
 
+    /// Add an OR `field > value` condition.
     pub fn or_gt(self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
         let mut consumed_self = self;
         consumed_self.filters.push(QueryFilter {
@@ -271,6 +419,7 @@ impl Query {
         consumed_self
     }
 
+    /// Add an OR `field >= value` condition.
     pub fn or_gte(self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
         let mut consumed_self = self;
         consumed_self.filters.push(QueryFilter {
@@ -284,6 +433,7 @@ impl Query {
         consumed_self
     }
 
+    /// Add an OR `field < value` condition.
     pub fn or_lt(self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
         let mut consumed_self = self;
         consumed_self.filters.push(QueryFilter {
@@ -297,6 +447,7 @@ impl Query {
         consumed_self
     }
 
+    /// Add an OR `field <= value` condition.
     pub fn or_lte(self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
         let mut consumed_self = self;
         consumed_self.filters.push(QueryFilter {
@@ -310,6 +461,7 @@ impl Query {
         consumed_self
     }
 
+    /// Add an OR contains condition. See [`Query::where_contains`] for semantics.
     pub fn or_contains(self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
         let mut consumed_self = self;
         consumed_self.filters.push(QueryFilter {
@@ -323,6 +475,7 @@ impl Query {
         consumed_self
     }
 
+    /// Add an OR contains-all condition. See [`Query::where_contains_all`] for semantics.
     pub fn or_contains_all(self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
         let mut consumed_self = self;
         consumed_self.filters.push(QueryFilter {
@@ -336,6 +489,7 @@ impl Query {
         consumed_self
     }
 
+    /// Add an OR begins-with condition. See [`Query::where_begins_with`] for semantics.
     pub fn or_begins_with(self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
         let mut consumed_self = self;
         consumed_self.filters.push(QueryFilter {
@@ -349,11 +503,80 @@ impl Query {
         consumed_self
     }
 
+    /// Add an OR not-begins-with condition. See [`Query::where_not_begins_with`] for semantics.
+    pub fn or_not_begins_with(
+        self,
+        field: &'static IndexField,
+        value: impl ToIndexValue,
+    ) -> Self {
+        let mut consumed_self = self;
+        consumed_self.filters.push(QueryFilter {
+            field,
+            value: value.to_index_value(),
+            mode: QueryMode::Search(QuerySearch {
+                comparison: Comparison::NotBeginsWith,
+                operator: Operator::Or,
+            }),
+        });
+        consumed_self
+    }
+
+    /// Add an OR not-contains condition. See [`Query::where_not_contains`] for semantics.
+    pub fn or_not_contains(self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
+        let mut consumed_self = self;
+        consumed_self.filters.push(QueryFilter {
+            field,
+            value: value.to_index_value(),
+            mode: QueryMode::Search(QuerySearch {
+                comparison: Comparison::NotContains,
+                operator: Operator::Or,
+            }),
+        });
+        consumed_self
+    }
+
+    /// Add an OR not-contains-all condition. See [`Query::where_not_contains_all`] for semantics.
+    pub fn or_not_contains_all(
+        self,
+        field: &'static IndexField,
+        value: impl ToIndexValue,
+    ) -> Self {
+        let mut consumed_self = self;
+        consumed_self.filters.push(QueryFilter {
+            field,
+            value: value.to_index_value(),
+            mode: QueryMode::Search(QuerySearch {
+                comparison: Comparison::NotContainsAll,
+                operator: Operator::Or,
+            }),
+        });
+        consumed_self
+    }
+
+    /// Add an OR not-in condition. See [`Query::where_not_in`] for semantics.
+    pub fn or_not_in(self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
+        let mut consumed_self = self;
+        consumed_self.filters.push(QueryFilter {
+            field,
+            value: value.to_index_value(),
+            mode: QueryMode::Search(QuerySearch {
+                comparison: Comparison::NotIn,
+                operator: Operator::Or,
+            }),
+        });
+        consumed_self
+    }
+
+    /// Cap the number of results returned by this query.
     pub fn with_limit(mut self, limit: u32) -> Self {
         self.limit = Some(limit);
         self
     }
 
+    /// Continue pagination from the object with this UUID (exclusive).
+    ///
+    /// The cursor is the `id` of the last object returned by the previous page.
+    /// The next page starts immediately after that object in the current sort order.
     pub fn with_cursor(mut self, cursor: Uuid) -> Self {
         self.cursor = Some(Cursor { last_id: cursor });
         self
@@ -572,6 +795,66 @@ impl<'a, E: Edge, O: Object> EdgeQueryContext<'a, E, O> {
         self
     }
 
+    pub fn where_not_begins_with(
+        mut self,
+        field: &'static IndexField,
+        value: impl ToIndexValue,
+    ) -> Self {
+        self.filters.push(QueryFilter {
+            field,
+            value: value.to_index_value(),
+            mode: QueryMode::Search(QuerySearch {
+                comparison: Comparison::NotBeginsWith,
+                operator: Operator::default(),
+            }),
+        });
+        self
+    }
+
+    pub fn where_not_contains(
+        mut self,
+        field: &'static IndexField,
+        value: impl ToIndexValue,
+    ) -> Self {
+        self.filters.push(QueryFilter {
+            field,
+            value: value.to_index_value(),
+            mode: QueryMode::Search(QuerySearch {
+                comparison: Comparison::NotContains,
+                operator: Operator::default(),
+            }),
+        });
+        self
+    }
+
+    pub fn where_not_contains_all(
+        mut self,
+        field: &'static IndexField,
+        value: impl ToIndexValue,
+    ) -> Self {
+        self.filters.push(QueryFilter {
+            field,
+            value: value.to_index_value(),
+            mode: QueryMode::Search(QuerySearch {
+                comparison: Comparison::NotContainsAll,
+                operator: Operator::default(),
+            }),
+        });
+        self
+    }
+
+    pub fn where_not_in(mut self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
+        self.filters.push(QueryFilter {
+            field,
+            value: value.to_index_value(),
+            mode: QueryMode::Search(QuerySearch {
+                comparison: Comparison::NotIn,
+                operator: Operator::default(),
+            }),
+        });
+        self
+    }
+
     // OR variants for target objects
     pub fn or_eq(mut self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
         self.filters.push(QueryFilter {
@@ -675,6 +958,62 @@ impl<'a, E: Edge, O: Object> EdgeQueryContext<'a, E, O> {
             value: value.to_index_value(),
             mode: QueryMode::Search(QuerySearch {
                 comparison: Comparison::BeginsWith,
+                operator: Operator::Or,
+            }),
+        });
+        self
+    }
+
+    pub fn or_not_begins_with(
+        mut self,
+        field: &'static IndexField,
+        value: impl ToIndexValue,
+    ) -> Self {
+        self.filters.push(QueryFilter {
+            field,
+            value: value.to_index_value(),
+            mode: QueryMode::Search(QuerySearch {
+                comparison: Comparison::NotBeginsWith,
+                operator: Operator::Or,
+            }),
+        });
+        self
+    }
+
+    pub fn or_not_contains(mut self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
+        self.filters.push(QueryFilter {
+            field,
+            value: value.to_index_value(),
+            mode: QueryMode::Search(QuerySearch {
+                comparison: Comparison::NotContains,
+                operator: Operator::Or,
+            }),
+        });
+        self
+    }
+
+    pub fn or_not_contains_all(
+        mut self,
+        field: &'static IndexField,
+        value: impl ToIndexValue,
+    ) -> Self {
+        self.filters.push(QueryFilter {
+            field,
+            value: value.to_index_value(),
+            mode: QueryMode::Search(QuerySearch {
+                comparison: Comparison::NotContainsAll,
+                operator: Operator::Or,
+            }),
+        });
+        self
+    }
+
+    pub fn or_not_in(mut self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
+        self.filters.push(QueryFilter {
+            field,
+            value: value.to_index_value(),
+            mode: QueryMode::Search(QuerySearch {
+                comparison: Comparison::NotIn,
                 operator: Operator::Or,
             }),
         });
@@ -824,6 +1163,66 @@ impl<'a, E: Edge, O: Object> EdgeQueryContext<'a, E, O> {
         self
     }
 
+    pub fn edge_not_begins_with(
+        mut self,
+        field: &'static IndexField,
+        value: impl ToIndexValue,
+    ) -> Self {
+        self.edge_filters.push(QueryFilter {
+            field,
+            value: value.to_index_value(),
+            mode: QueryMode::Search(QuerySearch {
+                comparison: Comparison::NotBeginsWith,
+                operator: Operator::default(),
+            }),
+        });
+        self
+    }
+
+    pub fn edge_not_contains(
+        mut self,
+        field: &'static IndexField,
+        value: impl ToIndexValue,
+    ) -> Self {
+        self.edge_filters.push(QueryFilter {
+            field,
+            value: value.to_index_value(),
+            mode: QueryMode::Search(QuerySearch {
+                comparison: Comparison::NotContains,
+                operator: Operator::default(),
+            }),
+        });
+        self
+    }
+
+    pub fn edge_not_contains_all(
+        mut self,
+        field: &'static IndexField,
+        value: impl ToIndexValue,
+    ) -> Self {
+        self.edge_filters.push(QueryFilter {
+            field,
+            value: value.to_index_value(),
+            mode: QueryMode::Search(QuerySearch {
+                comparison: Comparison::NotContainsAll,
+                operator: Operator::default(),
+            }),
+        });
+        self
+    }
+
+    pub fn edge_not_in(mut self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
+        self.edge_filters.push(QueryFilter {
+            field,
+            value: value.to_index_value(),
+            mode: QueryMode::Search(QuerySearch {
+                comparison: Comparison::NotIn,
+                operator: Operator::default(),
+            }),
+        });
+        self
+    }
+
     // OR variants for edges
     pub fn edge_or_eq(mut self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
         self.edge_filters.push(QueryFilter {
@@ -945,6 +1344,66 @@ impl<'a, E: Edge, O: Object> EdgeQueryContext<'a, E, O> {
         self
     }
 
+    pub fn edge_or_not_begins_with(
+        mut self,
+        field: &'static IndexField,
+        value: impl ToIndexValue,
+    ) -> Self {
+        self.edge_filters.push(QueryFilter {
+            field,
+            value: value.to_index_value(),
+            mode: QueryMode::Search(QuerySearch {
+                comparison: Comparison::NotBeginsWith,
+                operator: Operator::Or,
+            }),
+        });
+        self
+    }
+
+    pub fn edge_or_not_contains(
+        mut self,
+        field: &'static IndexField,
+        value: impl ToIndexValue,
+    ) -> Self {
+        self.edge_filters.push(QueryFilter {
+            field,
+            value: value.to_index_value(),
+            mode: QueryMode::Search(QuerySearch {
+                comparison: Comparison::NotContains,
+                operator: Operator::Or,
+            }),
+        });
+        self
+    }
+
+    pub fn edge_or_not_contains_all(
+        mut self,
+        field: &'static IndexField,
+        value: impl ToIndexValue,
+    ) -> Self {
+        self.edge_filters.push(QueryFilter {
+            field,
+            value: value.to_index_value(),
+            mode: QueryMode::Search(QuerySearch {
+                comparison: Comparison::NotContainsAll,
+                operator: Operator::Or,
+            }),
+        });
+        self
+    }
+
+    pub fn edge_or_not_in(mut self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
+        self.edge_filters.push(QueryFilter {
+            field,
+            value: value.to_index_value(),
+            mode: QueryMode::Search(QuerySearch {
+                comparison: Comparison::NotIn,
+                operator: Operator::Or,
+            }),
+        });
+        self
+    }
+
     // ============================================================
     // SORTING
     // ============================================================
@@ -986,6 +1445,18 @@ impl<'a, E: Edge, O: Object> EdgeQueryContext<'a, E, O> {
             value: field.name.to_index_value(),
             mode: QueryMode::Sort(QuerySort { ascending: false }),
         });
+        self
+    }
+
+    /// Random sort on target objects — produces `ORDER BY RANDOM()`. Requires a full table scan.
+    pub fn sort_random(mut self) -> Self {
+        self.filters.push(QueryFilter::random_sort());
+        self
+    }
+
+    /// Random sort on edges — produces `ORDER BY RANDOM()`. Requires a full table scan.
+    pub fn edge_sort_random(mut self) -> Self {
+        self.edge_filters.push(QueryFilter::random_sort());
         self
     }
 

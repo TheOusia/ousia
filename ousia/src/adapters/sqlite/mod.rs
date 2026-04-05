@@ -197,6 +197,18 @@ impl SqliteAdapter {
         .await
         .map_err(|e| Error::Storage(e.to_string()))?;
 
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS ousia_meta (
+                key   TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )
+            "#,
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| Error::Storage(e.to_string()))?;
+
         tx.commit()
             .await
             .map_err(|e| Error::Storage(e.to_string()))?;
@@ -376,33 +388,37 @@ impl SqliteAdapter {
         let crate::query::QueryMode::Search(ref qs) = filter.mode else {
             return None;
         };
-        let comparison = match qs.comparison {
-            crate::query::Comparison::Equal => "=",
-            crate::query::Comparison::NotEqual => "!=",
-            crate::query::Comparison::GreaterThan => ">",
-            crate::query::Comparison::LessThan => "<",
-            crate::query::Comparison::GreaterThanOrEqual => ">=",
-            crate::query::Comparison::LessThanOrEqual => "<=",
-            crate::query::Comparison::BeginsWith => "LIKE",
-            crate::query::Comparison::Contains | crate::query::Comparison::ContainsAll => {
-                if matches!(filter.value, IndexValue::Array(_)) {
-                    "ARRAY_CONTAINS"
-                } else {
-                    "LIKE"
-                }
-            }
-        };
         let col = format!(
             "json_extract({}.index_meta, '$.{}')",
             alias, filter.field.name
         );
-        let condition = if comparison == "ARRAY_CONTAINS" {
-            format!(
-                "EXISTS (SELECT 1 FROM json_each({col}) WHERE value IN (SELECT value FROM json_each(?)))",
-                col = col
-            )
-        } else {
-            format!("{} {} ?", col, comparison)
+        let is_array = matches!(filter.value, IndexValue::Array(_));
+        let condition = match &qs.comparison {
+            crate::query::Comparison::Equal => format!("{} = ?", col),
+            crate::query::Comparison::NotEqual => format!("{} != ?", col),
+            crate::query::Comparison::GreaterThan => format!("{} > ?", col),
+            crate::query::Comparison::LessThan => format!("{} < ?", col),
+            crate::query::Comparison::GreaterThanOrEqual => format!("{} >= ?", col),
+            crate::query::Comparison::LessThanOrEqual => format!("{} <= ?", col),
+            crate::query::Comparison::BeginsWith => format!("{} LIKE ?", col),
+            crate::query::Comparison::NotBeginsWith => format!("{} NOT LIKE ?", col),
+            crate::query::Comparison::Contains | crate::query::Comparison::ContainsAll => {
+                if is_array {
+                    format!("EXISTS (SELECT 1 FROM json_each({col}) WHERE value IN (SELECT value FROM json_each(?)))")
+                } else {
+                    format!("{} LIKE ?", col)
+                }
+            }
+            crate::query::Comparison::NotContains | crate::query::Comparison::NotContainsAll => {
+                if is_array {
+                    format!("NOT EXISTS (SELECT 1 FROM json_each({col}) WHERE value IN (SELECT value FROM json_each(?)))")
+                } else {
+                    format!("{} NOT LIKE ?", col)
+                }
+            }
+            crate::query::Comparison::NotIn => {
+                format!("{} NOT IN (SELECT value FROM json_each(?))", col)
+            }
         };
         let operator = match qs.operator {
             crate::query::Operator::And => "AND",
@@ -476,6 +492,9 @@ impl SqliteAdapter {
     }
 
     fn build_order_clause_aliased(filters: &[QueryFilter], alias: &str, is_edge: bool) -> String {
+        if filters.iter().any(|f| f.mode.is_random_sort()) {
+            return "ORDER BY RANDOM()".to_string();
+        }
         let prefix = if alias.is_empty() {
             String::new()
         } else {
@@ -571,8 +590,8 @@ impl SqliteAdapter {
                 IndexValue::String(s) => {
                     use crate::query::Comparison::*;
                     match filter.mode.as_search().unwrap().comparison {
-                        BeginsWith => query.bind(format!("{}%", s)),
-                        Contains => query.bind(format!("%{}%", s)),
+                        BeginsWith | NotBeginsWith => query.bind(format!("{}%", s)),
+                        Contains | NotContains => query.bind(format!("%{}%", s)),
                         _ => query.bind(s),
                     }
                 }
@@ -632,8 +651,8 @@ impl SqliteAdapter {
                 IndexValue::String(s) => {
                     use crate::query::Comparison::*;
                     match filter.mode.as_search().unwrap().comparison {
-                        BeginsWith => query.bind(format!("{}%", s)),
-                        Contains => query.bind(format!("%{}%", s)),
+                        BeginsWith | NotBeginsWith => query.bind(format!("{}%", s)),
+                        Contains | NotContains => query.bind(format!("%{}%", s)),
                         _ => query.bind(s),
                     }
                 }
@@ -988,6 +1007,40 @@ impl Adapter for SqliteAdapter {
             .collect()
     }
 
+    async fn fetch_objects_batch(
+        &self,
+        pairs: Vec<(&'static str, Vec<Uuid>)>,
+    ) -> Result<Vec<ObjectRecord>, Error> {
+        let pairs: Vec<_> = pairs.into_iter().filter(|(_, ids)| !ids.is_empty()).collect();
+        if pairs.is_empty() {
+            return Ok(vec![]);
+        }
+        let mut branches = Vec::with_capacity(pairs.len());
+        for (_, ids) in &pairs {
+            let placeholders = (0..ids.len()).map(|_| "?").collect::<Vec<_>>().join(",");
+            branches.push(format!(
+                "SELECT o.id, o.type, o.owner, o.created_at, o.updated_at, o.data \
+                 FROM objects o WHERE o.type = ? AND o.id IN ({})",
+                placeholders
+            ));
+        }
+        let sql = branches.join("\nUNION ALL\n");
+        let mut query = sqlx::query(&sql);
+        for (type_name, ids) in &pairs {
+            query = query.bind(*type_name);
+            for id in ids {
+                query = query.bind(*id);
+            }
+        }
+        let rows = query
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|err| Error::Storage(err.to_string()))?;
+        rows.into_iter()
+            .map(Self::map_row_to_object_record_slim)
+            .collect()
+    }
+
     async fn update_object(&self, record: ObjectRecord) -> Result<(), Error> {
         sqlx::query(
             r#"
@@ -1104,12 +1157,32 @@ impl Adapter for SqliteAdapter {
         type_name: &'static str,
         owner: Uuid,
     ) -> Result<u64, Error> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| Error::Storage(e.to_string()))?;
+
+        sqlx::query(
+            "DELETE FROM unique_constraints \
+             WHERE id IN (SELECT id FROM objects WHERE type = ? AND owner = ?)",
+        )
+        .bind(type_name)
+        .bind(owner)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| Error::Storage(e.to_string()))?;
+
         let result = sqlx::query("DELETE FROM objects WHERE type = ? AND owner = ?")
             .bind(type_name)
             .bind(owner)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await
-            .map_err(|err| Error::Storage(err.to_string()))?;
+            .map_err(|e| Error::Storage(e.to_string()))?;
+
+        tx.commit()
+            .await
+            .map_err(|e| Error::Storage(e.to_string()))?;
 
         Ok(result.rows_affected())
     }
@@ -1716,6 +1789,29 @@ impl Adapter for SqliteAdapter {
         }
     }
 
+    async fn read_schema_hash(&self, type_name: &'static str) -> Result<Option<String>, Error> {
+        let key = format!("schema:{}", type_name);
+        sqlx::query_scalar::<_, String>("SELECT value FROM ousia_meta WHERE key = ?")
+            .bind(&key)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|e| Error::Storage(e.to_string()))
+    }
+
+    async fn upsert_schema_hash(&self, type_name: &'static str, hash: &str) -> Result<(), Error> {
+        let key = format!("schema:{}", type_name);
+        sqlx::query(
+            "INSERT INTO ousia_meta (key, value) VALUES (?, ?) \
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        )
+        .bind(&key)
+        .bind(hash)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| Error::Storage(e.to_string()))?;
+        Ok(())
+    }
+
     async fn sequence_value(&self, sq: String) -> u64 {
         let val: i64 =
             sqlx::query_scalar("SELECT COALESCE((SELECT value FROM sequences WHERE name = ?), 1)")
@@ -1841,6 +1937,30 @@ impl UniqueAdapter for SqliteAdapter {
         .fetch_all(&self.pool)
         .await
         .map_err(|e| Error::Storage(e.to_string()))?;
+
+        Ok(rows
+            .into_iter()
+            .map(|row| row.try_get("key").unwrap())
+            .collect())
+    }
+
+    async fn get_hashes_for_objects(&self, object_ids: Vec<Uuid>) -> Result<Vec<String>, Error> {
+        if object_ids.is_empty() {
+            return Ok(vec![]);
+        }
+        let placeholders = object_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let sql = format!(
+            "SELECT key FROM unique_constraints WHERE id IN ({})",
+            placeholders
+        );
+        let mut query = sqlx::query(&sql);
+        for id in &object_ids {
+            query = query.bind(id);
+        }
+        let rows = query
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| Error::Storage(e.to_string()))?;
 
         Ok(rows
             .into_iter()

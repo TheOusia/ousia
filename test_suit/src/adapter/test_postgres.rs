@@ -1004,12 +1004,19 @@ async fn test_sequence() {
 
     let engine = Engine::new(Box::new(adapter));
 
+    // Before any nextval, last_value equals the sequence start (1).
     let value = engine.counter_value("my-key".to_string()).await;
     assert_eq!(value, 1);
 
+    // First nextval returns 1 (native PG sequence semantics).
+    let value = engine.counter_next_value("my-key".to_string()).await;
+    assert_eq!(value, 1);
+
+    // Second nextval increments to 2.
     let value = engine.counter_next_value("my-key".to_string()).await;
     assert_eq!(value, 2);
 
+    // Peek reflects the last allocated value.
     let value = engine.counter_value("my-key".to_string()).await;
     assert_eq!(value, 2);
 }
@@ -2019,4 +2026,311 @@ async fn test_fetch_owned_object() {
 
     let none: Option<Post> = engine.fetch_owned_object(bob.id()).await.unwrap();
     assert!(none.is_none());
+}
+
+// ============================================================
+// NOT comparison operators
+// ============================================================
+
+#[tokio::test]
+async fn test_query_not_begins_with() {
+    let (_resource, pool) = setup_test_db().await;
+    let adapter = PostgresAdapter::from_pool(pool);
+    adapter.init_schema().await.unwrap();
+    let engine = Engine::new(Box::new(adapter));
+
+    let mut owner = User::default();
+    owner.username = "owner".into();
+    owner.email = "owner@example.com".into();
+    engine.create_object(&owner).await.unwrap();
+
+    let mut rust_post = Post::default();
+    rust_post.set_owner(owner.id());
+    rust_post.title = "Rust Guide".into();
+    engine.create_object(&rust_post).await.unwrap();
+
+    let mut py_post = Post::default();
+    py_post.set_owner(owner.id());
+    py_post.title = "Python Guide".into();
+    engine.create_object(&py_post).await.unwrap();
+
+    // NOT begins with "Python" → only "Rust Guide"
+    let posts: Vec<Post> = engine
+        .query_objects(
+            Query::new(owner.id()).where_not_begins_with(&Post::FIELDS.title, "Python"),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(posts.len(), 1);
+    assert_eq!(posts[0].title, "Rust Guide");
+}
+
+#[tokio::test]
+async fn test_query_not_contains_str() {
+    let (_resource, pool) = setup_test_db().await;
+    let adapter = PostgresAdapter::from_pool(pool);
+    adapter.init_schema().await.unwrap();
+    let engine = Engine::new(Box::new(adapter));
+
+    let mut alice = User::default();
+    alice.username = "alice".into();
+    alice.email = "alice@example.com".into();
+    engine.create_object(&alice).await.unwrap();
+
+    let mut spammer = User::default();
+    spammer.username = "spammer".into();
+    spammer.email = "evil@spam.net".into();
+    engine.create_object(&spammer).await.unwrap();
+
+    // NOT contains "spam" → only alice
+    let users: Vec<User> = engine
+        .query_objects(Query::default().where_not_contains(&User::FIELDS.email, "spam"))
+        .await
+        .unwrap();
+
+    assert_eq!(users.len(), 1);
+    assert_eq!(users[0].username, "alice");
+}
+
+#[tokio::test]
+async fn test_query_not_contains_array() {
+    let (_resource, pool) = setup_test_db().await;
+    let adapter = PostgresAdapter::from_pool(pool);
+    adapter.init_schema().await.unwrap();
+    let engine = Engine::new(Box::new(adapter));
+
+    let mut owner = User::default();
+    owner.username = "owner".into();
+    owner.email = "owner@example.com".into();
+    engine.create_object(&owner).await.unwrap();
+
+    let mut tagged = Post::default();
+    tagged.set_owner(owner.id());
+    tagged.title = "Tagged Post".into();
+    tagged.tags = vec!["rust".into(), "systems".into()];
+    engine.create_object(&tagged).await.unwrap();
+
+    let mut clean = Post::default();
+    clean.set_owner(owner.id());
+    clean.title = "Clean Post".into();
+    clean.tags = vec!["web".into()];
+    engine.create_object(&clean).await.unwrap();
+
+    // NOT contains array ["rust"] → only "Clean Post"
+    let posts: Vec<Post> = engine
+        .query_objects(
+            Query::new(owner.id()).where_not_contains(&Post::FIELDS.tags, vec!["rust"]),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(posts.len(), 1);
+    assert_eq!(posts[0].title, "Clean Post");
+}
+
+#[tokio::test]
+async fn test_query_not_in() {
+    let (_resource, pool) = setup_test_db().await;
+    let adapter = PostgresAdapter::from_pool(pool);
+    adapter.init_schema().await.unwrap();
+    let engine = Engine::new(Box::new(adapter));
+
+    for name in ["alice", "bob", "charlie", "dave"] {
+        let mut u = User::default();
+        u.username = name.into();
+        u.email = format!("{}@example.com", name);
+        engine.create_object(&u).await.unwrap();
+    }
+
+    // NOT in ["alice", "bob"] → charlie and dave
+    let users: Vec<User> = engine
+        .query_objects(
+            Query::default().where_not_in(&User::FIELDS.username, vec!["alice", "bob"]),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(users.len(), 2);
+    let names: Vec<&str> = users.iter().map(|u| u.username.as_str()).collect();
+    assert!(names.contains(&"charlie"));
+    assert!(names.contains(&"dave"));
+}
+
+// ============================================================
+// sort_random
+// ============================================================
+
+#[tokio::test]
+async fn test_sort_random() {
+    let (_resource, pool) = setup_test_db().await;
+    let adapter = PostgresAdapter::from_pool(pool);
+    adapter.init_schema().await.unwrap();
+    let engine = Engine::new(Box::new(adapter));
+
+    for i in 0..5u32 {
+        let mut u = User::default();
+        u.username = format!("user{}", i);
+        u.email = format!("user{}@example.com", i);
+        engine.create_object(&u).await.unwrap();
+    }
+
+    // sort_random must not error and must return all rows
+    let users: Vec<User> = engine
+        .query_objects(Query::default().sort_random())
+        .await
+        .unwrap();
+
+    assert_eq!(users.len(), 5);
+}
+
+// ============================================================
+// fetch_objects_batch
+// ============================================================
+
+#[tokio::test]
+async fn test_fetch_objects_batch() {
+    let (_resource, pool) = setup_test_db().await;
+    let adapter = PostgresAdapter::from_pool(pool);
+    adapter.init_schema().await.unwrap();
+    let engine = Engine::new(Box::new(adapter));
+
+    let mut alice = User::default();
+    alice.username = "alice".into();
+    alice.email = "alice@example.com".into();
+    engine.create_object(&alice).await.unwrap();
+
+    let mut bob = User::default();
+    bob.username = "bob".into();
+    bob.email = "bob@example.com".into();
+    engine.create_object(&bob).await.unwrap();
+
+    let mut post = Post::default();
+    post.title = "Batch Post".into();
+    engine.create_object(&post).await.unwrap();
+
+    let records = engine
+        .fetch_objects_batch(vec![
+            (User::TYPE, vec![alice.id(), bob.id()]),
+            (Post::TYPE, vec![post.id()]),
+        ])
+        .await
+        .unwrap();
+
+    assert_eq!(records.len(), 3);
+
+    let user_count = records
+        .iter()
+        .filter(|r| r.type_name.as_ref() == User::TYPE)
+        .count();
+    let post_count = records
+        .iter()
+        .filter(|r| r.type_name.as_ref() == Post::TYPE)
+        .count();
+    assert_eq!(user_count, 2);
+    assert_eq!(post_count, 1);
+}
+
+#[tokio::test]
+async fn test_fetch_objects_batch_empty_pair_skipped() {
+    let (_resource, pool) = setup_test_db().await;
+    let adapter = PostgresAdapter::from_pool(pool);
+    adapter.init_schema().await.unwrap();
+    let engine = Engine::new(Box::new(adapter));
+
+    let mut alice = User::default();
+    alice.username = "alice".into();
+    alice.email = "alice@example.com".into();
+    engine.create_object(&alice).await.unwrap();
+
+    // Empty Post IDs list should be silently skipped
+    let records = engine
+        .fetch_objects_batch(vec![
+            (User::TYPE, vec![alice.id()]),
+            (Post::TYPE, vec![]), // skipped
+        ])
+        .await
+        .unwrap();
+
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].type_name.as_ref(), User::TYPE);
+}
+
+// ============================================================
+// Schema hash check
+// ============================================================
+
+#[tokio::test]
+async fn test_schema_hash_check() {
+    let (_resource, pool) = setup_test_db().await;
+    let adapter = PostgresAdapter::from_pool(pool);
+    adapter.init_schema().await.unwrap();
+    let engine = Engine::new(Box::new(adapter));
+
+    // First call: no stored hash → stores it, no error
+    engine.check_schema::<User>().await.unwrap();
+
+    // Second call: hash matches stored → no warn, no error
+    engine.check_schema::<User>().await.unwrap();
+}
+
+// ============================================================
+// Rename field deserialization
+// ============================================================
+
+#[tokio::test]
+async fn test_rename_field_deserialization() {
+    use ousia::{Meta, OusiaDefault, OusiaObject};
+
+    // `username` field was previously stored as "user_name" in JSON.
+    // The `#[ousia(rename = "user_name")]` attribute generates a serde alias so
+    // records written under the old key can still be deserialized.
+    #[derive(OusiaObject, OusiaDefault, Debug)]
+    #[ousia(type_name = "RenameUser", index = "username:search")]
+    pub struct RenameUser {
+        _meta: Meta,
+        #[ousia(rename = "user_name")]
+        pub username: String,
+    }
+
+    let (_resource, pool) = setup_test_db().await;
+    let adapter = PostgresAdapter::from_pool(pool.clone());
+    adapter.init_schema().await.unwrap();
+
+    // Normal round-trip with the current field name ("username")
+    let mut u = RenameUser::default();
+    u.username = "alice".into();
+    adapter
+        .insert_object(ObjectRecord::from_object(&u))
+        .await
+        .unwrap();
+
+    let fetched: RenameUser = adapter
+        .fetch_object(RenameUser::TYPE, u.id())
+        .await
+        .unwrap()
+        .unwrap()
+        .to_object()
+        .unwrap();
+    assert_eq!(fetched.username, "alice");
+
+    // Inject a record whose JSON uses the OLD key ("user_name")
+    let old_u = RenameUser::default();
+    let mut record = ObjectRecord::from_object(&old_u);
+    record.data = serde_json::json!({ "user_name": "bob" });
+
+    // Use a second adapter instance from the same pool to insert raw
+    let adapter2 = PostgresAdapter::from_pool(pool);
+    adapter2.insert_object(record).await.unwrap();
+
+    // Must still deserialize correctly via the serde alias
+    let deserialized: RenameUser = adapter2
+        .fetch_object(RenameUser::TYPE, old_u.id())
+        .await
+        .unwrap()
+        .unwrap()
+        .to_object()
+        .unwrap();
+
+    assert_eq!(deserialized.username, "bob");
 }

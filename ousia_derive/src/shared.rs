@@ -130,6 +130,39 @@ pub fn parse_ousia_attr(attr: Option<&Attribute>) -> (Option<String>, Vec<(Strin
     (type_name, indexes)
 }
 
+/// Extract rename value from #[ousia(rename = "old_name")] attribute.
+/// When set, the generated Deserialize impl also accepts the old name as an alias,
+/// allowing transparent field renames without breaking existing stored data.
+pub fn get_rename_value(field: &Field) -> Option<String> {
+    for attr in &field.attrs {
+        if !attr.path().is_ident("ousia") {
+            continue;
+        }
+
+        if let Meta::List(meta_list) = &attr.meta {
+            let result = meta_list.parse_args_with(
+                syn::punctuated::Punctuated::<Meta, syn::Token![,]>::parse_terminated,
+            );
+
+            if let Ok(nested) = result {
+                for meta in nested {
+                    if let Meta::NameValue(nv) = meta {
+                        if nv.path.is_ident("rename") {
+                            if let Expr::Lit(ExprLit {
+                                lit: Lit::Str(s), ..
+                            }) = &nv.value
+                            {
+                                return Some(s.value());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Check if a field has #[ousia(private)] attribute
 pub fn is_private_field(field: &Field) -> bool {
     field.attrs.iter().any(|attr| {

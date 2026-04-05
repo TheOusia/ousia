@@ -5,8 +5,8 @@ use quote::{format_ident, quote};
 use syn::{Data, DeriveInput, Expr, ExprLit, Field, Fields, Lit, Meta, Result, Type};
 
 use crate::shared::{
-    get_field_default_value, get_ousia_attr, import_ousia, is_meta_field, is_private_field,
-    parse_index_kinds, parse_ousia_attr,
+    get_field_default_value, get_ousia_attr, get_rename_value, import_ousia, is_meta_field,
+    is_private_field, parse_index_kinds, parse_ousia_attr,
 };
 
 const RESERVED_FIELDS: &[&str] = &["id", "owner", "type", "created_at", "updated_at"];
@@ -520,6 +520,12 @@ pub fn generate_object_impl(input: &DeriveInput) -> Result<TokenStream> {
         })
         .collect();
 
+    // Collect #[ousia(rename = "old_name")] per field for serde alias injection
+    let field_rename_aliases: Vec<Option<String>> = non_meta_fields
+        .iter()
+        .map(|f| get_rename_value(f))
+        .collect();
+
     let deserialize_field_types: Vec<_> = non_meta_fields.iter().map(|f| &f.ty).collect();
 
     let visitor_name = format_ident!("{}Visitor", ident);
@@ -632,6 +638,22 @@ pub fn generate_object_impl(input: &DeriveInput) -> Result<TokenStream> {
             .map(|f| get_field_default_value(f))
             .collect();
 
+        // Build Field enum variants, attaching #[serde(alias)] when rename is present
+        let field_enum_variants: Vec<proc_macro2::TokenStream> = deserialize_field_variants
+            .iter()
+            .zip(field_rename_aliases.iter())
+            .map(|(variant, alias)| {
+                if let Some(old_name) = alias {
+                    quote! {
+                        #[serde(alias = #old_name)]
+                        #variant,
+                    }
+                } else {
+                    quote! { #variant, }
+                }
+            })
+            .collect();
+
         // Generate match arms - handle Option<T> fields differently
         let match_arms = deserialize_field_variants
             .iter()
@@ -711,7 +733,7 @@ pub fn generate_object_impl(input: &DeriveInput) -> Result<TokenStream> {
                     #[derive(serde::Deserialize)]
                     #[serde(field_identifier, rename_all = "snake_case")]
                     enum Field {
-                        #(#deserialize_field_variants,)*
+                        #(#field_enum_variants)*
                         #[serde(other)]
                          Unknown,
                     }

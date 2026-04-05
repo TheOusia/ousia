@@ -17,9 +17,8 @@ rust-version = "1.85"
 default = ["derive", "postgres", "ledger"]
 derive = ["dep:ousia_derive"]
 
-full = ["derive", "cockroach", "postgres", "sqlite", "ledger"]
+full = ["derive", "postgres", "sqlite", "ledger"]
 
-cockroach = ["dep:sqlx"]
 postgres = ["dep:sqlx"]
 sqlite = ["dep:sqlx"]
 

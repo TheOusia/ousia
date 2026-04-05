@@ -193,9 +193,10 @@ impl PostgresAdapter {
 
         use crate::query::Comparison::*;
 
-        // GIN jsonb_path_ops @> path: hits the index for equality and array containment
+        // GIN jsonb_path_ops @> path: hits the index for equality and array containment.
+        // NOT @> variants do not use the GIN index (sequential scan) but are still correct.
         match (&qs.comparison, &filter.value) {
-            // Scalar equality for types with safe JSON value semantics
+            // Scalar equality
             (
                 Equal,
                 IndexValue::String(_)
@@ -213,12 +214,14 @@ impl PostgresAdapter {
                 *param_idx += 1;
                 return Some((cond, operator));
             }
-            // Empty array filters: skip (vacuously true/false — no useful predicate)
-            (Contains | ContainsAll, IndexValue::Array(arr)) if arr.is_empty() => {
-                return None;
+            // NotContainsAll array: NOT single @>
+            (NotContainsAll, IndexValue::Array(arr)) if !arr.is_empty() => {
+                let cond = format!("NOT ({}.index_meta @> ${})", alias, param_idx);
+                *param_idx += 1;
+                return Some((cond, operator));
             }
-            // Contains array: one @> per element, joined with OR
-            (Contains, IndexValue::Array(arr)) => {
+            // Contains array: one @> per element joined with OR
+            (Contains, IndexValue::Array(arr)) if !arr.is_empty() => {
                 let conds: Vec<String> = (0..arr.len())
                     .map(|i| format!("{}.index_meta @> ${}", alias, *param_idx + i))
                     .collect();
@@ -230,10 +233,44 @@ impl PostgresAdapter {
                 };
                 return Some((combined, operator));
             }
+            // NotContains array: NOT @> per element joined with AND (none must match)
+            (NotContains, IndexValue::Array(arr)) if !arr.is_empty() => {
+                let conds: Vec<String> = (0..arr.len())
+                    .map(|i| format!("NOT ({}.index_meta @> ${})", alias, *param_idx + i))
+                    .collect();
+                *param_idx += arr.len();
+                let combined = if conds.len() == 1 {
+                    conds.into_iter().next().unwrap()
+                } else {
+                    format!("({})", conds.join(" AND "))
+                };
+                return Some((combined, operator));
+            }
+            // NotIn array: scalar field NOT IN the supplied values
+            (NotIn, IndexValue::Array(arr)) if !arr.is_empty() => {
+                let elem_type = match arr.first() {
+                    Some(IndexValueInner::String(_)) => "text",
+                    Some(IndexValueInner::Int(_)) => "bigint",
+                    Some(IndexValueInner::Float(_)) => "double precision",
+                    None => return None,
+                };
+                let cond = format!(
+                    "NOT (({}.index_meta->>'{}')::{} = ANY(${}::{}[]))",
+                    alias, filter.field.name, elem_type, param_idx, elem_type
+                );
+                *param_idx += 1;
+                return Some((cond, operator));
+            }
+            // Empty array — skip
+            (Contains | ContainsAll | NotContains | NotContainsAll | NotIn, IndexValue::Array(arr))
+                if arr.is_empty() =>
+            {
+                return None;
+            }
             _ => {}
         }
 
-        // Extraction path: range ops, ILIKE, UUID/timestamp equality
+        // Extraction path: range ops, ILIKE / NOT ILIKE, UUID/timestamp equality
         let index_type = Self::index_type_str(&filter.value);
         let comparison = match qs.comparison {
             Equal => "=",
@@ -243,8 +280,10 @@ impl PostgresAdapter {
             GreaterThanOrEqual => ">=",
             LessThanOrEqual => "<=",
             BeginsWith => "ILIKE",
-            Contains => "ILIKE",
-            ContainsAll => "ILIKE",
+            NotBeginsWith => "NOT ILIKE",
+            Contains | ContainsAll => "ILIKE",
+            NotContains | NotContainsAll => "NOT ILIKE",
+            NotIn => return None, // only valid with array value; already handled above
         };
 
         let condition = format!(
@@ -365,6 +404,11 @@ impl PostgresAdapter {
             format!("{}.", alias)
         };
 
+        // Random sort takes precedence over any field-based sort.
+        if filters.iter().any(|f| f.mode.is_random_sort()) {
+            return "ORDER BY RANDOM()".to_string();
+        }
+
         let sort: Vec<&QueryFilter> = filters
             .iter()
             .filter(|f| f.mode.as_sort().is_some())
@@ -478,7 +522,8 @@ impl PostgresAdapter {
                         Self::index_value_to_json(&filter.value),
                     ));
                 }
-                (ContainsAll, IndexValue::Array(arr)) if !arr.is_empty() => {
+                // ContainsAll / NotContainsAll: single {"field": [e1,e2,...]} JSON bind
+                (ContainsAll | NotContainsAll, IndexValue::Array(arr)) if !arr.is_empty() => {
                     let elements: Vec<serde_json::Value> =
                         arr.iter().map(Self::inner_to_json).collect();
                     query = query.bind(Self::make_eq_json(
@@ -486,7 +531,8 @@ impl PostgresAdapter {
                         serde_json::Value::Array(elements),
                     ));
                 }
-                (Contains, IndexValue::Array(arr)) if !arr.is_empty() => {
+                // Contains / NotContains: one {"field": [element]} bind per element
+                (Contains | NotContains, IndexValue::Array(arr)) if !arr.is_empty() => {
                     for elem in arr.iter() {
                         let val = Self::inner_to_json(elem);
                         query = query.bind(Self::make_eq_json(
@@ -495,11 +541,34 @@ impl PostgresAdapter {
                         ));
                     }
                 }
-                // Extraction-based binds: range ops, ILIKE, UUID, timestamp
+                // NotIn: bind a typed PG array for = ANY($N)
+                (NotIn, IndexValue::Array(arr)) if !arr.is_empty() => {
+                    match arr.first() {
+                        Some(IndexValueInner::String(_)) => {
+                            let vals: Vec<String> = arr
+                                .iter()
+                                .filter_map(|e| e.as_string().map(String::from))
+                                .collect();
+                            query = query.bind(vals);
+                        }
+                        Some(IndexValueInner::Int(_)) => {
+                            let vals: Vec<i64> =
+                                arr.iter().filter_map(|e| e.as_int()).collect();
+                            query = query.bind(vals);
+                        }
+                        Some(IndexValueInner::Float(_)) => {
+                            let vals: Vec<f64> =
+                                arr.iter().filter_map(|e| e.as_float()).collect();
+                            query = query.bind(vals);
+                        }
+                        None => {}
+                    }
+                }
+                // Extraction-based binds: range ops, ILIKE / NOT ILIKE, UUID, timestamp
                 (_, IndexValue::String(s)) => {
                     query = match search.comparison {
-                        BeginsWith => query.bind(format!("{}%", s)),
-                        Contains => query.bind(format!("%{}%", s)),
+                        BeginsWith | NotBeginsWith => query.bind(format!("{}%", s)),
+                        Contains | NotContains => query.bind(format!("%{}%", s)),
                         _ => query.bind(s),
                     };
                 }
@@ -518,7 +587,7 @@ impl PostgresAdapter {
                 (_, IndexValue::Uuid(uid)) => {
                     query = query.bind(uid);
                 }
-                // Empty arrays and remaining array cases: condition was skipped, no bind
+                // Empty / unhandled arrays: condition was skipped, no bind needed
                 (_, IndexValue::Array(_)) => {}
             }
         }
@@ -533,7 +602,6 @@ impl PostgresAdapter {
         for filter in filters.iter().filter(|f| f.mode.as_search().is_some()) {
             let search = filter.mode.as_search().unwrap();
             match (&search.comparison, &filter.value) {
-                // GIN @> binds: {"field": value}
                 (
                     Equal,
                     IndexValue::String(_)
@@ -546,7 +614,7 @@ impl PostgresAdapter {
                         Self::index_value_to_json(&filter.value),
                     ));
                 }
-                (ContainsAll, IndexValue::Array(arr)) if !arr.is_empty() => {
+                (ContainsAll | NotContainsAll, IndexValue::Array(arr)) if !arr.is_empty() => {
                     let elements: Vec<serde_json::Value> =
                         arr.iter().map(Self::inner_to_json).collect();
                     query = query.bind(Self::make_eq_json(
@@ -554,7 +622,7 @@ impl PostgresAdapter {
                         serde_json::Value::Array(elements),
                     ));
                 }
-                (Contains, IndexValue::Array(arr)) if !arr.is_empty() => {
+                (Contains | NotContains, IndexValue::Array(arr)) if !arr.is_empty() => {
                     for elem in arr.iter() {
                         let val = Self::inner_to_json(elem);
                         query = query.bind(Self::make_eq_json(
@@ -563,11 +631,32 @@ impl PostgresAdapter {
                         ));
                     }
                 }
-                // Extraction-based binds: range ops, ILIKE, UUID, timestamp
+                (NotIn, IndexValue::Array(arr)) if !arr.is_empty() => {
+                    match arr.first() {
+                        Some(IndexValueInner::String(_)) => {
+                            let vals: Vec<String> = arr
+                                .iter()
+                                .filter_map(|e| e.as_string().map(String::from))
+                                .collect();
+                            query = query.bind(vals);
+                        }
+                        Some(IndexValueInner::Int(_)) => {
+                            let vals: Vec<i64> =
+                                arr.iter().filter_map(|e| e.as_int()).collect();
+                            query = query.bind(vals);
+                        }
+                        Some(IndexValueInner::Float(_)) => {
+                            let vals: Vec<f64> =
+                                arr.iter().filter_map(|e| e.as_float()).collect();
+                            query = query.bind(vals);
+                        }
+                        None => {}
+                    }
+                }
                 (_, IndexValue::String(s)) => {
                     query = match search.comparison {
-                        BeginsWith => query.bind(format!("{}%", s)),
-                        Contains => query.bind(format!("%{}%", s)),
+                        BeginsWith | NotBeginsWith => query.bind(format!("{}%", s)),
+                        Contains | NotContains => query.bind(format!("%{}%", s)),
                         _ => query.bind(s),
                     };
                 }

@@ -1,6 +1,3 @@
-#[cfg(feature = "cockroach")]
-pub mod cockroach;
-
 #[cfg(feature = "postgres")]
 pub mod postgres;
 
@@ -37,6 +34,8 @@ pub trait UniqueAdapter {
     async fn delete_unique_hashes(&self, hashes: Vec<String>) -> Result<(), Error>;
 
     async fn get_hashes_for_object(&self, object_id: Uuid) -> Result<Vec<String>, Error>;
+
+    async fn get_hashes_for_objects(&self, object_ids: Vec<Uuid>) -> Result<Vec<String>, Error>;
 }
 
 #[async_trait]
@@ -153,6 +152,13 @@ pub trait Adapter: UniqueAdapter + EdgeTraversal + Send + Sync + 'static {
         &self,
         type_name: &'static str,
         ids: Vec<Uuid>,
+    ) -> Result<Vec<ObjectRecord>, Error>;
+    /// Fetch objects of multiple types in a single UNION ALL query.
+    /// Each pair is `(type_name, ids)`. Empty id lists are skipped.
+    /// Returns raw `ObjectRecord`s — caller groups by `type_name` to deserialize.
+    async fn fetch_objects_batch(
+        &self,
+        pairs: Vec<(&'static str, Vec<Uuid>)>,
     ) -> Result<Vec<ObjectRecord>, Error>;
     async fn update_object(&self, record: ObjectRecord) -> Result<(), Error>;
 
@@ -324,6 +330,10 @@ pub trait Adapter: UniqueAdapter + EdgeTraversal + Send + Sync + 'static {
         to: Uuid,
         plan: Option<EdgeQuery>,
     ) -> Result<u64, Error>;
+
+    /* ---------------- SCHEMA ---------------- */
+    async fn read_schema_hash(&self, type_name: &'static str) -> Result<Option<String>, Error>;
+    async fn upsert_schema_hash(&self, type_name: &'static str, hash: &str) -> Result<(), Error>;
 
     /* ---------------- SEQUENCE ---------------- */
     async fn sequence_value(&self, sq: String) -> u64;

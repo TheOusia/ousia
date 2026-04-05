@@ -7,6 +7,9 @@ pub enum Error {
     Deserialize(String),
     Storage(String),
     UniqueConstraintViolation(String),
+    /// The stored schema version's major component differs from the current library version.
+    /// Manual reconciliation is required before the engine can be used.
+    SchemaMigrationRequired(String),
 }
 
 impl Display for Error {
@@ -18,6 +21,9 @@ impl Display for Error {
             Error::Storage(err) => write!(f, "Storage error: {}", err),
             Error::UniqueConstraintViolation(field) => {
                 write!(f, "Unique constraint violation on field: {}", field)
+            }
+            Error::SchemaMigrationRequired(msg) => {
+                write!(f, "Schema migration required: {}", msg)
             }
         }
     }
@@ -31,5 +37,9 @@ impl Error {
             Error::UniqueConstraintViolation(_) => true,
             _ => false,
         }
+    }
+
+    pub fn is_schema_migration_required(&self) -> bool {
+        matches!(self, Error::SchemaMigrationRequired(_))
     }
 }

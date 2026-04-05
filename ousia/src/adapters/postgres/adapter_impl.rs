@@ -95,6 +95,39 @@ impl Adapter for PostgresAdapter {
             .collect()
     }
 
+    async fn fetch_objects_batch(
+        &self,
+        pairs: Vec<(&'static str, Vec<Uuid>)>,
+    ) -> Result<Vec<ObjectRecord>, Error> {
+        let pairs: Vec<_> = pairs.into_iter().filter(|(_, ids)| !ids.is_empty()).collect();
+        if pairs.is_empty() {
+            return Ok(vec![]);
+        }
+        let mut branches = Vec::with_capacity(pairs.len());
+        let mut param_idx = 1usize;
+        for _ in &pairs {
+            branches.push(format!(
+                "SELECT o.id, o.type, o.owner, o.created_at, o.updated_at, o.data \
+                 FROM objects o WHERE o.type = ${} AND o.id = ANY(${})",
+                param_idx,
+                param_idx + 1
+            ));
+            param_idx += 2;
+        }
+        let sql = branches.join("\nUNION ALL\n");
+        let mut query = sqlx::query(&sql);
+        for (type_name, ids) in &pairs {
+            query = query.bind(*type_name).bind(ids.clone());
+        }
+        let rows = query
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|err| Error::Storage(err.to_string()))?;
+        rows.into_iter()
+            .map(Self::map_row_to_object_record_slim)
+            .collect()
+    }
+
     async fn update_object(&self, record: ObjectRecord) -> Result<(), Error> {
         sqlx::query(
             r#"
@@ -192,12 +225,32 @@ impl Adapter for PostgresAdapter {
         type_name: &'static str,
         owner: Uuid,
     ) -> Result<u64, Error> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| Error::Storage(e.to_string()))?;
+
+        sqlx::query(
+            "DELETE FROM unique_constraints \
+             WHERE id IN (SELECT id FROM objects WHERE type = $1 AND owner = $2)",
+        )
+        .bind(type_name)
+        .bind(owner)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| Error::Storage(e.to_string()))?;
+
         let result = sqlx::query("DELETE FROM objects WHERE type = $1 AND owner = $2")
             .bind(type_name)
             .bind(owner)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await
-            .map_err(|err| Error::Storage(err.to_string()))?;
+            .map_err(|e| Error::Storage(e.to_string()))?;
+
+        tx.commit()
+            .await
+            .map_err(|e| Error::Storage(e.to_string()))?;
 
         Ok(result.rows_affected())
     }
@@ -787,30 +840,47 @@ impl Adapter for PostgresAdapter {
         }
     }
 
+    async fn read_schema_hash(&self, type_name: &'static str) -> Result<Option<String>, Error> {
+        self.read_schema_hash_impl(type_name).await
+    }
+
+    async fn upsert_schema_hash(&self, type_name: &'static str, hash: &str) -> Result<(), Error> {
+        self.upsert_schema_hash_impl(type_name, hash).await
+    }
+
     async fn sequence_value(&self, sq: String) -> u64 {
-        let val: i64 =
-            sqlx::query_scalar("SELECT COALESCE((SELECT value FROM sequences WHERE name = $1), 1)")
-                .bind(&sq)
-                .fetch_one(&self.pool)
-                .await
-                .expect("Failed to fetch sequence value");
+        // Ensure the native PG sequence exists, then read its last_value.
+        // `last_value` equals the start value (1) before any nextval call,
+        // matching the old table-based semantics.
+        self.ensure_sequence(&sq)
+            .await
+            .expect("ensure_sequence failed");
+        let sql = format!(
+            "SELECT last_value FROM {}",
+            super::pg_quote_ident(&sq)
+        );
+        let val: i64 = sqlx::query_scalar(&sql)
+            .fetch_one(&self.pool)
+            .await
+            .expect("Failed to fetch sequence last_value");
         val as u64
     }
 
     async fn sequence_next_value(&self, sq: String) -> u64 {
-        // Upsert: insert with value=2 on first call, otherwise increment.
-        // This matches SQLite semantics: first sequence_value = 1, first next = 2.
-        let next_val: i64 = sqlx::query_scalar(
-            r#"
-            INSERT INTO sequences (name, value) VALUES ($1, 2)
-            ON CONFLICT (name) DO UPDATE SET value = sequences.value + 1
-            RETURNING value
-            "#,
-        )
-        .bind(&sq)
-        .fetch_one(&self.pool)
-        .await
-        .expect("Failed to fetch next sequence value");
+        // Ensure the native PG sequence exists, then atomically increment.
+        // CACHE 100 means each backend pre-allocates 100 values — no row-level
+        // lock contention at high concurrency.
+        self.ensure_sequence(&sq)
+            .await
+            .expect("ensure_sequence failed");
+        let sql = format!(
+            "SELECT nextval({})",
+            super::pg_quote_ident_as_literal(&sq)
+        );
+        let next_val: i64 = sqlx::query_scalar(&sql)
+            .fetch_one(&self.pool)
+            .await
+            .expect("Failed to call nextval");
         next_val as u64
     }
 

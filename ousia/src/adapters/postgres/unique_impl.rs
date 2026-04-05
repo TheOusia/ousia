@@ -99,4 +99,22 @@ impl UniqueAdapter for PostgresAdapter {
             .map(|row| row.try_get("key").unwrap())
             .collect())
     }
+
+    async fn get_hashes_for_objects(&self, object_ids: Vec<Uuid>) -> Result<Vec<String>, Error> {
+        if object_ids.is_empty() {
+            return Ok(vec![]);
+        }
+        let rows = sqlx::query(
+            "SELECT key FROM unique_constraints WHERE id = ANY($1)",
+        )
+        .bind(&object_ids)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| Error::Storage(e.to_string()))?;
+
+        Ok(rows
+            .into_iter()
+            .map(|row| row.try_get("key").unwrap())
+            .collect())
+    }
 }

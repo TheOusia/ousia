@@ -242,6 +242,10 @@ pub struct QueryFilter {
 pub enum QueryMode {
     Search(QuerySearch),
     Sort(QuerySort),
+    /// Produces `ORDER BY RANDOM()`. Field and value on the filter are ignored.
+    /// Note: requires a full table scan — only use on small result sets or with a prior
+    /// LIMIT applied via a subquery in your application.
+    SortRandom,
 }
 
 impl QueryMode {
@@ -257,6 +261,10 @@ impl QueryMode {
             QueryMode::Sort(sort) => Some(sort),
             _ => None,
         }
+    }
+
+    pub fn is_random_sort(&self) -> bool {
+        matches!(self, QueryMode::SortRandom)
     }
 
     pub fn search(comp: Comparison, op: Option<Operator>) -> Self {
@@ -282,6 +290,11 @@ impl QueryMode {
     pub fn sort_default() -> Self {
         QueryMode::Sort(QuerySort { ascending: true })
     }
+
+    /// Random sort — produces `ORDER BY RANDOM()`.
+    pub fn sort_random() -> Self {
+        QueryMode::SortRandom
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -298,14 +311,19 @@ pub struct QuerySort {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Comparison {
     Equal,
+    NotEqual,
     BeginsWith,
+    NotBeginsWith,
     Contains,
+    NotContains,
     ContainsAll,
+    NotContainsAll,
+    /// Scalar field is NOT IN the supplied array of values.
+    NotIn,
     GreaterThan,
     LessThan,
     GreaterThanOrEqual,
     LessThanOrEqual,
-    NotEqual,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -314,6 +332,13 @@ pub enum Operator {
     And,
     Or,
 }
+
+/// Sentinel `IndexField` used with `QueryFilter::random_sort()`.
+/// The field name and kinds are irrelevant — the sort produces `ORDER BY RANDOM()`.
+pub static SORT_RANDOM_FIELD: IndexField = IndexField {
+    name: "__random__",
+    kinds: &[],
+};
 
 /// Pagination cursor
 #[derive(Debug, Clone, Copy)]
@@ -324,5 +349,17 @@ pub struct Cursor {
 impl Into<Cursor> for Uuid {
     fn into(self) -> Cursor {
         Cursor { last_id: self }
+    }
+}
+
+impl QueryFilter {
+    /// Returns a filter that produces `ORDER BY RANDOM()`.
+    /// Field and value are irrelevant and will not be bound.
+    pub fn random_sort() -> Self {
+        Self {
+            field: &SORT_RANDOM_FIELD,
+            value: IndexValue::Bool(false),
+            mode: QueryMode::SortRandom,
+        }
     }
 }
