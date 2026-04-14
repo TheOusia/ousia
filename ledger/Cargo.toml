@@ -29,3 +29,4 @@ sqlx = { version = "0.8", features = [
     "chrono",
 ]}
 blake3 = "1.8.3"
+toml = { version = "0.8", features = ["parse"] }
