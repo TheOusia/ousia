@@ -87,6 +87,12 @@ pub mod adapters;
 pub mod edge;
 pub mod error;
 pub mod object;
+
+/// Used by `#[derive(OusiaObject)]` generated code — not part of the public API.
+#[doc(hidden)]
+pub fn __msgpack_serialize<T: serde::Serialize>(v: &T) -> Vec<u8> {
+    rmp_serde::to_vec_named(v).expect("msgpack serialization failed")
+}
 pub mod query;
 
 #[cfg(feature = "ledger")]

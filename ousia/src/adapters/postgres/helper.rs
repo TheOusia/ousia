@@ -29,7 +29,7 @@ impl PostgresAdapter {
         let updated_at = row
             .try_get("updated_at")
             .map_err(|e| Error::Deserialize(e.to_string()))?;
-        let data: serde_json::Value = row
+        let data: Vec<u8> = row
             .try_get("data")
             .map_err(|e| Error::Deserialize(e.to_string()))?;
         Ok(ObjectRecord {
@@ -53,7 +53,7 @@ impl PostgresAdapter {
         let to = row
             .try_get::<Uuid, _>("to")
             .map_err(|e| Error::Deserialize(e.to_string()))?;
-        let data: serde_json::Value = row
+        let data: Vec<u8> = row
             .try_get("data")
             .map_err(|e| Error::Deserialize(e.to_string()))?;
         Ok(EdgeRecord {
@@ -73,9 +73,7 @@ impl PostgresAdapter {
             type_name: std::borrow::Cow::Owned(row.try_get::<String, _>("edge_type").map_err(de)?),
             from: row.try_get::<Uuid, _>("edge_from").map_err(de)?,
             to: row.try_get::<Uuid, _>("edge_to").map_err(de)?,
-            data: row
-                .try_get::<serde_json::Value, _>("edge_data")
-                .map_err(de)?,
+            data: row.try_get::<Vec<u8>, _>("edge_data").map_err(de)?,
             index_meta: serde_json::Value::Null,
         };
         let obj = ObjectRecord {
@@ -84,9 +82,7 @@ impl PostgresAdapter {
             owner: row.try_get::<Uuid, _>("obj_owner").map_err(de)?,
             created_at: row.try_get("obj_created_at").map_err(de)?,
             updated_at: row.try_get("obj_updated_at").map_err(de)?,
-            data: row
-                .try_get::<serde_json::Value, _>("obj_data")
-                .map_err(de)?,
+            data: row.try_get::<Vec<u8>, _>("obj_data").map_err(de)?,
             index_meta: serde_json::Value::Null,
         };
         Ok((edge, obj))

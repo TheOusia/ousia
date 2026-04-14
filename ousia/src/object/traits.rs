@@ -7,10 +7,10 @@ use crate::{object::Meta, query::IndexMeta};
 /// by the Ousia engine for persistence operations.
 #[doc(hidden)]
 pub trait ObjectInternal {
-    /// Serialize ALL fields including private ones for database persistence.
-    /// This bypasses the view system and includes data that should not be
-    /// exposed through normal serialization.
-    fn __serialize_internal(&self) -> serde_json::Value;
+    /// Serialize ALL fields including private ones for database persistence
+    /// using MessagePack (rmp-serde). This bypasses the view system and
+    /// includes data that should not be exposed through normal serialization.
+    fn __serialize_internal(&self) -> Vec<u8>;
 }
 
 /// Provides unique fields for an object.

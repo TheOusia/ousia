@@ -80,7 +80,7 @@ impl SqliteAdapter {
                 owner BLOB NOT NULL,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
-                data TEXT NOT NULL,
+                data BLOB NOT NULL,
                 index_meta TEXT NOT NULL
             )
             "#,
@@ -122,7 +122,7 @@ impl SqliteAdapter {
                 "from" BLOB NOT NULL,
                 "to" BLOB NOT NULL,
                 type TEXT NOT NULL,
-                data TEXT NOT NULL,
+                data BLOB NOT NULL,
                 index_meta TEXT NOT NULL,
                 PRIMARY KEY ("from", "to", type)
             )
@@ -219,12 +219,9 @@ impl SqliteAdapter {
 
 impl SqliteAdapter {
     fn map_row_to_object_record_slim(row: SqliteRow) -> Result<ObjectRecord, Error> {
-        let data_str: String = row
+        let data: Vec<u8> = row
             .try_get("data")
             .map_err(|e| Error::Deserialize(e.to_string()))?;
-
-        let data_json: serde_json::Value =
-            serde_json::from_str(&data_str).map_err(|e| Error::Deserialize(e.to_string()))?;
 
         let type_name = row
             .try_get::<String, _>("type")
@@ -260,18 +257,15 @@ impl SqliteAdapter {
             owner,
             created_at,
             updated_at,
-            data: data_json,
+            data,
             index_meta: serde_json::Value::Null,
         })
     }
 
     fn map_row_to_edge_record(row: SqliteRow) -> Result<EdgeRecord, Error> {
-        let data_str: String = row
+        let data: Vec<u8> = row
             .try_get("data")
             .map_err(|e| Error::Deserialize(e.to_string()))?;
-
-        let data_json: serde_json::Value =
-            serde_json::from_str(&data_str).map_err(|e| Error::Deserialize(e.to_string()))?;
 
         let type_name = row
             .try_get::<String, _>("type")
@@ -289,7 +283,7 @@ impl SqliteAdapter {
             type_name: std::borrow::Cow::Owned(type_name),
             from,
             to,
-            data: data_json,
+            data,
             index_meta: serde_json::Value::Null,
         })
     }
@@ -297,8 +291,8 @@ impl SqliteAdapter {
         let de = |e: sqlx::Error| Error::Deserialize(e.to_string());
         let ds = |e: serde_json::Error| Error::Deserialize(e.to_string());
 
-        let edge_data_str: String = row.try_get("edge_data").map_err(de)?;
-        let obj_data_str: String = row.try_get("obj_data").map_err(de)?;
+        let edge_data: Vec<u8> = row.try_get("edge_data").map_err(de)?;
+        let obj_data: Vec<u8> = row.try_get("obj_data").map_err(de)?;
 
         let obj_created_str: String = row.try_get("obj_created_at").map_err(de)?;
         let obj_updated_str: String = row.try_get("obj_updated_at").map_err(de)?;
@@ -307,7 +301,7 @@ impl SqliteAdapter {
             type_name: std::borrow::Cow::Owned(row.try_get::<String, _>("edge_type").map_err(de)?),
             from: row.try_get::<Uuid, _>("edge_from").map_err(de)?,
             to: row.try_get::<Uuid, _>("edge_to").map_err(de)?,
-            data: serde_json::from_str(&edge_data_str).map_err(ds)?,
+            data: edge_data,
             index_meta: serde_json::Value::Null,
         };
         let obj = ObjectRecord {
@@ -320,9 +314,10 @@ impl SqliteAdapter {
             updated_at: chrono::DateTime::parse_from_rfc3339(&obj_updated_str)
                 .map_err(|e| Error::Deserialize(e.to_string()))?
                 .with_timezone(&chrono::Utc),
-            data: serde_json::from_str(&obj_data_str).map_err(ds)?,
+            data: obj_data,
             index_meta: serde_json::Value::Null,
         };
+        let _ = ds; // suppress unused warning — kept for future use
         Ok((edge, obj))
     }
 
@@ -942,7 +937,7 @@ impl Adapter for SqliteAdapter {
         .bind(owner)
         .bind(created_at.to_rfc3339())
         .bind(updated_at.to_rfc3339())
-        .bind(serde_json::to_string(&data).map_err(|e| Error::Serialize(e.to_string()))?)
+        .bind(data.as_slice())
         .bind(serde_json::to_string(&index_meta).map_err(|e| Error::Serialize(e.to_string()))?)
         .execute(&self.pool)
         .await
@@ -1050,7 +1045,7 @@ impl Adapter for SqliteAdapter {
             "#,
         )
         .bind(record.updated_at.to_rfc3339())
-        .bind(serde_json::to_string(&record.data).map_err(|e| Error::Serialize(e.to_string()))?)
+        .bind(record.data.as_slice())
         .bind(
             serde_json::to_string(&record.index_meta)
                 .map_err(|e| Error::Serialize(e.to_string()))?,
@@ -1505,7 +1500,6 @@ impl Adapter for SqliteAdapter {
             data,
             index_meta,
         } = record;
-        let data_str = serde_json::to_string(&data).map_err(|e| Error::Serialize(e.to_string()))?;
         let index_meta_str =
             serde_json::to_string(&index_meta).map_err(|e| Error::Serialize(e.to_string()))?;
 
@@ -1520,9 +1514,9 @@ impl Adapter for SqliteAdapter {
         .bind(from)
         .bind(to)
         .bind(type_name.as_ref())
-        .bind(&data_str)
+        .bind(data.as_slice())
         .bind(&index_meta_str)
-        .bind(&data_str)
+        .bind(data.as_slice())
         .bind(&index_meta_str)
         .execute(&self.pool)
         .await
@@ -1549,7 +1543,7 @@ impl Adapter for SqliteAdapter {
         WHERE "from" = ? AND type = ? AND "to" = ?
         "#,
         )
-        .bind(serde_json::to_string(&data).map_err(|e| Error::Serialize(e.to_string()))?)
+        .bind(data.as_slice())
         .bind(to.unwrap_or(old_to))
         .bind(from)
         .bind(type_name.as_ref())

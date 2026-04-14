@@ -10,7 +10,9 @@ pub struct ObjectRecord {
     pub id: Uuid,
     pub type_name: Cow<'static, str>,
     pub owner: Uuid,
-    pub data: serde_json::Value,
+    /// MessagePack-encoded object payload (all fields, including private ones).
+    pub data: Vec<u8>,
+    /// JSONB-encoded index metadata — stays as serde_json::Value for GIN indexing.
     pub index_meta: serde_json::Value,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -18,7 +20,7 @@ pub struct ObjectRecord {
 
 impl ObjectRecord {
     pub fn to_object<T: Object>(self) -> Result<T, Error> {
-        let mut val = serde_json::from_value::<T>(self.data)
+        let mut val = rmp_serde::from_slice::<T>(&self.data)
             .map_err(|e| Error::Deserialize(e.to_string()))?;
         let meta = val.meta_mut();
         meta.id = self.id;
@@ -66,13 +68,15 @@ pub struct EdgeRecord {
     pub type_name: Cow<'static, str>,
     pub from: Uuid,
     pub to: Uuid,
-    pub data: serde_json::Value,
+    /// MessagePack-encoded edge payload.
+    pub data: Vec<u8>,
+    /// JSONB-encoded index metadata.
     pub index_meta: serde_json::Value,
 }
 
 impl EdgeRecord {
     pub fn to_edge<E: Edge>(self) -> Result<E, Error> {
-        let mut val = serde_json::from_value::<E>(self.data)
+        let mut val = rmp_serde::from_slice::<E>(&self.data)
             .map_err(|e| Error::Deserialize(e.to_string()))?;
         let meta = val.meta_mut();
         meta.to = self.to;
@@ -86,7 +90,7 @@ impl EdgeRecord {
             to: meta.to,
             from: meta.from,
             type_name: Cow::Borrowed(edge.type_name()),
-            data: serde_json::to_value(edge).expect("Failed to serialize edge"),
+            data: rmp_serde::to_vec_named(edge).expect("Failed to msgpack serialize edge"),
             index_meta: serde_json::to_value(edge.index_meta())
                 .expect("Failed to serialize index meta"),
         }
