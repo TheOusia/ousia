@@ -26,6 +26,8 @@ where
     T: PostgresLedgerAdapter + Send + Sync,
 {
     async fn init_ledger_schema(&self) -> Result<(), MoneyError> {
+        let asset_codes = load_asset_codes();
+
         let mut tx = self
             .get_pool()
             .begin()
@@ -48,18 +50,20 @@ where
         .await
         .map_err(|e| MoneyError::Storage(e.to_string()))?;
 
-        // ValueObjects table
+        // ValueObjects table — partitioned by asset_code
         sqlx::query(
             r#"
             CREATE TABLE IF NOT EXISTS ledger_value_objects (
-                id UUID PRIMARY KEY,
-                asset UUID NOT NULL REFERENCES ledger_assets(id),
-                owner UUID NOT NULL,
-                amount BIGINT NOT NULL CHECK (amount > 0),
-                state TEXT NOT NULL CHECK (state IN ('alive', 'reserved', 'burned')),
+                id          UUID        NOT NULL,
+                asset       UUID        NOT NULL REFERENCES ledger_assets(id),
+                asset_code  TEXT        NOT NULL,
+                owner       UUID        NOT NULL,
+                amount      BIGINT      NOT NULL CHECK (amount > 0),
+                state       TEXT        NOT NULL CHECK (state IN ('alive', 'reserved', 'burned')),
                 reserved_for UUID,
-                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-            )
+                created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                PRIMARY KEY (asset_code, id)
+            ) PARTITION BY LIST (asset_code)
             "#,
         )
         .execute(&mut *tx)
@@ -108,6 +112,27 @@ where
             ON ledger_value_objects(asset, owner, created_at ASC)
             WHERE state != 'burned'
             "#,
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| MoneyError::Storage(e.to_string()))?;
+
+        // Secondary index on id alone — allows efficient UPDATE/DELETE by id
+        // across all partitions without knowing asset_code (burn operations).
+        sqlx::query(
+            r#"
+            CREATE INDEX IF NOT EXISTS idx_value_objects_id
+            ON ledger_value_objects(id)
+            "#,
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| MoneyError::Storage(e.to_string()))?;
+
+        // Default catch-all partition
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS ledger_value_objects_default \
+             PARTITION OF ledger_value_objects DEFAULT",
         )
         .execute(&mut *tx)
         .await
@@ -185,6 +210,9 @@ where
         .execute(&mut *tx)
         .await
         .map_err(|e| MoneyError::Storage(e.to_string()))?;
+
+        create_vo_typed_partitions(&mut tx, &asset_codes).await?;
+        drop_orphaned_vo_partitions(&mut tx, &asset_codes).await?;
 
         tx.commit()
             .await
@@ -319,12 +347,13 @@ where
         for fragment in fragments {
             sqlx::query(
                 r#"
-                INSERT INTO ledger_value_objects (id, asset, owner, amount, state, reserved_for, created_at)
-                VALUES ($1, $2, $3, $4, 'alive', NULL, NOW())
+                INSERT INTO ledger_value_objects (id, asset, asset_code, owner, amount, state, reserved_for, created_at)
+                VALUES ($1, $2, $3, $4, $5, 'alive', NULL, NOW())
                 "#,
             )
             .bind(fragment.id)
             .bind(fragment.asset)
+            .bind(&asset.code)
             .bind(fragment.owner)
             .bind(fragment.amount as i64)
             .execute(&mut **tx)
@@ -356,12 +385,13 @@ where
         for fragment in fragments {
             sqlx::query(
                 r#"
-                INSERT INTO ledger_value_objects (id, asset, owner, amount, state, reserved_for, created_at)
-                VALUES ($1, $2, $3, $4, 'reserved', $5, NOW())
+                INSERT INTO ledger_value_objects (id, asset, asset_code, owner, amount, state, reserved_for, created_at)
+                VALUES ($1, $2, $3, $4, $5, 'reserved', $6, NOW())
                 "#,
             )
             .bind(fragment.id)
             .bind(fragment.asset)
+            .bind(&asset.code)
             .bind(fragment.owner)
             .bind(fragment.amount as i64)
             .bind(authority)
@@ -1092,4 +1122,117 @@ where
 
         Ok(transactions)
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Partition management helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Read asset codes from the file pointed to by `LEDGER_CONFIG`.
+/// Returns an empty vec (only the `_default` partition) if the env var is
+/// absent, the file is missing, or the TOML is malformed.
+fn load_asset_codes() -> Vec<String> {
+    let path = match std::env::var("LEDGER_CONFIG") {
+        Ok(p) if !p.is_empty() => p,
+        _ => {
+            eprintln!(
+                "[ledger warn] LEDGER_CONFIG not set — \
+                 only _default partition will be created for ledger_value_objects"
+            );
+            return vec![];
+        }
+    };
+
+    let content = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("[ledger warn] Could not read LEDGER_CONFIG at {path}: {e}");
+            return vec![];
+        }
+    };
+
+    #[derive(serde::Deserialize)]
+    struct Config {
+        asset_codes: Vec<String>,
+    }
+
+    match toml::from_str::<Config>(&content) {
+        Ok(cfg) => cfg.asset_codes,
+        Err(e) => {
+            eprintln!("[ledger warn] Failed to parse LEDGER_CONFIG: {e}");
+            vec![]
+        }
+    }
+}
+
+fn ledger_partition_segment(code: &str) -> String {
+    code.to_lowercase().replace('-', "_").replace(' ', "_")
+}
+
+async fn create_vo_typed_partitions(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    asset_codes: &[String],
+) -> Result<(), MoneyError> {
+    for code in asset_codes {
+        let safe = ledger_partition_segment(code);
+        let sql = format!(
+            "CREATE TABLE IF NOT EXISTS ledger_value_objects_{safe} \
+             PARTITION OF ledger_value_objects FOR VALUES IN ('{code}')"
+        );
+        sqlx::query(&sql)
+            .execute(&mut **tx)
+            .await
+            .map_err(|e| MoneyError::Storage(e.to_string()))?;
+    }
+    Ok(())
+}
+
+async fn drop_orphaned_vo_partitions(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    asset_codes: &[String],
+) -> Result<(), MoneyError> {
+    let known: Vec<String> = asset_codes
+        .iter()
+        .map(|c| format!("ledger_value_objects_{}", ledger_partition_segment(c)))
+        .chain(std::iter::once(
+            "ledger_value_objects_default".to_string(),
+        ))
+        .collect();
+
+    let partitions: Vec<String> = sqlx::query_scalar(
+        "SELECT c.relname::text \
+         FROM pg_class c \
+         JOIN pg_inherits i ON i.inhrelid = c.oid \
+         JOIN pg_class p ON p.oid = i.inhparent \
+         WHERE p.relname = 'ledger_value_objects'",
+    )
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(|e| MoneyError::Storage(e.to_string()))?;
+
+    for partition in partitions {
+        if known.contains(&partition) {
+            continue;
+        }
+        let count: i64 =
+            sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {} LIMIT 1", partition))
+                .fetch_one(&mut **tx)
+                .await
+                .map_err(|e| MoneyError::Storage(e.to_string()))?;
+
+        if count == 0 {
+            sqlx::query(&format!("DROP TABLE IF EXISTS {}", partition))
+                .execute(&mut **tx)
+                .await
+                .map_err(|e| MoneyError::Storage(e.to_string()))?;
+        } else {
+            eprintln!(
+                "[ledger warn] Orphaned partition '{}' has {} row(s) — skipping drop. \
+                 Detach or migrate manually.",
+                partition, count
+            );
+        }
+    }
+
+    Ok(())
 }
