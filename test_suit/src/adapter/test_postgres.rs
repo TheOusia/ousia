@@ -2314,10 +2314,15 @@ async fn test_rename_field_deserialization() {
         .unwrap();
     assert_eq!(fetched.username, "alice");
 
-    // Inject a record whose JSON uses the OLD key ("user_name")
+    // Inject a record whose msgpack uses the OLD field key ("user_name")
     let old_u = RenameUser::default();
     let mut record = ObjectRecord::from_object(&old_u);
-    record.data = serde_json::json!({ "user_name": "bob" });
+    record.data = {
+        use serde::Serialize;
+        #[derive(Serialize)]
+        struct OldFormat<'a> { user_name: &'a str }
+        rmp_serde::to_vec_named(&OldFormat { user_name: "bob" }).unwrap()
+    };
 
     // Use a second adapter instance from the same pool to insert raw
     let adapter2 = PostgresAdapter::from_pool(pool);
