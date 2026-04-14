@@ -223,18 +223,33 @@ fn generate_view_code(
     (view_struct, view_method)
 }
 
-/// Generate the internal serialization implementation
-fn generate_internal_serialize(non_meta_fields: &[&Field]) -> proc_macro2::TokenStream {
-    let field_serializations = non_meta_fields.iter().map(|f| {
-        let field_name = f.ident.as_ref().unwrap();
-        let field_name_str = field_name.to_string();
-        quote! { #field_name_str: self.#field_name }
-    });
+/// Generate the internal serialization implementation (MessagePack via rmp-serde).
+/// Produces a temporary named struct containing all fields (including private ones)
+/// and serializes it directly — no JSON intermediate step.
+fn generate_internal_serialize(
+    non_meta_fields: &[&Field],
+    ousia: &proc_macro2::TokenStream,
+) -> proc_macro2::TokenStream {
+    let field_idents: Vec<_> = non_meta_fields
+        .iter()
+        .map(|f| f.ident.as_ref().unwrap())
+        .collect();
+    let field_name_strs: Vec<_> = field_idents.iter().map(|i| i.to_string()).collect();
+    let field_types: Vec<_> = non_meta_fields.iter().map(|f| &f.ty).collect();
 
     quote! {
-        serde_json::json!({
-            #(#field_serializations),*
-        })
+        {
+            #[derive(serde::Serialize)]
+            struct __InternalPayload<'__ousia_lifetime> {
+                #(
+                    #[serde(rename = #field_name_strs)]
+                    #field_idents: &'__ousia_lifetime #field_types,
+                )*
+            }
+            #ousia::__msgpack_serialize(&__InternalPayload {
+                #(#field_idents: &self.#field_idents,)*
+            })
+        }
     }
 }
 
@@ -488,7 +503,7 @@ pub fn generate_object_impl(input: &DeriveInput) -> Result<TokenStream> {
     let field_count = non_private_count + default_meta_fields.len();
 
     // --- generate internal serialization ---
-    let internal_serialize_body = generate_internal_serialize(&non_meta_fields);
+    let internal_serialize_body = generate_internal_serialize(&non_meta_fields, &ousia);
 
     // --- generate Deserialize implementation ---
     let deserialize_field_names: Vec<_> = non_meta_fields
@@ -802,7 +817,7 @@ pub fn generate_object_impl(input: &DeriveInput) -> Result<TokenStream> {
         }
 
         impl #ousia::object::ObjectInternal for #ident {
-            fn __serialize_internal(&self) -> serde_json::Value {
+            fn __serialize_internal(&self) -> Vec<u8> {
                 #internal_serialize_body
             }
         }

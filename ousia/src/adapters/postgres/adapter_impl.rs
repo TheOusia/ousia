@@ -34,7 +34,7 @@ impl Adapter for PostgresAdapter {
         .bind(owner)
         .bind(created_at)
         .bind(updated_at)
-        .bind(data)
+        .bind(data.as_slice())
         .bind(index_meta)
         .fetch_optional(&self.pool)
         .await
@@ -138,7 +138,7 @@ impl Adapter for PostgresAdapter {
         )
         .bind(record.id)
         .bind(record.updated_at)
-        .bind(record.data)
+        .bind(record.data.as_slice())
         .bind(record.index_meta)
         .execute(&self.pool)
         .await
@@ -570,7 +570,7 @@ impl Adapter for PostgresAdapter {
         .bind(from)
         .bind(to)
         .bind(type_name.as_ref())
-        .bind(data)
+        .bind(data.as_slice())
         .bind(index_meta)
         .execute(&self.pool)
         .await
@@ -597,7 +597,7 @@ impl Adapter for PostgresAdapter {
         WHERE "from" = $3 AND type = $4 AND "to" = $5
         "#,
         )
-        .bind(data)
+        .bind(data.as_slice())
         .bind(to.unwrap_or(old_to))
         .bind(from)
         .bind(type_name.as_ref())

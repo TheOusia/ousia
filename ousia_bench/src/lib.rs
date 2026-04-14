@@ -387,9 +387,20 @@ pub async fn seed_raw_follows_bulk(pool: &PgPool, user_ids: &[uuid::Uuid], follo
 /// Bypasses the engine (no `unique_constraints` entry, no sequence); suitable only for
 /// read-only benchmark fixtures.
 pub async fn seed_ousia_users_bulk(pool: &PgPool, n: usize) -> Vec<uuid::Uuid> {
+    use serde::Serialize;
+
+    #[derive(Serialize)]
+    struct UserPayload<'a> {
+        username: &'a str,
+        email: &'a str,
+        display_name: &'a str,
+        score: i64,
+        active: bool,
+    }
+
     let nil = uuid::Uuid::nil();
     let mut ids: Vec<uuid::Uuid> = Vec::with_capacity(n);
-    let mut data_strs: Vec<String> = Vec::with_capacity(n);
+    let mut data_bytes: Vec<Vec<u8>> = Vec::with_capacity(n);
     let mut index_meta_strs: Vec<String> = Vec::with_capacity(n);
 
     for i in 0..n {
@@ -401,15 +412,15 @@ pub async fn seed_ousia_users_bulk(pool: &PgPool, n: usize) -> Vec<uuid::Uuid> {
         let active = i % 3 != 0;
 
         ids.push(id);
-        data_strs.push(
-            serde_json::json!({
-                "username": username,
-                "email": email,
-                "display_name": display_name,
-                "score": score,
-                "active": active,
+        data_bytes.push(
+            rmp_serde::to_vec_named(&UserPayload {
+                username: &username,
+                email: &email,
+                display_name: &display_name,
+                score,
+                active,
             })
-            .to_string(),
+            .unwrap(),
         );
         index_meta_strs.push(
             serde_json::json!({
@@ -422,15 +433,17 @@ pub async fn seed_ousia_users_bulk(pool: &PgPool, n: usize) -> Vec<uuid::Uuid> {
         );
     }
 
+    let data_refs: Vec<&[u8]> = data_bytes.iter().map(|b| b.as_slice()).collect();
+
     sqlx::query(
         "INSERT INTO public.objects (id, type, owner, created_at, updated_at, data, index_meta) \
-         SELECT t.id, $2, $3::uuid, now(), now(), t.data::jsonb, t.im::jsonb \
-         FROM unnest($1::uuid[], $4::text[], $5::text[]) AS t(id, data, im)",
+         SELECT t.id, $2, $3::uuid, now(), now(), t.data, t.im::jsonb \
+         FROM unnest($1::uuid[], $4::bytea[], $5::text[]) AS t(id, data, im)",
     )
     .bind(&ids)
     .bind("BenchUser")
     .bind(nil)
-    .bind(&data_strs)
+    .bind(&data_refs)
     .bind(&index_meta_strs)
     .execute(pool)
     .await
@@ -443,11 +456,16 @@ pub async fn seed_ousia_users_bulk(pool: &PgPool, n: usize) -> Vec<uuid::Uuid> {
 ///
 /// Each user follows the next `follows_per` users (circular). Bypasses the engine.
 pub async fn seed_ousia_edges_bulk(pool: &PgPool, user_ids: &[uuid::Uuid], follows_per: usize) {
+    use serde::Serialize;
+
+    #[derive(Serialize)]
+    struct EdgePayload { weight: i64 }
+
     let n = user_ids.len();
     let cap = n * follows_per;
     let mut froms: Vec<uuid::Uuid> = Vec::with_capacity(cap);
     let mut tos: Vec<uuid::Uuid> = Vec::with_capacity(cap);
-    let mut data_strs: Vec<String> = Vec::with_capacity(cap);
+    let mut data_bytes: Vec<Vec<u8>> = Vec::with_capacity(cap);
     let mut index_meta_strs: Vec<String> = Vec::with_capacity(cap);
 
     for i in 0..n {
@@ -455,21 +473,23 @@ pub async fn seed_ousia_edges_bulk(pool: &PgPool, user_ids: &[uuid::Uuid], follo
             let weight = j as i64;
             froms.push(user_ids[i]);
             tos.push(user_ids[(i + j) % n]);
-            data_strs.push(serde_json::json!({ "weight": weight }).to_string());
+            data_bytes.push(rmp_serde::to_vec_named(&EdgePayload { weight }).unwrap());
             index_meta_strs.push(serde_json::json!({ "weight": weight }).to_string());
         }
     }
 
+    let data_refs: Vec<&[u8]> = data_bytes.iter().map(|b| b.as_slice()).collect();
+
     sqlx::query(
         r#"INSERT INTO public.edges ("from", "to", type, data, index_meta)
-           SELECT t.f, t.t, $3, t.data::jsonb, t.im::jsonb
-           FROM unnest($1::uuid[], $2::uuid[], $4::text[], $5::text[]) AS t(f, t, data, im)
+           SELECT t.f, t.t, $3, t.data, t.im::jsonb
+           FROM unnest($1::uuid[], $2::uuid[], $4::bytea[], $5::text[]) AS t(f, t, data, im)
            ON CONFLICT DO NOTHING"#,
     )
     .bind(&froms)
     .bind(&tos)
     .bind("BenchFollow")
-    .bind(&data_strs)
+    .bind(&data_refs)
     .bind(&index_meta_strs)
     .execute(pool)
     .await

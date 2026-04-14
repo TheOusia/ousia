@@ -208,7 +208,7 @@ impl PostgresAdapter {
                 owner      UUID        NOT NULL,
                 created_at TIMESTAMPTZ NOT NULL,
                 updated_at TIMESTAMPTZ NOT NULL,
-                data       JSONB       NOT NULL DEFAULT '{}'::jsonb,
+                data       BYTEA       NOT NULL DEFAULT ''::bytea,
                 index_meta JSONB       NOT NULL DEFAULT '{}'::jsonb,
                 PRIMARY KEY (type, id)
             ) PARTITION BY LIST (type)
@@ -286,7 +286,7 @@ impl PostgresAdapter {
                 "to"       UUID        NOT NULL,
                 type       TEXT        NOT NULL,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-                data       JSONB       NOT NULL DEFAULT '{}'::jsonb,
+                data       BYTEA       NOT NULL DEFAULT ''::bytea,
                 index_meta JSONB       NOT NULL DEFAULT '{}'::jsonb
             ) PARTITION BY LIST (type)
             "#,
