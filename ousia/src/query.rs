@@ -300,6 +300,7 @@ pub enum Comparison {
     Equal,
     BeginsWith,
     Contains,
+    NotContains,
     ContainsAll,
     GreaterThan,
     LessThan,

@@ -429,6 +429,7 @@ impl CockroachAdapter {
 
         // INVERTED INDEX @> path
         match (&qs.comparison, &filter.value) {
+            // ── Equality: scalar types safe for @> ───────────────────────────────────
             (
                 Equal,
                 IndexValue::String(_)
@@ -440,15 +441,34 @@ impl CockroachAdapter {
                 *param_idx += 1;
                 return Some((cond, operator));
             }
+
+            // ── NotEqual: scalar — NOT @> ────────────────────────────────────────────
+            (
+                NotEqual,
+                IndexValue::String(_)
+                | IndexValue::Int(_)
+                | IndexValue::Float(_)
+                | IndexValue::Bool(_),
+            ) => {
+                let cond = format!("NOT ({}.index_meta @> ${})", alias, param_idx);
+                *param_idx += 1;
+                return Some((cond, operator));
+            }
+
+            // ── ContainsAll: full array must be present in one @> ────────────────────
             (ContainsAll, IndexValue::Array(arr)) if !arr.is_empty() => {
                 let cond = format!("{}.index_meta @> ${}", alias, param_idx);
                 *param_idx += 1;
                 return Some((cond, operator));
             }
-            (Contains | ContainsAll, IndexValue::Array(arr)) if arr.is_empty() => {
-                return None;
+
+            // ── Contains / NotContains / ContainsAll on a single string ──────────────
+            (Contains | NotContains | BeginsWith, IndexValue::String(_)) => {
+                // Falls through to the ILIKE extraction path below.
             }
-            (Contains, IndexValue::Array(arr)) => {
+
+            // ── Contains: each element tested independently, joined with OR ──────────
+            (Contains, IndexValue::Array(arr)) if !arr.is_empty() => {
                 let conds: Vec<String> = (0..arr.len())
                     .map(|i| format!("{}.index_meta @> ${}", alias, *param_idx + i))
                     .collect();
@@ -460,6 +480,27 @@ impl CockroachAdapter {
                 };
                 return Some((combined, operator));
             }
+
+            // ── NotContains: none of the array elements may be present ───────────────
+            (NotContains, IndexValue::Array(arr)) if !arr.is_empty() => {
+                let conds: Vec<String> = (0..arr.len())
+                    .map(|i| format!("NOT ({}.index_meta @> ${})", alias, *param_idx + i))
+                    .collect();
+                *param_idx += arr.len();
+                let combined = if conds.len() == 1 {
+                    conds.into_iter().next().unwrap()
+                } else {
+                    format!("({})", conds.join(" AND "))
+                };
+                return Some((combined, operator));
+            }
+
+            // ── Empty array: no useful predicate ─────────────────────────────────────
+            (Contains | ContainsAll | NotContains, IndexValue::Array(arr)) if arr.is_empty() => {
+                return None;
+            }
+
+            // ── Everything else falls through to the extraction path ─────────────────
             _ => {}
         }
 
@@ -475,6 +516,7 @@ impl CockroachAdapter {
             BeginsWith => "ILIKE",
             Contains => "ILIKE",
             ContainsAll => "ILIKE",
+            NotContains => "NOT ILIKE",
         };
 
         let condition = format!(

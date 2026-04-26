@@ -23,17 +23,12 @@ pub struct Post {
     pub tags: Vec<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, PartialEq, Default)]
 pub enum PostStatus {
+    #[default]
     Draft,
     Published,
     Archived,
-}
-
-impl Default for PostStatus {
-    fn default() -> Self {
-        PostStatus::Draft
-    }
 }
 
 // Implement ToIndexValue for custom enum

@@ -196,6 +196,20 @@ impl Query {
         consumed_self
     }
 
+    /// Not Contains
+    pub fn where_not_contains(self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
+        let mut consumed_self = self;
+        consumed_self.filters.push(QueryFilter {
+            field,
+            value: value.to_index_value(),
+            mode: QueryMode::Search(QuerySearch {
+                comparison: Comparison::NotContains,
+                operator: Operator::default(),
+            }),
+        });
+        consumed_self
+    }
+
     // Begins With (for strings)
     pub fn where_begins_with(self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
         let mut consumed_self = self;
@@ -330,6 +344,20 @@ impl Query {
             value: value.to_index_value(),
             mode: QueryMode::Search(QuerySearch {
                 comparison: Comparison::ContainsAll,
+                operator: Operator::Or,
+            }),
+        });
+        consumed_self
+    }
+
+    /// Not Contains
+    pub fn or_not_contains(self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
+        let mut consumed_self = self;
+        consumed_self.filters.push(QueryFilter {
+            field,
+            value: value.to_index_value(),
+            mode: QueryMode::Search(QuerySearch {
+                comparison: Comparison::NotContains,
                 operator: Operator::Or,
             }),
         });

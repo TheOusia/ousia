@@ -195,7 +195,7 @@ impl PostgresAdapter {
 
         // GIN jsonb_path_ops @> path: hits the index for equality and array containment
         match (&qs.comparison, &filter.value) {
-            // Scalar equality for types with safe JSON value semantics
+            // ── Equality: scalar types safe for @> ───────────────────────────────────
             (
                 Equal,
                 IndexValue::String(_)
@@ -207,18 +207,34 @@ impl PostgresAdapter {
                 *param_idx += 1;
                 return Some((cond, operator));
             }
-            // ContainsAll array: single @> with the full array
+
+            // ── NotEqual: scalar — NOT @> ────────────────────────────────────────────
+            (
+                NotEqual,
+                IndexValue::String(_)
+                | IndexValue::Int(_)
+                | IndexValue::Float(_)
+                | IndexValue::Bool(_),
+            ) => {
+                let cond = format!("NOT ({}.index_meta @> ${})", alias, param_idx);
+                *param_idx += 1;
+                return Some((cond, operator));
+            }
+
+            // ── ContainsAll: full array must be present in one @> ────────────────────
             (ContainsAll, IndexValue::Array(arr)) if !arr.is_empty() => {
                 let cond = format!("{}.index_meta @> ${}", alias, param_idx);
                 *param_idx += 1;
                 return Some((cond, operator));
             }
-            // Empty array filters: skip (vacuously true/false — no useful predicate)
-            (Contains | ContainsAll, IndexValue::Array(arr)) if arr.is_empty() => {
-                return None;
+
+            // ── Contains / NotContains / ContainsAll on a single string ──────────────
+            (Contains | NotContains | BeginsWith, IndexValue::String(_)) => {
+                // Falls through to the ILIKE extraction path below.
             }
-            // Contains array: one @> per element, joined with OR
-            (Contains, IndexValue::Array(arr)) => {
+
+            // ── Contains: each element tested independently, joined with OR ──────────
+            (Contains, IndexValue::Array(arr)) if !arr.is_empty() => {
                 let conds: Vec<String> = (0..arr.len())
                     .map(|i| format!("{}.index_meta @> ${}", alias, *param_idx + i))
                     .collect();
@@ -230,6 +246,27 @@ impl PostgresAdapter {
                 };
                 return Some((combined, operator));
             }
+
+            // ── NotContains: none of the array elements may be present ───────────────
+            (NotContains, IndexValue::Array(arr)) if !arr.is_empty() => {
+                let conds: Vec<String> = (0..arr.len())
+                    .map(|i| format!("NOT ({}.index_meta @> ${})", alias, *param_idx + i))
+                    .collect();
+                *param_idx += arr.len();
+                let combined = if conds.len() == 1 {
+                    conds.into_iter().next().unwrap()
+                } else {
+                    format!("({})", conds.join(" AND "))
+                };
+                return Some((combined, operator));
+            }
+
+            // ── Empty array: no useful predicate ─────────────────────────────────────
+            (Contains | ContainsAll | NotContains, IndexValue::Array(arr)) if arr.is_empty() => {
+                return None;
+            }
+
+            // ── Everything else falls through to the extraction path ─────────────────
             _ => {}
         }
 
@@ -245,6 +282,7 @@ impl PostgresAdapter {
             BeginsWith => "ILIKE",
             Contains => "ILIKE",
             ContainsAll => "ILIKE",
+            NotContains => "NOT ILIKE",
         };
 
         let condition = format!(

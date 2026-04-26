@@ -391,6 +391,13 @@ impl SqliteAdapter {
                     "LIKE"
                 }
             }
+            crate::query::Comparison::NotContains => {
+                if matches!(filter.value, IndexValue::Array(_)) {
+                    "ARRAY_NOT_CONTAINS"
+                } else {
+                    "NOT LIKE"
+                }
+            }
         };
         let col = format!(
             "json_extract({}.index_meta, '$.{}')",
@@ -399,6 +406,11 @@ impl SqliteAdapter {
         let condition = if comparison == "ARRAY_CONTAINS" {
             format!(
                 "EXISTS (SELECT 1 FROM json_each({col}) WHERE value IN (SELECT value FROM json_each(?)))",
+                col = col
+            )
+        } else if comparison == "ARRAY_NOT_CONTAINS" {
+            format!(
+                "NOT EXISTS (SELECT 1 FROM json_each({col}) WHERE value IN (SELECT value FROM json_each(?)))",
                 col = col
             )
         } else {
