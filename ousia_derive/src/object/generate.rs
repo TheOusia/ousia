@@ -626,8 +626,8 @@ pub fn generate_object_impl(input: &DeriveInput) -> Result<TokenStream> {
             .map(|f| should_use_default(&f.ty))
             .collect();
 
-        // Extract explicit default values from #[ousia(default = "value")]
-        let field_default_values: Vec<Option<String>> = non_meta_fields
+        // Extract explicit default values from #[ousia(default = <expr>)]
+        let field_default_values: Vec<Option<proc_macro2::TokenStream>> = non_meta_fields
             .iter()
             .map(|f| get_field_default_value(f))
             .collect();
@@ -681,11 +681,7 @@ pub fn generate_object_impl(input: &DeriveInput) -> Result<TokenStream> {
                     quote! {
                         #ident: #ident.unwrap_or(None)
                     }
-                } else if let Some(default_expr) = default_value {
-                    // For fields with explicit default value: parse and use the expression
-                    let default_tokens: proc_macro2::TokenStream = default_expr
-                        .parse()
-                        .expect("Failed to parse default value expression");
+                } else if let Some(default_tokens) = default_value {
                     quote! {
                         #ident: #ident.unwrap_or_else(|| #default_tokens)
                     }

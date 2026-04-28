@@ -1,6 +1,6 @@
 use proc_macro_crate::{FoundCrate, crate_name};
 use quote::quote;
-use syn::{Attribute, Expr, ExprLit, Field, Lit, Meta};
+use syn::{Attribute, Expr, ExprArray, ExprLit, Field, Lit, Meta};
 
 pub fn import_ousia() -> proc_macro2::TokenStream {
     // This finds the ousia crate in the user's dependencies
@@ -46,8 +46,11 @@ pub fn is_meta_field(field: &Field) -> bool {
     })
 }
 
-/// Extract default value from #[ousia(default = "value")] attribute
-pub fn get_field_default_value(field: &Field) -> Option<String> {
+/// Extract default value from `#[ousia(default = <expr>)]`.
+///
+/// Supports: string literals (→ `String::from(...)`), bool/int/float literals, and array
+/// expressions (→ `vec![...]`).
+pub fn get_field_default_value(field: &Field) -> Option<proc_macro2::TokenStream> {
     for attr in &field.attrs {
         if !attr.path().is_ident("ousia") {
             continue;
@@ -62,12 +65,7 @@ pub fn get_field_default_value(field: &Field) -> Option<String> {
                 for meta in nested {
                     if let Meta::NameValue(nv) = meta {
                         if nv.path.is_ident("default") {
-                            if let Expr::Lit(ExprLit {
-                                lit: Lit::Str(s), ..
-                            }) = &nv.value
-                            {
-                                return Some(s.value());
-                            }
+                            return Some(default_expr_to_tokens(&nv.value));
                         }
                     }
                 }
@@ -76,6 +74,28 @@ pub fn get_field_default_value(field: &Field) -> Option<String> {
     }
     None
 }
+
+fn default_expr_to_tokens(expr: &Expr) -> proc_macro2::TokenStream {
+    match expr {
+        Expr::Lit(ExprLit { lit: Lit::Str(s), .. }) => {
+            let val = s.value();
+            quote! { String::from(#val) }
+        }
+        Expr::Lit(ExprLit { lit: Lit::Bool(b), .. }) => {
+            let val = b.value;
+            quote! { #val }
+        }
+        Expr::Lit(ExprLit { lit: Lit::Int(i), .. }) => quote! { #i },
+        Expr::Lit(ExprLit { lit: Lit::Float(f), .. }) => quote! { #f },
+        Expr::Array(ExprArray { elems, .. }) => {
+            let items: Vec<proc_macro2::TokenStream> =
+                elems.iter().map(default_expr_to_tokens).collect();
+            quote! { vec![#(#items),*] }
+        }
+        other => quote! { #other },
+    }
+}
+
 
 /// Parse type and index list from `#[ousia(...)]` using updated syn API
 pub fn parse_ousia_attr(attr: Option<&Attribute>) -> (Option<String>, Vec<(String, String)>) {

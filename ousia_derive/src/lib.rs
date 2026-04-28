@@ -6,7 +6,7 @@ use proc_macro::TokenStream;
 use quote::quote;
 use syn::{Data, DeriveInput, Fields, parse_macro_input};
 
-use crate::shared::{import_ousia, is_meta_field};
+use crate::shared::{get_field_default_value, import_ousia, is_meta_field};
 
 #[proc_macro_derive(OusiaObject, attributes(ousia, ousia_meta))]
 pub fn derive_ousia_object(input: TokenStream) -> TokenStream {
@@ -67,6 +67,8 @@ pub fn derive_ousia_default(input: TokenStream) -> TokenStream {
             } else {
                 quote! { #name: #ousia::object::meta::Meta::default() }
             }
+        } else if let Some(default_tokens) = get_field_default_value(f) {
+            quote! { #name: #default_tokens }
         } else {
             quote! { #name: Default::default() }
         }
