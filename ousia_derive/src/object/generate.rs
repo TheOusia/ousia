@@ -632,16 +632,32 @@ pub fn generate_object_impl(input: &DeriveInput) -> Result<TokenStream> {
             .map(|f| get_field_default_value(f))
             .collect();
 
-        // Generate match arms - handle Option<T> fields differently
+        // Variable declarations: fields with an explicit default use Option<Option<T>> so
+        // that a JSON `null` value (Some(None)) is distinguished from "not seen" (None) and
+        // treated the same as missing — letting the default kick in either way.
+        let var_decls: Vec<proc_macro2::TokenStream> = deserialize_field_idents
+            .iter()
+            .zip(deserialize_field_types.iter())
+            .zip(field_default_values.iter())
+            .map(|((ident, ty), default_value)| {
+                if default_value.is_some() {
+                    quote! { let mut #ident: Option<Option<#ty>> = None; }
+                } else {
+                    quote! { let mut #ident: Option<#ty> = None; }
+                }
+            })
+            .collect();
+
+        // Generate match arms - handle Option<T> and explicit-default fields differently
         let match_arms = deserialize_field_variants
             .iter()
             .zip(deserialize_field_idents.iter())
             .zip(deserialize_field_names.iter())
+            .zip(deserialize_field_types.iter())
             .zip(field_is_optional.iter())
-            .map(|(((variant, ident), name), is_opt)| {
+            .zip(field_default_values.iter())
+            .map(|(((((variant, ident), name), field_type), is_opt), default_value)| {
                 if *is_opt {
-                    // For Option<T>: don't wrap in Some, just assign directly
-                    // map.next_value()? returns Option<T>, store as Some(Option<T>)
                     quote! {
                         Field::#variant => {
                             if #ident.is_some() {
@@ -650,8 +666,18 @@ pub fn generate_object_impl(input: &DeriveInput) -> Result<TokenStream> {
                             #ident = Some(map.next_value()?);
                         }
                     }
+                } else if default_value.is_some() {
+                    // Deserialize as Option<T> so a JSON `null` becomes None rather than
+                    // a type error; the field init will apply the explicit default.
+                    quote! {
+                        Field::#variant => {
+                            if #ident.is_some() {
+                                return Err(serde::de::Error::duplicate_field(#name));
+                            }
+                            #ident = Some(map.next_value::<Option<#field_type>>()?);
+                        }
+                    }
                 } else {
-                    // For T: wrap in Some as before
                     quote! {
                         Field::#variant => {
                             if #ident.is_some() {
@@ -663,9 +689,9 @@ pub fn generate_object_impl(input: &DeriveInput) -> Result<TokenStream> {
                 }
             });
 
-        // Generate field initialization - now handles four cases:
+        // Generate field initialization - handles four cases:
         // 1. Option<T> fields
-        // 2. Fields with explicit #[ousia(default = "value")]
+        // 2. Fields with explicit #[ousia(default = "value")] — variable is Option<Option<T>>
         // 3. Fields that implement Default
         // 4. Required fields
         let field_inits = deserialize_field_idents
@@ -676,14 +702,14 @@ pub fn generate_object_impl(input: &DeriveInput) -> Result<TokenStream> {
             .zip(field_default_values.iter())
             .map(|((((ident, name), is_opt), uses_default), default_value)| {
                 if *is_opt {
-                    // For Option<T>: unwrap outer Option, inner Option becomes the field value
-                    // Variable is Option<Option<T>>, we want Option<T>
+                    // Variable is Option<Option<T>>, unwrap to Option<T>
                     quote! {
                         #ident: #ident.unwrap_or(None)
                     }
                 } else if let Some(default_tokens) = default_value {
+                    // Variable is Option<Option<T>>; flatten collapses null → None
                     quote! {
-                        #ident: #ident.unwrap_or_else(|| #default_tokens)
+                        #ident: #ident.flatten().unwrap_or_else(|| #default_tokens)
                     }
                 } else if *uses_default {
                     // For types that implement Default: use Default::default() if missing
@@ -691,7 +717,7 @@ pub fn generate_object_impl(input: &DeriveInput) -> Result<TokenStream> {
                         #ident: #ident.unwrap_or_else(|| Default::default())
                     }
                 } else {
-                    // For required fields: error if missing
+                    // Required field: error if missing
                     quote! {
                         #ident: #ident.ok_or_else(|| serde::de::Error::missing_field(#name))?
                     }
@@ -725,9 +751,7 @@ pub fn generate_object_impl(input: &DeriveInput) -> Result<TokenStream> {
                         where
                             V: serde::de::MapAccess<'de>,
                         {
-                            #(
-                                let mut #deserialize_field_idents: Option<#deserialize_field_types> = None;
-                            )*
+                            #(#var_decls)*
 
                             while let Some(key) = map.next_key()? {
                                 match key {

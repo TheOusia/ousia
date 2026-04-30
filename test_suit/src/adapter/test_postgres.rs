@@ -2020,3 +2020,59 @@ async fn test_fetch_owned_object() {
     let none: Option<Post> = engine.fetch_owned_object(bob.id()).await.unwrap();
     assert!(none.is_none());
 }
+
+#[tokio::test]
+async fn test_default_field() {
+    let (_resource, pool) = setup_test_db().await;
+    let adapter = PostgresAdapter::from_pool(pool);
+    adapter.init_schema().await.unwrap();
+    let engine = Engine::new(Box::new(adapter));
+
+    let mut alice = User::default();
+    alice.username = "alice".into();
+    alice.email = "alice@example.com".into();
+    engine.create_object(&alice).await.unwrap();
+
+    let mut post = Post::default();
+    post.set_owner(alice.id());
+    post.title = "Alice's Post".into();
+    engine.create_object(&post).await.unwrap();
+
+    let found: Option<Post> = engine.fetch_owned_object(alice.id()).await.unwrap();
+    assert!(found.is_some());
+    assert_eq!(found.unwrap().title, "Alice's Post");
+
+    let found_new: Option<PostNew> = engine.fetch_owned_object(alice.id()).await.unwrap();
+    assert!(found_new.is_some());
+    assert_eq!(found_new.unwrap().rating, 10);
+}
+
+#[tokio::test]
+async fn test_default_field_has_value() {
+    let (_resource, pool) = setup_test_db().await;
+    let adapter = PostgresAdapter::from_pool(pool);
+    adapter.init_schema().await.unwrap();
+    let engine = Engine::new(Box::new(adapter));
+
+    let mut alice = User::default();
+    alice.username = "alice".into();
+    alice.email = "alice@example.com".into();
+    engine.create_object(&alice).await.unwrap();
+
+    let mut post = PostNew::default();
+    post.set_owner(alice.id());
+    post.title = "Alice's Post".into();
+    // post.rating = 13;
+    engine.create_object(&post).await.unwrap();
+
+    let found: Option<PostNew> = engine.fetch_owned_object(alice.id()).await.unwrap();
+    assert!(found.is_some());
+    assert_eq!(found.unwrap().rating, 10);
+
+    post.rating = 13;
+    engine.update_object(&mut post).await.unwrap();
+
+    let updated: Option<PostNew> = engine.fetch_owned_object(alice.id()).await.unwrap();
+    assert!(updated.is_some());
+    assert_eq!(updated.unwrap().rating, 13);
+}

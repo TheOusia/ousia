@@ -23,6 +23,25 @@ pub struct Post {
     pub tags: Vec<String>,
 }
 
+#[derive(OusiaObject, OusiaDefault, Debug)]
+#[ousia(
+    type_name = "Post",
+    index = "title:search+sort",
+    index = "status:search",
+    index = "tags:search"
+)]
+pub struct PostNew {
+    _meta: Meta,
+
+    pub title: String,
+    pub content: String,
+    pub status: PostStatus,
+    pub published_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub tags: Vec<String>,
+    #[ousia(default = 10)]
+    pub rating: u32,
+}
+
 #[derive(Debug, Serialize, Deserialize, PartialEq, Default)]
 pub enum PostStatus {
     #[default]
