@@ -505,7 +505,7 @@ impl PostgresAdapter {
             match (&search.comparison, &filter.value) {
                 // GIN @> binds: {"field": value}
                 (
-                    Equal,
+                    Equal | NotEqual,
                     IndexValue::String(_)
                     | IndexValue::Int(_)
                     | IndexValue::Float(_)
@@ -524,7 +524,7 @@ impl PostgresAdapter {
                         serde_json::Value::Array(elements),
                     ));
                 }
-                (Contains, IndexValue::Array(arr)) if !arr.is_empty() => {
+                (Contains | NotContains, IndexValue::Array(arr)) if !arr.is_empty() => {
                     for elem in arr.iter() {
                         let val = Self::inner_to_json(elem);
                         query = query.bind(Self::make_eq_json(
@@ -537,7 +537,7 @@ impl PostgresAdapter {
                 (_, IndexValue::String(s)) => {
                     query = match search.comparison {
                         BeginsWith => query.bind(format!("{}%", s)),
-                        Contains => query.bind(format!("%{}%", s)),
+                        Contains | NotContains => query.bind(format!("%{}%", s)),
                         _ => query.bind(s),
                     };
                 }
@@ -573,7 +573,7 @@ impl PostgresAdapter {
             match (&search.comparison, &filter.value) {
                 // GIN @> binds: {"field": value}
                 (
-                    Equal,
+                    Equal | NotEqual,
                     IndexValue::String(_)
                     | IndexValue::Int(_)
                     | IndexValue::Float(_)
@@ -592,7 +592,7 @@ impl PostgresAdapter {
                         serde_json::Value::Array(elements),
                     ));
                 }
-                (Contains, IndexValue::Array(arr)) if !arr.is_empty() => {
+                (Contains | NotContains, IndexValue::Array(arr)) if !arr.is_empty() => {
                     for elem in arr.iter() {
                         let val = Self::inner_to_json(elem);
                         query = query.bind(Self::make_eq_json(
@@ -605,7 +605,7 @@ impl PostgresAdapter {
                 (_, IndexValue::String(s)) => {
                     query = match search.comparison {
                         BeginsWith => query.bind(format!("{}%", s)),
-                        Contains => query.bind(format!("%{}%", s)),
+                        Contains | NotContains => query.bind(format!("%{}%", s)),
                         _ => query.bind(s),
                     };
                 }

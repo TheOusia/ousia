@@ -584,7 +584,7 @@ impl SqliteAdapter {
                     use crate::query::Comparison::*;
                     match filter.mode.as_search().unwrap().comparison {
                         BeginsWith => query.bind(format!("{}%", s)),
-                        Contains => query.bind(format!("%{}%", s)),
+                        Contains | NotContains => query.bind(format!("%{}%", s)),
                         _ => query.bind(s),
                     }
                 }
@@ -645,7 +645,7 @@ impl SqliteAdapter {
                     use crate::query::Comparison::*;
                     match filter.mode.as_search().unwrap().comparison {
                         BeginsWith => query.bind(format!("{}%", s)),
-                        Contains => query.bind(format!("%{}%", s)),
+                        Contains | NotContains => query.bind(format!("%{}%", s)),
                         _ => query.bind(s),
                     }
                 }

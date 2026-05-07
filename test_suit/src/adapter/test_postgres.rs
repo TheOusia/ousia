@@ -152,103 +152,143 @@ async fn test_adapter_update() {
 async fn test_adapter_query() {
     let (_resource, pool) = setup_test_db().await;
     let adapter = PostgresAdapter::from_pool(pool);
+    adapter.init_schema().await.unwrap();
 
-    if let Err(err) = adapter.init_schema().await {
-        panic!("Error: {:#?}", err);
-    }
+    // Users (all system-owned): alice=50, bob=100, charlie=150
+    let mut alice = User::default();
+    alice.username = "alice".to_string();
+    alice.email = "alice@example.com".to_string();
+    alice.balance = Wallet { inner: 50 };
+    adapter.insert_object(ObjectRecord::from_object(&alice)).await.unwrap();
 
-    let mut user = User::default();
-    user.username = "test_user".to_string();
-    user.email = "test@gmail.com".to_string();
-    if let Err(err) = adapter
-        .insert_object(ObjectRecord::from_object(&user))
-        .await
-    {
-        panic!("Error: {:#?}", err);
-    }
-    let user_result = adapter
-        .fetch_object(user.type_name(), user.id())
-        .await
-        .unwrap();
-    assert!(user_result.is_some());
+    let mut bob = User::default();
+    bob.username = "bob".to_string();
+    bob.email = "bob@example.com".to_string();
+    bob.balance = Wallet { inner: 100 };
+    adapter.insert_object(ObjectRecord::from_object(&bob)).await.unwrap();
 
-    let users = adapter
-        .query_objects(
-            User::TYPE,
-            Query::default().where_eq(&User::FIELDS.email, "efedua.bell@gmail.com"),
-        )
-        .await
-        .unwrap();
-    assert_eq!(users.len(), 0);
+    let mut charlie = User::default();
+    charlie.username = "charlie".to_string();
+    charlie.email = "charlie@example.com".to_string();
+    charlie.balance = Wallet { inner: 150 };
+    adapter.insert_object(ObjectRecord::from_object(&charlie)).await.unwrap();
 
-    let users = adapter
-        .query_objects(
-            User::TYPE,
-            Query::default().where_eq(&User::FIELDS.email, "test@gmail.com"),
-        )
-        .await
-        .unwrap();
-    assert_eq!(users.len(), 1);
+    // Posts owned by alice
+    // post_a: "Alpha post",     Draft,     ["rust","orm"]
+    // post_b: "Beta showcase",  Published, ["rust","async"]
+    // post_c: "Gamma post review", Draft,  ["async","testing"]
+    // post_d: "Delta summary",  Archived,  ["testing"]
+    let owner_id = alice.id();
 
-    let mut post_1 = Post::default();
-    post_1.set_owner(user.id());
+    let mut post_a = Post::default();
+    post_a.set_owner(owner_id);
+    post_a.title = "Alpha post".to_string();
+    post_a.status = PostStatus::Draft;
+    post_a.tags = vec!["rust".to_string(), "orm".to_string()];
+    adapter.insert_object(ObjectRecord::from_object(&post_a)).await.unwrap();
 
-    adapter
-        .insert_object(ObjectRecord::from_object(&post_1))
-        .await
-        .unwrap();
+    let mut post_b = Post::default();
+    post_b.set_owner(owner_id);
+    post_b.title = "Beta showcase".to_string();
+    post_b.status = PostStatus::Published;
+    post_b.tags = vec!["rust".to_string(), "async".to_string()];
+    adapter.insert_object(ObjectRecord::from_object(&post_b)).await.unwrap();
 
-    post_1.status = PostStatus::Published;
-    adapter
-        .update_object(ObjectRecord::from_object(&post_1))
-        .await
-        .unwrap();
+    let mut post_c = Post::default();
+    post_c.set_owner(owner_id);
+    post_c.title = "Gamma post review".to_string();
+    post_c.status = PostStatus::Draft;
+    post_c.tags = vec!["async".to_string(), "testing".to_string()];
+    adapter.insert_object(ObjectRecord::from_object(&post_c)).await.unwrap();
 
-    let _post: Post = adapter
-        .fetch_object(post_1.type_name(), post_1.id())
-        .await
-        .unwrap()
-        .expect("Post not found")
-        .to_object()
-        .unwrap();
-    assert_eq!(_post.id(), post_1.id());
+    let mut post_d = Post::default();
+    post_d.set_owner(owner_id);
+    post_d.title = "Delta summary".to_string();
+    post_d.status = PostStatus::Archived;
+    post_d.tags = vec!["testing".to_string()];
+    adapter.insert_object(ObjectRecord::from_object(&post_d)).await.unwrap();
 
-    let posts = adapter
-        .query_objects(
-            Post::TYPE,
-            Query::new(user.id()).where_eq(&Post::FIELDS.status, PostStatus::Published),
-        )
-        .await
-        .unwrap();
-    assert_eq!(posts.len(), 1);
+    // ── String: Equal / NotEqual ──────────────────────────────────────────────
+    let result = adapter
+        .query_objects(Post::TYPE, Query::new(owner_id).where_eq(&Post::FIELDS.title, "Alpha post"))
+        .await.unwrap();
+    assert_eq!(result.len(), 1, "where_eq(title): {:#?}", result);
 
-    let posts = adapter
-        .query_objects(
-            Post::TYPE,
-            Query::new(user.id()).where_eq(&Post::FIELDS.status, PostStatus::Draft),
-        )
-        .await
-        .unwrap();
-    assert_eq!(posts.len(), 0);
+    let result = adapter
+        .query_objects(Post::TYPE, Query::new(owner_id).where_ne(&Post::FIELDS.title, "Alpha post"))
+        .await.unwrap();
+    assert_eq!(result.len(), 3, "where_ne(title): {:#?}", result);
 
-    let mut post_with_tag = Post::default();
-    post_with_tag.set_owner(user.id());
-    post_with_tag.tags = vec!["tag1".to_string(), "tag2".to_string()];
+    // ── String: BeginsWith ────────────────────────────────────────────────────
+    let result = adapter
+        .query_objects(Post::TYPE, Query::new(owner_id).where_begins_with(&Post::FIELDS.title, "Alpha"))
+        .await.unwrap();
+    assert_eq!(result.len(), 1, "where_begins_with(title): {:#?}", result);
 
-    adapter
-        .insert_object(ObjectRecord::from_object(&post_with_tag))
-        .await
-        .unwrap();
+    // ── String: Contains / NotContains ────────────────────────────────────────
+    // "post" is in "Alpha post" and "Gamma post review"
+    let result = adapter
+        .query_objects(Post::TYPE, Query::new(owner_id).where_contains(&Post::FIELDS.title, "post"))
+        .await.unwrap();
+    assert_eq!(result.len(), 2, "where_contains(title): {:#?}", result);
 
-    // adapter.insert_object()
-    let posts = adapter
-        .query_objects(
-            Post::TYPE,
-            Query::new(user.id()).where_contains(&Post::FIELDS.tags, vec!["tag1"]),
-        )
-        .await
-        .unwrap();
-    assert_eq!(posts.len(), 1);
+    let result = adapter
+        .query_objects(Post::TYPE, Query::new(owner_id).where_not_contains(&Post::FIELDS.title, "post"))
+        .await.unwrap();
+    assert_eq!(result.len(), 2, "where_not_contains(title): {:#?}", result);
+
+    // ── Enum: Equal / NotEqual ────────────────────────────────────────────────
+    let result = adapter
+        .query_objects(Post::TYPE, Query::new(owner_id).where_eq(&Post::FIELDS.status, PostStatus::Published))
+        .await.unwrap();
+    assert_eq!(result.len(), 1, "where_eq(status=Published): {:#?}", result);
+
+    // Draft×2 + Published×1 + Archived×1 → NotEqual(Draft) = 2
+    let result = adapter
+        .query_objects(Post::TYPE, Query::new(owner_id).where_ne(&Post::FIELDS.status, PostStatus::Draft))
+        .await.unwrap();
+    assert_eq!(result.len(), 2, "where_ne(status=Draft): {:#?}", result);
+
+    // ── Array: Contains / ContainsAll / NotContains ───────────────────────────
+    // "rust" in post_a(["rust","orm"]) and post_b(["rust","async"])
+    let result = adapter
+        .query_objects(Post::TYPE, Query::new(owner_id).where_contains(&Post::FIELDS.tags, vec!["rust"]))
+        .await.unwrap();
+    assert_eq!(result.len(), 2, "where_contains(tags=[rust]): {:#?}", result);
+
+    // ContainsAll with single element behaves the same as Contains
+    let result = adapter
+        .query_objects(Post::TYPE, Query::new(owner_id).where_contains_all(&Post::FIELDS.tags, vec!["rust"]))
+        .await.unwrap();
+    assert_eq!(result.len(), 2, "where_contains_all(tags=[rust]): {:#?}", result);
+
+    // "testing" in post_c and post_d → not_contains gives post_a and post_b = 2
+    let result = adapter
+        .query_objects(Post::TYPE, Query::new(owner_id).where_not_contains(&Post::FIELDS.tags, vec!["testing"]))
+        .await.unwrap();
+    assert_eq!(result.len(), 2, "where_not_contains(tags=[testing]): {:#?}", result);
+
+    // ── Int: GreaterThan / GreaterThanOrEqual / LessThan / LessThanOrEqual ────
+    // alice=50, bob=100, charlie=150 (3 system-owned users total)
+    let result = adapter
+        .query_objects(User::TYPE, Query::default().where_gt(&User::FIELDS.balance, Wallet { inner: 50 }))
+        .await.unwrap();
+    assert_eq!(result.len(), 2, "where_gt(balance>50): {:#?}", result);
+
+    let result = adapter
+        .query_objects(User::TYPE, Query::default().where_gte(&User::FIELDS.balance, Wallet { inner: 100 }))
+        .await.unwrap();
+    assert_eq!(result.len(), 2, "where_gte(balance>=100): {:#?}", result);
+
+    let result = adapter
+        .query_objects(User::TYPE, Query::default().where_lt(&User::FIELDS.balance, Wallet { inner: 150 }))
+        .await.unwrap();
+    assert_eq!(result.len(), 2, "where_lt(balance<150): {:#?}", result);
+
+    let result = adapter
+        .query_objects(User::TYPE, Query::default().where_lte(&User::FIELDS.balance, Wallet { inner: 100 }))
+        .await.unwrap();
+    assert_eq!(result.len(), 2, "where_lte(balance<=100): {:#?}", result);
 }
 
 #[test]
