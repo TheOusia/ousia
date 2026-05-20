@@ -73,7 +73,6 @@
 //! | Flag       | Default | Description                        |
 //! |------------|---------|------------------------------------|
 //! | `postgres` | ✓       | PostgreSQL adapter via sqlx         |
-//! | `cockroach` | ✓       | CockroachDB adapter via sqlx         |
 //! | `sqlite`   |         | SQLite adapter (in-memory or file)  |
 //!
 //! ## Ousia
