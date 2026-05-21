@@ -8,6 +8,7 @@ pub enum Error {
     Storage(String),
     UniqueConstraintViolation(String),
     Unsupported(String),
+    InvalidQuery(String),
 }
 
 impl Display for Error {
@@ -21,6 +22,7 @@ impl Display for Error {
                 write!(f, "Unique constraint violation on field: {}", field)
             }
             Error::Unsupported(msg) => write!(f, "Unsupported operation: {}", msg),
+            Error::InvalidQuery(msg) => write!(f, "Invalid query: {}", msg),
         }
     }
 }

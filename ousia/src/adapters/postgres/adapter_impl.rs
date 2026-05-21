@@ -10,6 +10,7 @@ use crate::{
     adapters::{Adapter, EdgeQuery, EdgeRecord, Error, ObjectRecord, Query, TraversalDirection},
     query::QueryFilter,
 };
+use sqlx::Row;
 
 #[async_trait::async_trait]
 impl Adapter for PostgresAdapter {
@@ -239,16 +240,47 @@ impl Adapter for PostgresAdapter {
         type_name: &'static str,
         plan: Query,
     ) -> Result<Vec<ObjectRecord>, Error> {
-        let geo = plan.geo_filter.as_ref();
-        let mut where_clause =
-            Self::build_object_query_conditions_with_geo(&plan.filters, plan.cursor, geo);
-        let order_clause = Self::build_order_clause(&plan.filters, false);
-        let join_clause = Self::geo_join_clause(geo);
+        // ── Plan params (WHERE side) ────────────────────────────────────────
+        let mut param_idx = 3;
+        let (mut where_clause, geo_plan) = Self::build_object_query_conditions_with_geo(
+            &plan.filters,
+            plan.cursor,
+            &plan.geo_filters,
+            plan.geo_order.as_ref(),
+            &mut param_idx,
+        );
+        // `param_idx` now points to the slot where bind_geo_filters will start
+        // emitting its bindings. Reconstruct the per-geo-order lon/lat slot
+        // indices so we can splice them into the ORDER BY suffix.
+        let (order_lon_p, order_lat_p) = Self::compute_geo_order_param_slots(
+            param_idx,
+            &plan.geo_filters,
+            &geo_plan,
+        );
 
+        let scalar_order = Self::build_order_clause(&plan.filters, false);
         if plan.owner.is_nil() {
             where_clause = where_clause.replace("owner = ", "owner > ");
         }
 
+        // ── Compose ORDER BY: geo distance first, then any scalar sort terms ─
+        let order_clause = match Self::build_geo_order_suffix(
+            plan.geo_order.as_ref(),
+            &geo_plan,
+            order_lon_p,
+            order_lat_p,
+        ) {
+            Some(geo_term) => {
+                if scalar_order.starts_with("ORDER BY ") {
+                    format!("ORDER BY {}, {}", geo_term, &scalar_order["ORDER BY ".len()..])
+                } else {
+                    format!("ORDER BY {}", geo_term)
+                }
+            }
+            None => scalar_order,
+        };
+
+        // ── Build full SQL once ─────────────────────────────────────────────
         let mut sql = format!(
             r#"
                 SELECT o.id, o.type, o.owner, o.created_at, o.updated_at, o.data
@@ -257,21 +289,24 @@ impl Adapter for PostgresAdapter {
                 {}
                 {}
                 "#,
-            join_clause, where_clause, order_clause
+            geo_plan.joins, where_clause, order_clause
         );
-
         if let Some(limit) = plan.limit {
             sql.push_str(&format!(" LIMIT {}", limit));
         }
 
+        // ── Bind in the exact same order the placeholders were assigned ─────
         let mut query = sqlx::query(&sql).bind(type_name).bind(plan.owner);
-
         if let Some(cursor) = plan.cursor {
             query = query.bind(cursor.last_id);
         }
-
         query = Self::query_bind_filters(query, &plan.filters);
-        query = Self::bind_geo_filter(query, geo);
+        query = Self::bind_geo_filters(
+            query,
+            &plan.geo_filters,
+            plan.geo_order.as_ref(),
+            &geo_plan,
+        );
 
         let rows = query
             .fetch_all(&self.pool)
@@ -284,6 +319,97 @@ impl Adapter for PostgresAdapter {
             .collect())
     }
 
+    async fn query_objects_with_distance(
+        &self,
+        type_name: &'static str,
+        plan: Query,
+    ) -> Result<Vec<(ObjectRecord, f64)>, Error> {
+        if plan.geo_order.is_none() {
+            return Err(Error::InvalidQuery(
+                "query_objects_with_distance requires order_by_distance(...) to be set"
+                    .to_string(),
+            ));
+        }
+
+        let mut param_idx = 3;
+        let (mut where_clause, geo_plan) = Self::build_object_query_conditions_with_geo(
+            &plan.filters,
+            plan.cursor,
+            &plan.geo_filters,
+            plan.geo_order.as_ref(),
+            &mut param_idx,
+        );
+        let scalar_order = Self::build_order_clause(&plan.filters, false);
+
+        if plan.owner.is_nil() {
+            where_clause = where_clause.replace("owner = ", "owner > ");
+        }
+
+        let (lon_p, lat_p) =
+            Self::compute_geo_order_param_slots(param_idx, &plan.geo_filters, &geo_plan);
+        let order_alias = geo_plan
+            .order_alias
+            .as_deref()
+            .expect("geo_order set → order_alias planned");
+
+        let geo_term = Self::build_geo_order_suffix(plan.geo_order.as_ref(), &geo_plan, lon_p, lat_p)
+            .expect("geo_order set");
+        let tail = if scalar_order.starts_with("ORDER BY ") {
+            format!(", {}", &scalar_order["ORDER BY ".len()..])
+        } else {
+            String::new()
+        };
+
+        let sql = format!(
+            r#"
+                SELECT o.id, o.type, o.owner, o.created_at, o.updated_at, o.data,
+                       ST_Distance({alias}.location, ST_SetSRID(ST_MakePoint(${lon}, ${lat}), 4326)::geography) AS __distance
+                FROM objects o
+                {joins}
+                {where_}
+                ORDER BY {geo_term}{tail}{limit}
+            "#,
+            alias = order_alias,
+            lon = lon_p,
+            lat = lat_p,
+            joins = geo_plan.joins,
+            where_ = where_clause,
+            geo_term = geo_term,
+            tail = tail,
+            limit = plan
+                .limit
+                .map(|l| format!(" LIMIT {}", l))
+                .unwrap_or_default(),
+        );
+
+        let mut query = sqlx::query(&sql).bind(type_name).bind(plan.owner);
+        if let Some(cursor) = plan.cursor {
+            query = query.bind(cursor.last_id);
+        }
+        query = Self::query_bind_filters(query, &plan.filters);
+        query = Self::bind_geo_filters(
+            query,
+            &plan.geo_filters,
+            plan.geo_order.as_ref(),
+            &geo_plan,
+        );
+
+        let rows = query
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|err| Error::Storage(err.to_string()))?;
+
+        let mut out = Vec::with_capacity(rows.len());
+        for row in rows {
+            let distance: f64 = row
+                .try_get("__distance")
+                .map_err(|e| Error::Deserialize(e.to_string()))?;
+            let rec = Self::map_row_to_object_record_slim(row)?;
+            out.push((rec, distance));
+        }
+        Ok(out)
+    }
+
     async fn count_objects(
         &self,
         type_name: &'static str,
@@ -291,10 +417,14 @@ impl Adapter for PostgresAdapter {
     ) -> Result<u64, Error> {
         match plan {
             Some(plan) => {
-                let geo = plan.geo_filter.as_ref();
-                let where_clause =
-                    Self::build_object_query_conditions_with_geo(&plan.filters, None, geo);
-                let join_clause = Self::geo_join_clause(geo);
+                let mut param_idx = 3;
+                let (where_clause, geo_plan) = Self::build_object_query_conditions_with_geo(
+                    &plan.filters,
+                    None,
+                    &plan.geo_filters,
+                    plan.geo_order.as_ref(),
+                    &mut param_idx,
+                );
 
                 let mut sql = format!(
                     r#"
@@ -302,7 +432,7 @@ impl Adapter for PostgresAdapter {
                     {}
                     {}
                     "#,
-                    join_clause, where_clause
+                    geo_plan.joins, where_clause
                 );
 
                 if let Some(limit) = plan.limit {
@@ -314,7 +444,12 @@ impl Adapter for PostgresAdapter {
                     .bind(plan.owner);
 
                 query = Self::query_scalar_bind_filters(query, &plan.filters);
-                query = Self::bind_geo_filter_scalar(query, geo);
+                query = Self::bind_geo_filters_scalar(
+                    query,
+                    &plan.geo_filters,
+                    plan.geo_order.as_ref(),
+                    &geo_plan,
+                );
 
                 let count = query
                     .fetch_one(&self.pool)

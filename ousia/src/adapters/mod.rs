@@ -246,6 +246,22 @@ pub trait Adapter: UniqueAdapter + GeoAdapter + EdgeTraversal + Send + Sync + 's
         plan: Query,
     ) -> Result<Vec<ObjectRecord>, Error>;
 
+    /// Query objects and return the distance (meters) from each result to
+    /// the reference point set by `plan.geo_order`. Requires `geo_order` to
+    /// be `Some` — otherwise returns `Error::InvalidQuery`.
+    ///
+    /// Default impl returns `Error::Unsupported` — only Postgres (with PostGIS)
+    /// overrides this.
+    async fn query_objects_with_distance(
+        &self,
+        _type_name: &'static str,
+        _plan: Query,
+    ) -> Result<Vec<(ObjectRecord, f64)>, Error> {
+        Err(Error::Unsupported(
+            "query_objects_with_distance requires postgres".to_string(),
+        ))
+    }
+
     async fn count_objects(
         &self,
         type_name: &'static str,

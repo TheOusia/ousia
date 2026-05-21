@@ -2171,3 +2171,27 @@ async fn test_geo_sqlite_unsupported() {
         other => panic!("expected Error::Unsupported, got {:?}", other),
     }
 }
+
+#[tokio::test]
+async fn test_geo_query_with_distance_sqlite_unsupported() {
+    use ousia::adapters::sqlite::SqliteAdapter;
+
+    let adapter = SqliteAdapter::new_memory().await.unwrap();
+    adapter.init_schema().await.unwrap();
+    let engine = Engine::new(Box::new(adapter));
+
+    let err = engine
+        .query_objects_with_distance::<Place>(Query::default().order_by_distance(
+            &Place::FIELDS.location,
+            0.0,
+            0.0,
+            true,
+        ))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, Error::Unsupported(_)),
+        "expected Unsupported, got {:?}",
+        err,
+    );
+}

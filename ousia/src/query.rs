@@ -237,13 +237,48 @@ pub struct GeoPoint {
     pub hash: String,
 }
 
-/// Geo radius filter attached to a `Query`. Only one is supported per query.
+/// Geo spatial filter attached to a `Query`. Each variant targets a single
+/// geo-indexed field by name. Multiple filters can be combined on a `Query`
+/// (Postgres emits one aliased `object_geo` JOIN per filter).
 #[derive(Debug, Clone, PartialEq)]
-pub struct GeoFilter {
+pub enum GeoFilter {
+    /// `ST_DWithin` — match objects whose geo point is within `radius_m`
+    /// meters of (`lon`, `lat`).
+    Within {
+        field: String,
+        lon: f64,
+        lat: f64,
+        radius_m: f64,
+    },
+    /// `ST_Within(geometry, ST_MakeEnvelope(...))` — match objects whose
+    /// geo point falls inside the axis-aligned bounding box. Does NOT
+    /// handle antimeridian crossing (max_lon < min_lon returns empty).
+    InBbox {
+        field: String,
+        min_lon: f64,
+        min_lat: f64,
+        max_lon: f64,
+        max_lat: f64,
+    },
+}
+
+impl GeoFilter {
+    /// The geo field name this filter targets.
+    pub fn field(&self) -> &str {
+        match self {
+            GeoFilter::Within { field, .. } | GeoFilter::InBbox { field, .. } => field,
+        }
+    }
+}
+
+/// Distance-based ordering: `ORDER BY <field>.location <-> ST_MakePoint(lon, lat)`.
+/// Doubles as the distance anchor for `collect_with_distance()`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GeoOrder {
     pub field: String,
     pub lon: f64,
     pub lat: f64,
-    pub radius_m: f64,
+    pub ascending: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

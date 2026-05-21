@@ -9,11 +9,20 @@ use crate::{
     },
     error::Error,
     query::{
-        Comparison, Cursor, GeoFilter, IndexField, Operator, QueryFilter, QueryMode, QuerySearch,
-        QuerySort, ToIndexValue,
+        Comparison, Cursor, GeoFilter, GeoOrder, IndexField, IndexKind, Operator, QueryFilter,
+        QueryMode, QuerySearch, QuerySort, ToIndexValue,
     },
     system_owner,
 };
+
+/// Returns true if the given index field has at least one `Geo` kind.
+#[inline]
+fn field_is_geo(field: &IndexField) -> bool {
+    field
+        .kinds
+        .iter()
+        .any(|k| matches!(k, IndexKind::Geo { .. }))
+}
 
 #[derive(Debug, Clone)]
 pub(crate) enum TraversalDirection {
@@ -33,7 +42,13 @@ pub struct Query {
     pub filters: Vec<QueryFilter>,
     pub limit: Option<u32>,
     pub cursor: Option<Cursor>,
-    pub geo_filter: Option<GeoFilter>,
+    /// Zero or more spatial filters. Each filter targets one geo-indexed
+    /// field and contributes one aliased JOIN to `object_geo` in Postgres.
+    /// Multiple filters AND together.
+    pub geo_filters: Vec<GeoFilter>,
+    /// Optional distance-based ORDER BY. Doubles as the distance anchor
+    /// for `collect_with_distance()`.
+    pub geo_order: Option<GeoOrder>,
 }
 
 impl Default for Query {
@@ -45,7 +60,8 @@ impl Default for Query {
             filters: Vec::new(),
             limit: None,
             cursor: None,
-            geo_filter: None,
+            geo_filters: Vec::new(),
+            geo_order: None,
         }
     }
 }
@@ -57,7 +73,8 @@ impl Query {
             filters: Vec::new(),
             limit: None,
             cursor: None,
-            geo_filter: None,
+            geo_filters: Vec::new(),
+            geo_order: None,
         }
     }
 
@@ -69,13 +86,14 @@ impl Query {
             filters: Vec::new(),
             limit: None,
             cursor: None,
-            geo_filter: None,
+            geo_filters: Vec::new(),
+            geo_order: None,
         }
     }
 
     /// Restrict results to objects whose geo field `field` is within
-    /// `radius_m` meters of (`lon`, `lat`). At most one geo filter per query —
-    /// repeated calls overwrite the previous.
+    /// `radius_m` meters of (`lon`, `lat`). Repeated calls AND additional
+    /// constraints onto the query.
     pub fn where_geo_within(
         self,
         field: &'static IndexField,
@@ -83,12 +101,69 @@ impl Query {
         lat: f64,
         radius_m: f64,
     ) -> Self {
+        debug_assert!(
+            field_is_geo(field),
+            "where_geo_within: field `{}` is not a geo-indexed field",
+            field.name,
+        );
         let mut consumed_self = self;
-        consumed_self.geo_filter = Some(GeoFilter {
+        consumed_self.geo_filters.push(GeoFilter::Within {
             field: field.name.to_string(),
             lon,
             lat,
             radius_m,
+        });
+        consumed_self
+    }
+
+    /// Restrict results to objects whose geo field `field` falls inside the
+    /// axis-aligned bounding box. Does NOT handle antimeridian crossings —
+    /// callers needing that should split into two queries.
+    pub fn where_geo_in_bbox(
+        self,
+        field: &'static IndexField,
+        min_lon: f64,
+        min_lat: f64,
+        max_lon: f64,
+        max_lat: f64,
+    ) -> Self {
+        debug_assert!(
+            field_is_geo(field),
+            "where_geo_in_bbox: field `{}` is not a geo-indexed field",
+            field.name,
+        );
+        let mut consumed_self = self;
+        consumed_self.geo_filters.push(GeoFilter::InBbox {
+            field: field.name.to_string(),
+            min_lon,
+            min_lat,
+            max_lon,
+            max_lat,
+        });
+        consumed_self
+    }
+
+    /// Order results by distance from (`lon`, `lat`) using the GIST-backed
+    /// KNN operator. The order field doubles as the distance anchor for
+    /// `collect_with_distance()`. Repeated calls overwrite.
+    pub fn order_by_distance(
+        self,
+        field: &'static IndexField,
+        lon: f64,
+        lat: f64,
+        ascending: bool,
+    ) -> Self {
+        debug_assert!(
+            field_is_geo(field),
+            "order_by_distance: field `{}` is not a geo-indexed field",
+            field.name,
+        );
+        let mut consumed_self = self;
+        consumed_self.geo_order = Some(GeoOrder {
+            field: field.name.to_string(),
+            lon,
+            lat,
+            ascending,
         });
         consumed_self
     }

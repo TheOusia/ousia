@@ -434,6 +434,31 @@ impl Engine {
         records.into_iter().map(|r| r.to_object()).collect()
     }
 
+    /// Query objects and return each result paired with its distance (meters)
+    /// from the point set by `query.order_by_distance(...)`. Requires
+    /// `geo_order` to be set on the query — otherwise returns
+    /// `Error::InvalidQuery`. Postgres-only (other adapters return
+    /// `Error::Unsupported`).
+    pub async fn query_objects_with_distance<T: Object>(
+        &self,
+        query: Query,
+    ) -> Result<Vec<(T, f64)>, Error> {
+        let start = Instant::now();
+        let pairs = self
+            .inner
+            .adapter
+            .query_objects_with_distance(T::TYPE, query)
+            .await?;
+        histogram!("ousia.query.duration_ms",
+            "type" => T::TYPE
+        )
+        .record(start.elapsed().as_millis() as f64);
+        pairs
+            .into_iter()
+            .map(|(r, d)| r.to_object::<T>().map(|t| (t, d)))
+            .collect()
+    }
+
     /// Count objects matching query
     pub async fn count_objects<T: Object>(&self, query: Option<Query>) -> Result<u64, Error> {
         self.inner.adapter.count_objects(T::TYPE, query).await

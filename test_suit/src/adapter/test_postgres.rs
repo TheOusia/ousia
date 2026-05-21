@@ -2492,3 +2492,305 @@ async fn test_geo_multi_field() {
         .unwrap();
     assert_eq!(near_abuja_dropoff.len(), 1);
 }
+
+// ──────────────────────────────────────────────────────────────────────────
+// Geo helper extensions: bbox / order_by_distance / collect_with_distance /
+// multiple geo filters.
+// ──────────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+fn make_place(name: &str, lat: f64, lon: f64) -> Place {
+    let mut p = Place::default();
+    p.name = name.to_string();
+    p.lat = lat;
+    p.lon = lon;
+    p
+}
+
+/// Approximate great-circle distance in meters between two WGS84 points
+/// (haversine). Used as an oracle for ordering / distance assertions.
+#[cfg(test)]
+fn haversine_m(lon1: f64, lat1: f64, lon2: f64, lat2: f64) -> f64 {
+    let r = 6_371_008.8_f64; // WGS84 mean radius — matches PostGIS sphere closely enough
+    let to_rad = std::f64::consts::PI / 180.0;
+    let dphi = (lat2 - lat1) * to_rad;
+    let dlam = (lon2 - lon1) * to_rad;
+    let phi1 = lat1 * to_rad;
+    let phi2 = lat2 * to_rad;
+    let a = (dphi / 2.0).sin().powi(2) + phi1.cos() * phi2.cos() * (dlam / 2.0).sin().powi(2);
+    2.0 * r * a.sqrt().asin()
+}
+
+#[tokio::test]
+async fn test_geo_bbox_basic() {
+    let (_resource, pool) = setup_test_db().await;
+    let adapter = PostgresAdapter::from_pool(pool.clone());
+    adapter.init_schema().await.unwrap();
+    let engine = Engine::new(Box::new(adapter));
+
+    // 3x3 grid spaced 1° apart, centered on (0,0). Only the center sits
+    // strictly inside the small bbox (-0.5..0.5, -0.5..0.5).
+    for (i, lat) in [-1.0, 0.0, 1.0].iter().enumerate() {
+        for (j, lon) in [-1.0, 0.0, 1.0].iter().enumerate() {
+            engine
+                .create_object(&make_place(&format!("p{}{}", i, j), *lat, *lon))
+                .await
+                .unwrap();
+        }
+    }
+
+    let hits: Vec<Place> = engine
+        .query_objects::<Place>(Query::default().where_geo_in_bbox(
+            &Place::FIELDS.location,
+            -0.5,
+            -0.5,
+            0.5,
+            0.5,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].lat, 0.0);
+    assert_eq!(hits[0].lon, 0.0);
+
+    // Tiny bbox at a corner of the grid: should pick up only the single corner point.
+    let corner: Vec<Place> = engine
+        .query_objects::<Place>(Query::default().where_geo_in_bbox(
+            &Place::FIELDS.location,
+            -1.5,
+            -1.5,
+            -0.5,
+            -0.5,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(corner.len(), 1);
+    assert_eq!(corner[0].lat, -1.0);
+    assert_eq!(corner[0].lon, -1.0);
+}
+
+#[tokio::test]
+async fn test_geo_order_by_distance_asc_and_desc() {
+    let (_resource, pool) = setup_test_db().await;
+    let adapter = PostgresAdapter::from_pool(pool.clone());
+    adapter.init_schema().await.unwrap();
+    let engine = Engine::new(Box::new(adapter));
+
+    // 5 places with increasing distance from (0,0).
+    let pts: [(&str, f64, f64); 5] = [
+        ("a", 0.01, 0.01),
+        ("b", 0.05, 0.05),
+        ("c", 0.10, 0.10),
+        ("d", 0.50, 0.50),
+        ("e", 1.00, 1.00),
+    ];
+    for (n, lat, lon) in pts.iter() {
+        engine.create_object(&make_place(n, *lat, *lon)).await.unwrap();
+    }
+
+    let asc: Vec<Place> = engine
+        .query_objects::<Place>(Query::default().order_by_distance(
+            &Place::FIELDS.location,
+            0.0,
+            0.0,
+            true,
+        ))
+        .await
+        .unwrap();
+    let asc_names: Vec<&str> = asc.iter().map(|p| p.name.as_str()).collect();
+    assert_eq!(asc_names, vec!["a", "b", "c", "d", "e"]);
+
+    let desc_limit2: Vec<Place> = engine
+        .query_objects::<Place>(
+            Query::default()
+                .order_by_distance(&Place::FIELDS.location, 0.0, 0.0, false)
+                .with_limit(2),
+        )
+        .await
+        .unwrap();
+    let desc_names: Vec<&str> = desc_limit2.iter().map(|p| p.name.as_str()).collect();
+    assert_eq!(desc_names, vec!["e", "d"]);
+}
+
+#[tokio::test]
+async fn test_geo_collect_with_distance() {
+    let (_resource, pool) = setup_test_db().await;
+    let adapter = PostgresAdapter::from_pool(pool.clone());
+    adapter.init_schema().await.unwrap();
+    let engine = Engine::new(Box::new(adapter));
+
+    let pts: [(&str, f64, f64); 4] = [
+        ("near", 0.001, 0.001),
+        ("mid", 0.05, 0.05),
+        ("far", 0.2, 0.2),
+        ("farther", 1.0, 1.0),
+    ];
+    for (n, lat, lon) in pts.iter() {
+        engine.create_object(&make_place(n, *lat, *lon)).await.unwrap();
+    }
+
+    let results: Vec<(Place, f64)> = engine
+        .query_objects_with_distance::<Place>(Query::default().order_by_distance(
+            &Place::FIELDS.location,
+            0.0,
+            0.0,
+            true,
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(results.len(), 4);
+    // Distances non-decreasing.
+    for w in results.windows(2) {
+        assert!(w[0].1 <= w[1].1, "distances must be non-decreasing");
+    }
+    // Each distance must be within 1% of the haversine oracle (allows for
+    // PostGIS geodesic vs. spherical haversine drift).
+    for (p, d) in &results {
+        let oracle = haversine_m(0.0, 0.0, p.lon, p.lat);
+        let rel = (d - oracle).abs() / oracle.max(1.0);
+        assert!(rel < 0.01, "distance {} too far from oracle {}", d, oracle);
+    }
+}
+
+#[tokio::test]
+async fn test_geo_collect_with_distance_requires_order() {
+    let (_resource, pool) = setup_test_db().await;
+    let adapter = PostgresAdapter::from_pool(pool.clone());
+    adapter.init_schema().await.unwrap();
+    let engine = Engine::new(Box::new(adapter));
+
+    let err = engine
+        .query_objects_with_distance::<Place>(Query::default().where_geo_within(
+            &Place::FIELDS.location,
+            0.0,
+            0.0,
+            10_000.0,
+        ))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, Error::InvalidQuery(_)),
+        "expected InvalidQuery, got {:?}",
+        err,
+    );
+}
+
+#[tokio::test]
+async fn test_geo_multiple_within_filters_and() {
+    let (_resource, pool) = setup_test_db().await;
+    let adapter = PostgresAdapter::from_pool(pool.clone());
+    adapter.init_schema().await.unwrap();
+    let engine = Engine::new(Box::new(adapter));
+
+    // Deliveries with various pickup/dropoff combinations relative to two anchor points.
+    // Anchor A = (0, 0); Anchor B = (1, 1). Only `match_both` should fall inside
+    // both 50km radii.
+    let mut both = Delivery::default();
+    both.pickup_lat = 0.001;
+    both.pickup_lon = 0.001;
+    both.dropoff_lat = 1.001;
+    both.dropoff_lon = 1.001;
+    engine.create_object(&both).await.unwrap();
+
+    let mut pickup_only = Delivery::default();
+    pickup_only.pickup_lat = 0.001;
+    pickup_only.pickup_lon = 0.001;
+    pickup_only.dropoff_lat = 5.0;
+    pickup_only.dropoff_lon = 5.0;
+    engine.create_object(&pickup_only).await.unwrap();
+
+    let mut dropoff_only = Delivery::default();
+    dropoff_only.pickup_lat = 5.0;
+    dropoff_only.pickup_lon = 5.0;
+    dropoff_only.dropoff_lat = 1.001;
+    dropoff_only.dropoff_lon = 1.001;
+    engine.create_object(&dropoff_only).await.unwrap();
+
+    let hits: Vec<Delivery> = engine
+        .query_objects::<Delivery>(
+            Query::default()
+                .where_geo_within(&Delivery::FIELDS.pickup, 0.0, 0.0, 50_000.0)
+                .where_geo_within(&Delivery::FIELDS.dropoff, 1.0, 1.0, 50_000.0),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].id(), both.id());
+}
+
+#[tokio::test]
+async fn test_geo_mixed_within_and_bbox_same_field() {
+    let (_resource, pool) = setup_test_db().await;
+    let adapter = PostgresAdapter::from_pool(pool.clone());
+    adapter.init_schema().await.unwrap();
+    let engine = Engine::new(Box::new(adapter));
+
+    // Two points: one inside both the radius AND the bbox; one inside only the radius.
+    engine.create_object(&make_place("in_both", 0.001, 0.001)).await.unwrap();
+    engine.create_object(&make_place("only_radius", 0.4, 0.0)).await.unwrap();
+    engine.create_object(&make_place("outside", 5.0, 5.0)).await.unwrap();
+
+    let hits: Vec<Place> = engine
+        .query_objects::<Place>(
+            Query::default()
+                // Radius ~50km — includes in_both and only_radius.
+                .where_geo_within(&Place::FIELDS.location, 0.0, 0.0, 50_000.0)
+                // Tiny bbox — includes only in_both.
+                .where_geo_in_bbox(&Place::FIELDS.location, -0.1, -0.1, 0.1, 0.1),
+        )
+        .await
+        .unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].name, "in_both");
+}
+
+#[tokio::test]
+async fn test_geo_order_on_different_field_than_filter() {
+    let (_resource, pool) = setup_test_db().await;
+    let adapter = PostgresAdapter::from_pool(pool.clone());
+    adapter.init_schema().await.unwrap();
+    let engine = Engine::new(Box::new(adapter));
+
+    // 3 deliveries with different pickup distances from (0,0) but
+    // dropoffs ordered differently relative to (10, 10).
+    let mut d1 = Delivery::default();
+    d1.pickup_lat = 0.01;
+    d1.pickup_lon = 0.01; // pickup close to (0,0)
+    d1.dropoff_lat = 9.0;
+    d1.dropoff_lon = 9.0; // dropoff ~157km from (10,10)
+    engine.create_object(&d1).await.unwrap();
+
+    let mut d2 = Delivery::default();
+    d2.pickup_lat = 0.05;
+    d2.pickup_lon = 0.05; // pickup farther
+    d2.dropoff_lat = 9.9;
+    d2.dropoff_lon = 9.9; // dropoff closest to (10,10)
+    engine.create_object(&d2).await.unwrap();
+
+    let mut d3 = Delivery::default();
+    d3.pickup_lat = 0.1;
+    d3.pickup_lon = 0.1; // pickup farthest
+    d3.dropoff_lat = 9.5;
+    d3.dropoff_lon = 9.5; // dropoff middle
+    engine.create_object(&d3).await.unwrap();
+
+    // Filter on pickup, order by dropoff distance to (10,10).
+    let results: Vec<Delivery> = engine
+        .query_objects::<Delivery>(
+            Query::default()
+                .where_geo_within(&Delivery::FIELDS.pickup, 0.0, 0.0, 50_000.0)
+                .order_by_distance(&Delivery::FIELDS.dropoff, 10.0, 10.0, true),
+        )
+        .await
+        .unwrap();
+
+    // All three pickups fall inside 50km — but order is by dropoff distance to (10,10):
+    // d2 (~15km) < d3 (~78km) < d1 (~157km).
+    assert_eq!(results.len(), 3);
+    assert_eq!(results[0].id(), d2.id());
+    assert_eq!(results[1].id(), d3.id());
+    assert_eq!(results[2].id(), d1.id());
+}
+

@@ -8,8 +8,21 @@ use uuid::Uuid;
 
 use crate::{
     adapters::{EdgeQuery, EdgeRecord, Error, ObjectRecord, TraversalDirection},
-    query::{Cursor, GeoFilter, IndexValue, IndexValueInner, QueryFilter},
+    query::{Cursor, GeoFilter, GeoOrder, IndexValue, IndexValueInner, QueryFilter},
 };
+
+/// Resolved JOIN plan for the geo filters + order on a single query.
+/// Each entry maps a geo-field name to its emitted alias.
+#[derive(Debug, Default)]
+pub(super) struct GeoJoinPlan {
+    /// JOIN block to splice into the FROM clause (may be empty).
+    pub joins: String,
+    /// Map: geo-field name -> alias (e.g. `g0`, `g1`, `g_ord`).
+    pub aliases: Vec<(String, String)>,
+    /// Alias for the order field (if `geo_order` is set).
+    pub order_alias: Option<String>,
+}
+
 
 impl PostgresAdapter {
     /// Slim mapper — for all read paths. Skips index_meta (not in SELECT, not needed by to_object()).
@@ -328,83 +341,283 @@ impl PostgresAdapter {
         filters: &[QueryFilter],
         cursor: Option<Cursor>,
     ) -> String {
-        Self::build_object_query_conditions_with_geo(filters, cursor, None)
+        Self::build_object_query_conditions_with_geo(filters, cursor, &[], None, &mut 3).0
     }
 
+    /// Build the `JOIN ... object_geo ...` block needed by geo filters + order.
+    ///
+    /// Aliasing:
+    /// - One alias (`g0`, `g1`, ...) per filter in `geo_filters` order.
+    /// - If two filters target the same field, each still gets its own alias
+    ///   (so two AND'd predicates on the same field work).
+    /// - For `geo_order`: reuse the first matching filter's alias if any;
+    ///   otherwise emit `g_ord`.
+    pub(super) fn plan_geo_joins(
+        geo_filters: &[GeoFilter],
+        geo_order: Option<&GeoOrder>,
+    ) -> GeoJoinPlan {
+        if geo_filters.is_empty() && geo_order.is_none() {
+            return GeoJoinPlan::default();
+        }
+        let mut plan = GeoJoinPlan::default();
+        let mut joins = String::new();
+
+        for (i, gf) in geo_filters.iter().enumerate() {
+            let alias = format!("g{}", i);
+            joins.push_str(&format!(
+                "JOIN public.object_geo {alias} ON {alias}.object_id = o.id\n",
+                alias = alias
+            ));
+            plan.aliases.push((gf.field().to_string(), alias));
+        }
+
+        if let Some(go) = geo_order {
+            // Reuse an existing alias only if the field matches one of the filters.
+            let reused = plan
+                .aliases
+                .iter()
+                .find(|(f, _)| f == &go.field)
+                .map(|(_, a)| a.clone());
+            match reused {
+                Some(a) => plan.order_alias = Some(a),
+                None => {
+                    let a = "g_ord".to_string();
+                    joins.push_str(&format!(
+                        "JOIN public.object_geo {alias} ON {alias}.object_id = o.id\n",
+                        alias = a
+                    ));
+                    plan.order_alias = Some(a);
+                }
+            }
+        }
+
+        plan.joins = joins;
+        plan
+    }
+
+    /// Build WHERE clause and advance `param_idx` past every geo-related
+    /// parameter. Returns `(where_clause, geo_plan)` so the caller can:
+    /// 1. splice `geo_plan.joins` into the FROM block, and
+    /// 2. forward `geo_plan` into `build_geo_order_suffix` when assembling ORDER BY.
     pub(super) fn build_object_query_conditions_with_geo(
         filters: &[QueryFilter],
         cursor: Option<Cursor>,
-        geo: Option<&GeoFilter>,
-    ) -> String {
-        // $1 = type, $2 = owner, $3 = cursor (optional), $4+ = filter values,
-        // then 4 trailing params for geo (field, lon, lat, radius) when present.
+        geo_filters: &[GeoFilter],
+        geo_order: Option<&GeoOrder>,
+        param_idx: &mut usize,
+    ) -> (String, GeoJoinPlan) {
+        // $1 = type, $2 = owner, $3 = cursor (optional), then filter values,
+        // then geo filter params (per filter), then geo order field param (if not reused).
         let mut conditions: Vec<(String, &str)> = vec![
             ("o.type = $1".to_string(), "AND"),
             ("o.owner = $2".to_string(), "AND"),
         ];
-        let mut param_idx = 3;
 
         if cursor.is_some() {
             conditions.push((format!("o.id < ${}", param_idx), "AND"));
-            param_idx += 1;
+            *param_idx += 1;
         }
 
         for filter in filters {
-            if let Some((cond, op)) = Self::build_filter_condition("o", filter, &mut param_idx) {
+            if let Some((cond, op)) = Self::build_filter_condition("o", filter, param_idx) {
                 conditions.push((cond, op));
             }
         }
 
-        if geo.is_some() {
-            let field_p = param_idx;
-            let lon_p = param_idx + 1;
-            let lat_p = param_idx + 2;
-            let rad_p = param_idx + 3;
-            conditions.push((format!("g.field = ${}", field_p), "AND"));
-            conditions.push((
-                format!(
-                    "ST_DWithin(g.location, ST_SetSRID(ST_MakePoint(${}, ${}), 4326)::geography, ${})",
-                    lon_p, lat_p, rad_p
-                ),
-                "AND",
-            ));
+        let plan = Self::plan_geo_joins(geo_filters, geo_order);
+
+        // Geo filter predicates — bind in declared order.
+        for (gf, (_, alias)) in geo_filters.iter().zip(plan.aliases.iter()) {
+            match gf {
+                GeoFilter::Within { .. } => {
+                    let field_p = *param_idx;
+                    let lon_p = *param_idx + 1;
+                    let lat_p = *param_idx + 2;
+                    let rad_p = *param_idx + 3;
+                    conditions.push((format!("{}.field = ${}", alias, field_p), "AND"));
+                    conditions.push((
+                        format!(
+                            "ST_DWithin({}.location, ST_SetSRID(ST_MakePoint(${}, ${}), 4326)::geography, ${})",
+                            alias, lon_p, lat_p, rad_p
+                        ),
+                        "AND",
+                    ));
+                    *param_idx += 4;
+                }
+                GeoFilter::InBbox { .. } => {
+                    let field_p = *param_idx;
+                    let min_lon_p = *param_idx + 1;
+                    let min_lat_p = *param_idx + 2;
+                    let max_lon_p = *param_idx + 3;
+                    let max_lat_p = *param_idx + 4;
+                    conditions.push((format!("{}.field = ${}", alias, field_p), "AND"));
+                    conditions.push((
+                        format!(
+                            "ST_Within({}.location::geometry, ST_MakeEnvelope(${}, ${}, ${}, ${}, 4326))",
+                            alias, min_lon_p, min_lat_p, max_lon_p, max_lat_p
+                        ),
+                        "AND",
+                    ));
+                    *param_idx += 5;
+                }
+            }
         }
 
-        format!("WHERE {}", Self::join_conditions(&conditions))
+        // Geo order: if its alias wasn't reused from filters, bind its field name + add field constraint.
+        if let (Some(go), Some(order_alias)) = (geo_order, plan.order_alias.as_ref()) {
+            let reused = plan.aliases.iter().any(|(_, a)| a == order_alias);
+            if !reused {
+                let field_p = *param_idx;
+                conditions.push((format!("{}.field = ${}", order_alias, field_p), "AND"));
+                *param_idx += 1;
+            }
+            // Bind lon/lat happens in bind_geo_filters (always — they're used in ORDER BY too).
+            let _ = go;
+        }
+
+        (
+            format!("WHERE {}", Self::join_conditions(&conditions)),
+            plan,
+        )
     }
 
-    pub(super) fn geo_join_clause(geo: Option<&GeoFilter>) -> &'static str {
-        if geo.is_some() {
-            "JOIN public.object_geo g ON g.object_id = o.id"
+    /// Compute the `$N` placeholder indices that the binders will use for the
+    /// geo_order point (lon, lat). `start_idx` must be the `param_idx` returned
+    /// AFTER `build_object_query_conditions_with_geo` has finished — at that
+    /// point every WHERE-side slot (filter values + order field if not reused)
+    /// is already accounted for, so the order lon/lat bindings come immediately
+    /// at `start_idx` and `start_idx + 1`.
+    ///
+    /// Returns `(0, 0)` when no geo_order is set — callers must check first.
+    pub(super) fn compute_geo_order_param_slots(
+        start_idx: usize,
+        _geo_filters: &[GeoFilter],
+        plan: &GeoJoinPlan,
+    ) -> (usize, usize) {
+        if plan.order_alias.is_some() {
+            (start_idx, start_idx + 1)
         } else {
-            ""
+            (0, 0)
         }
     }
 
-    pub(super) fn bind_geo_filter<'a>(
+    /// ORDER BY snippet for distance ordering. Returns `None` if no geo_order.
+    pub(super) fn build_geo_order_suffix(
+        geo_order: Option<&GeoOrder>,
+        plan: &GeoJoinPlan,
+        lon_param: usize,
+        lat_param: usize,
+    ) -> Option<String> {
+        let go = geo_order?;
+        let alias = plan.order_alias.as_deref()?;
+        let dir = if go.ascending { "ASC" } else { "DESC" };
+        Some(format!(
+            "{}.location <-> ST_SetSRID(ST_MakePoint(${}, ${}), 4326)::geography {}",
+            alias, lon_param, lat_param, dir
+        ))
+    }
+
+    /// Bind values in the same order the WHERE planner allocated their `$N`
+    /// placeholders: each geo filter first (field, then lon/lat/etc.), then
+    /// the geo_order field (only if its alias isn't reused), then geo_order
+    /// lon/lat. Use `compute_geo_order_param_slots` to find the slot numbers
+    /// for the order lon/lat — that's what the ORDER BY suffix needs.
+    pub(super) fn bind_geo_filters<'a>(
         mut query: PgQuery<'a, Postgres, PgArguments>,
-        geo: Option<&'a GeoFilter>,
+        geo_filters: &'a [GeoFilter],
+        geo_order: Option<&'a GeoOrder>,
+        plan: &GeoJoinPlan,
     ) -> PgQuery<'a, Postgres, PgArguments> {
-        if let Some(gf) = geo {
-            query = query
-                .bind(&gf.field)
-                .bind(gf.lon)
-                .bind(gf.lat)
-                .bind(gf.radius_m);
+        for gf in geo_filters {
+            match gf {
+                GeoFilter::Within {
+                    field,
+                    lon,
+                    lat,
+                    radius_m,
+                } => {
+                    query = query
+                        .bind(field.as_str())
+                        .bind(*lon)
+                        .bind(*lat)
+                        .bind(*radius_m);
+                }
+                GeoFilter::InBbox {
+                    field,
+                    min_lon,
+                    min_lat,
+                    max_lon,
+                    max_lat,
+                } => {
+                    query = query
+                        .bind(field.as_str())
+                        .bind(*min_lon)
+                        .bind(*min_lat)
+                        .bind(*max_lon)
+                        .bind(*max_lat);
+                }
+            }
+        }
+        if let Some(go) = geo_order {
+            let reused = plan
+                .order_alias
+                .as_deref()
+                .map(|a| plan.aliases.iter().any(|(_, x)| x == a))
+                .unwrap_or(false);
+            if !reused {
+                query = query.bind(go.field.as_str());
+            }
+            query = query.bind(go.lon).bind(go.lat);
         }
         query
     }
 
-    pub(super) fn bind_geo_filter_scalar<'a, O>(
+    pub(super) fn bind_geo_filters_scalar<'a, O>(
         mut query: QueryScalar<'a, Postgres, O, PgArguments>,
-        geo: Option<&'a GeoFilter>,
+        geo_filters: &'a [GeoFilter],
+        geo_order: Option<&'a GeoOrder>,
+        plan: &GeoJoinPlan,
     ) -> QueryScalar<'a, Postgres, O, PgArguments> {
-        if let Some(gf) = geo {
-            query = query
-                .bind(&gf.field)
-                .bind(gf.lon)
-                .bind(gf.lat)
-                .bind(gf.radius_m);
+        for gf in geo_filters {
+            match gf {
+                GeoFilter::Within {
+                    field,
+                    lon,
+                    lat,
+                    radius_m,
+                } => {
+                    query = query
+                        .bind(field.as_str())
+                        .bind(*lon)
+                        .bind(*lat)
+                        .bind(*radius_m);
+                }
+                GeoFilter::InBbox {
+                    field,
+                    min_lon,
+                    min_lat,
+                    max_lon,
+                    max_lat,
+                } => {
+                    query = query
+                        .bind(field.as_str())
+                        .bind(*min_lon)
+                        .bind(*min_lat)
+                        .bind(*max_lon)
+                        .bind(*max_lat);
+                }
+            }
+        }
+        if let Some(go) = geo_order {
+            let reused = plan
+                .order_alias
+                .as_deref()
+                .map(|a| plan.aliases.iter().any(|(_, x)| x == a))
+                .unwrap_or(false);
+            if !reused {
+                query = query.bind(go.field.as_str());
+            }
+            query = query.bind(go.lon).bind(go.lat);
         }
         query
     }
