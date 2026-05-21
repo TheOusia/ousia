@@ -9,8 +9,8 @@ use crate::{
     },
     error::Error,
     query::{
-        Comparison, Cursor, IndexField, Operator, QueryFilter, QueryMode, QuerySearch, QuerySort,
-        ToIndexValue,
+        Comparison, Cursor, GeoFilter, IndexField, Operator, QueryFilter, QueryMode, QuerySearch,
+        QuerySort, ToIndexValue,
     },
     system_owner,
 };
@@ -33,6 +33,7 @@ pub struct Query {
     pub filters: Vec<QueryFilter>,
     pub limit: Option<u32>,
     pub cursor: Option<Cursor>,
+    pub geo_filter: Option<GeoFilter>,
 }
 
 impl Default for Query {
@@ -44,6 +45,7 @@ impl Default for Query {
             filters: Vec::new(),
             limit: None,
             cursor: None,
+            geo_filter: None,
         }
     }
 }
@@ -55,6 +57,7 @@ impl Query {
             filters: Vec::new(),
             limit: None,
             cursor: None,
+            geo_filter: None,
         }
     }
 
@@ -66,7 +69,28 @@ impl Query {
             filters: Vec::new(),
             limit: None,
             cursor: None,
+            geo_filter: None,
         }
+    }
+
+    /// Restrict results to objects whose geo field `field` is within
+    /// `radius_m` meters of (`lon`, `lat`). At most one geo filter per query —
+    /// repeated calls overwrite the previous.
+    pub fn where_geo_within(
+        self,
+        field: &'static IndexField,
+        lon: f64,
+        lat: f64,
+        radius_m: f64,
+    ) -> Self {
+        let mut consumed_self = self;
+        consumed_self.geo_filter = Some(GeoFilter {
+            field: field.name.to_string(),
+            lon,
+            lat,
+            radius_m,
+        });
+        consumed_self
     }
 
     pub fn filter(

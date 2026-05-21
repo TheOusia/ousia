@@ -219,6 +219,31 @@ impl<T: ToIndexValue + Default> ToIndexValue for Option<T> {
 pub enum IndexKind {
     Search, // equality + adapter-defined text matching
     Sort,   // ordered comparison
+    /// Spatial index. The virtual field name lives on `IndexField.name`; the
+    /// `lat_field` / `lon_field` here are the struct field names that source
+    /// the coordinates at write time.
+    Geo {
+        lat_field: &'static str,
+        lon_field: &'static str,
+    },
+}
+
+/// A single geo point produced by an object at write time.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GeoPoint {
+    pub field: &'static str,
+    pub lon: f64,
+    pub lat: f64,
+    pub hash: String,
+}
+
+/// Geo radius filter attached to a `Query`. Only one is supported per query.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GeoFilter {
+    pub field: String,
+    pub lon: f64,
+    pub lat: f64,
+    pub radius_m: f64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

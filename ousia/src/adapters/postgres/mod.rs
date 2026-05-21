@@ -1,4 +1,5 @@
 mod adapter_impl;
+mod geo_impl;
 mod helper;
 mod traversal_impl;
 mod unique_impl;
@@ -48,6 +49,11 @@ impl PostgresAdapter {
             .begin()
             .await
             .map_err(|err| Error::Storage(err.to_string()))?;
+
+        sqlx::query("CREATE EXTENSION IF NOT EXISTS postgis;")
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| Error::Storage(e.to_string()))?;
 
         sqlx::query(
             r#"
@@ -191,6 +197,42 @@ impl PostgresAdapter {
                     CREATE INDEX IF NOT EXISTS idx_unique_type_key
                     ON unique_constraints(type, key)
                     "#,
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| Error::Storage(e.to_string()))?;
+
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS public.object_geo (
+                object_id UUID NOT NULL,
+                type      TEXT NOT NULL,
+                field     TEXT NOT NULL,
+                location  geography(Point, 4326) NOT NULL,
+                hash      TEXT NOT NULL,
+                PRIMARY KEY (object_id, field)
+            );
+            "#,
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| Error::Storage(e.to_string()))?;
+
+        sqlx::query(
+            r#"
+            CREATE INDEX IF NOT EXISTS idx_object_geo_gist
+                ON public.object_geo USING GIST (location);
+            "#,
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| Error::Storage(e.to_string()))?;
+
+        sqlx::query(
+            r#"
+            CREATE INDEX IF NOT EXISTS idx_object_geo_type_field
+                ON public.object_geo (type, field);
+            "#,
         )
         .execute(&mut *tx)
         .await

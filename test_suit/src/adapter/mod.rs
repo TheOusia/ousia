@@ -102,3 +102,36 @@ struct Follow {
     _meta: EdgeMeta,
     notification: bool,
 }
+
+/// Test object with a single geo index. The virtual field name `"location"`
+/// does NOT exist as a struct field — only the referenced `lat` / `lon` do.
+#[derive(OusiaObject, OusiaDefault, Debug)]
+#[ousia(
+    type_name = "Place",
+    index = "name:search",
+    index = "location:geo(lat, lon)"
+)]
+pub struct Place {
+    _meta: Meta,
+
+    pub name: String,
+    pub lat: f64,
+    pub lon: f64,
+}
+
+/// Test object with two geo indexes on the same struct.
+#[derive(OusiaObject, OusiaDefault, Debug)]
+#[ousia(
+    type_name = "Delivery",
+    index = "pickup:geo(pickup_lat, pickup_lon)",
+    index = "dropoff:geo(dropoff_lat, dropoff_lon)"
+)]
+pub struct Delivery {
+    _meta: Meta,
+
+    pub pickup_lat: f64,
+    pub pickup_lon: f64,
+
+    pub dropoff_lat: f64,
+    pub dropoff_lon: f64,
+}

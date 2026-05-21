@@ -15,7 +15,12 @@ pub use query::*;
 pub use record::*;
 use uuid::Uuid;
 
-use crate::{Object, edge::query::EdgeQuery, error::Error, query::QueryFilter};
+use crate::{
+    Object,
+    edge::query::EdgeQuery,
+    error::Error,
+    query::{GeoPoint, QueryFilter},
+};
 
 /// -----------------------------
 /// Adapter contract
@@ -34,6 +39,50 @@ pub trait UniqueAdapter {
     async fn delete_unique_hashes(&self, hashes: Vec<String>) -> Result<(), Error>;
 
     async fn get_hashes_for_object(&self, object_id: Uuid) -> Result<Vec<String>, Error>;
+}
+
+/// Side-table operations for geo-indexed fields. All methods have default
+/// "not supported" implementations so any `Adapter` impl gets `GeoAdapter` for
+/// free — only adapters that actually want spatial queries (currently only
+/// postgres) need to override.
+#[async_trait]
+pub trait GeoAdapter {
+    /// Insert or update `object_geo` rows for the given points. Existing rows
+    /// for the same (object_id, field) are overwritten. Rows for fields not
+    /// listed here are NOT touched — callers handle removal via
+    /// `delete_geo_fields` / `delete_geo_for_object`.
+    async fn upsert_geo_points(
+        &self,
+        _type_name: &str,
+        _object_id: Uuid,
+        points: Vec<GeoPoint>,
+    ) -> Result<(), Error> {
+        if points.is_empty() {
+            return Ok(());
+        }
+        Err(Error::Unsupported(
+            "geo indexes are not supported by this adapter".to_string(),
+        ))
+    }
+
+    /// Return `(field, hash)` for every `object_geo` row belonging to the object.
+    async fn get_geo_hashes(&self, _object_id: Uuid) -> Result<Vec<(String, String)>, Error> {
+        Ok(Vec::new())
+    }
+
+    /// Delete specific fields for an object (used when geo fields disappear on update).
+    async fn delete_geo_fields(
+        &self,
+        _object_id: Uuid,
+        _fields: Vec<String>,
+    ) -> Result<(), Error> {
+        Ok(())
+    }
+
+    /// Delete every `object_geo` row for the object (used on object delete).
+    async fn delete_geo_for_object(&self, _object_id: Uuid) -> Result<(), Error> {
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -138,7 +187,7 @@ pub trait EdgeTraversal {
 }
 
 #[async_trait]
-pub trait Adapter: UniqueAdapter + EdgeTraversal + Send + Sync + 'static {
+pub trait Adapter: UniqueAdapter + GeoAdapter + EdgeTraversal + Send + Sync + 'static {
     /* ---------------- OBJECTS ---------------- */
     async fn insert_object(&self, record: ObjectRecord) -> Result<(), Error>;
     async fn fetch_object(

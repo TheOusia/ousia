@@ -1,6 +1,9 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{object::Meta, query::IndexMeta};
+use crate::{
+    object::Meta,
+    query::{GeoPoint, IndexMeta},
+};
 
 /// Internal trait for engine operations
 /// This trait is NOT part of the public API and should only be used
@@ -42,6 +45,15 @@ pub trait Object:
 
     // Derived, non-meta indexes only
     fn index_meta(&self) -> IndexMeta;
+
+    /// True iff this object declares at least one `IndexKind::Geo` index.
+    const HAS_GEO_FIELDS: bool = false;
+
+    /// Geo points sourced from this object's lat/lon fields, one per declared
+    /// `geo(...)` index. Default is empty for types without geo indexes.
+    fn geo_points(&self) -> Vec<GeoPoint> {
+        Vec::new()
+    }
 }
 
 pub trait ObjectMeta {

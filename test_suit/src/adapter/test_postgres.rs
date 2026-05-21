@@ -21,15 +21,19 @@ use testcontainers_modules::postgres::Postgres;
 use ousia::adapters::Adapter;
 
 #[cfg(test)]
-pub(crate) async fn setup_test_db() -> (ContainerAsync<Postgres>, PgPool) {
+async fn setup_test_db() -> (ContainerAsync<Postgres>, PgPool) {
     use sqlx::postgres::PgPoolOptions;
     use testcontainers::{ImageExt, runners::AsyncRunner as _};
 
+    // ousia's init_schema enables the postgis extension unconditionally, so the
+    // test container must ship with postgis pre-installed. postgis/postgis is a
+    // drop-in for the official postgres image (same env vars, same port).
     let postgres = match Postgres::default()
         .with_password("postgres")
         .with_user("postgres")
         .with_db_name("postgres")
-        .with_tag("16-alpine")
+        .with_name("postgis/postgis")
+        .with_tag("16-3.4-alpine")
         .start()
         .await
     {
@@ -2207,4 +2211,284 @@ async fn test_default_field_has_value() {
     let updated: Option<PostNew> = engine.fetch_owned_object(alice.id()).await.unwrap();
     assert!(updated.is_some());
     assert_eq!(updated.unwrap().rating, 13);
+}
+
+// ============================================================
+// Geo — derive metadata, schema, write/update/delete, queries
+// ============================================================
+
+#[test]
+fn test_geo_derive_metadata() {
+    use ousia::query::IndexKind;
+
+    let kinds = Place::FIELDS.location.kinds;
+    assert_eq!(
+        kinds.len(),
+        1,
+        "Place.location should have a single Geo kind"
+    );
+    match kinds[0] {
+        IndexKind::Geo {
+            lat_field,
+            lon_field,
+        } => {
+            assert_eq!(lat_field, "lat");
+            assert_eq!(lon_field, "lon");
+        }
+        other => panic!("expected IndexKind::Geo, got {:?}", other),
+    }
+    assert_eq!(Place::FIELDS.location.name, "location");
+    assert!(Place::HAS_GEO_FIELDS);
+    assert!(!User::HAS_GEO_FIELDS);
+
+    // Multi-geo
+    assert!(Delivery::HAS_GEO_FIELDS);
+    assert_eq!(Delivery::FIELDS.pickup.name, "pickup");
+    assert_eq!(Delivery::FIELDS.dropoff.name, "dropoff");
+}
+
+#[tokio::test]
+async fn test_geo_schema_and_crud() {
+    let (_resource, pool) = setup_test_db().await;
+    let adapter = PostgresAdapter::from_pool(pool.clone());
+    adapter.init_schema().await.unwrap();
+
+    let postgis_enabled: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_extension WHERE extname = 'postgis')")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(postgis_enabled, "postgis extension missing");
+
+    let has_hash: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM information_schema.columns \
+         WHERE table_name = 'object_geo' AND column_name = 'hash')",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(has_hash, "object_geo.hash column missing");
+
+    let has_gist: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM pg_indexes WHERE indexname = 'idx_object_geo_gist')",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(has_gist, "object_geo GIST index missing");
+
+    let engine = Engine::new(Box::new(adapter));
+
+    let mut place = Place::default();
+    place.name = "Eiffel".into();
+    place.lat = 48.8584;
+    place.lon = 2.2945;
+    engine.create_object(&place).await.unwrap();
+
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM object_geo WHERE object_id = $1")
+        .bind(place.id())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 1);
+
+    let (lon_val, lat_val): (f64, f64) = sqlx::query_as(
+        "SELECT ST_X(location::geometry), ST_Y(location::geometry) \
+         FROM object_geo WHERE object_id = $1",
+    )
+    .bind(place.id())
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!((lon_val - 2.2945).abs() < 1e-6);
+    assert!((lat_val - 48.8584).abs() < 1e-6);
+
+    let _: Option<Place> = engine
+        .delete_object(place.id(), system_owner())
+        .await
+        .unwrap();
+
+    let count_after: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM object_geo WHERE object_id = $1")
+            .bind(place.id())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(count_after, 0, "delete_object should cascade to object_geo");
+}
+
+#[tokio::test]
+async fn test_geo_update_diff() {
+    let (_resource, pool) = setup_test_db().await;
+    let adapter = PostgresAdapter::from_pool(pool.clone());
+    adapter.init_schema().await.unwrap();
+    let engine = Engine::new(Box::new(adapter));
+
+    let mut place = Place::default();
+    place.name = "Original".into();
+    place.lat = 10.0;
+    place.lon = 20.0;
+    engine.create_object(&place).await.unwrap();
+
+    let hash_before: String =
+        sqlx::query_scalar("SELECT hash FROM object_geo WHERE object_id = $1")
+            .bind(place.id())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+
+    // Scalar-only mutation — geo row should not change.
+    place.name = "Renamed".into();
+    engine.update_object(&mut place).await.unwrap();
+
+    let hash_after_scalar: String =
+        sqlx::query_scalar("SELECT hash FROM object_geo WHERE object_id = $1")
+            .bind(place.id())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        hash_before, hash_after_scalar,
+        "geo row hash changed on scalar-only update"
+    );
+
+    // Mutating lat changes the hash and the stored location.
+    place.lat = 11.0;
+    engine.update_object(&mut place).await.unwrap();
+
+    let hash_after_geo: String =
+        sqlx::query_scalar("SELECT hash FROM object_geo WHERE object_id = $1")
+            .bind(place.id())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_ne!(
+        hash_before, hash_after_geo,
+        "geo row hash did not change on lat update"
+    );
+
+    let lat_val: f64 =
+        sqlx::query_scalar("SELECT ST_Y(location::geometry) FROM object_geo WHERE object_id = $1")
+            .bind(place.id())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!((lat_val - 11.0).abs() < 1e-6);
+}
+
+#[tokio::test]
+async fn test_geo_query_within() {
+    let (_resource, pool) = setup_test_db().await;
+    let adapter = PostgresAdapter::from_pool(pool);
+    adapter.init_schema().await.unwrap();
+    let engine = Engine::new(Box::new(adapter));
+
+    // Seed places at known distances from (0, 0).
+    let mut near = Place::default();
+    near.name = "near".into();
+    near.lat = 0.0;
+    near.lon = 0.0;
+    engine.create_object(&near).await.unwrap();
+
+    let mut mid = Place::default();
+    mid.name = "mid".into();
+    mid.lat = 0.01; // ~1.11 km north
+    mid.lon = 0.0;
+    engine.create_object(&mid).await.unwrap();
+
+    let mut far = Place::default();
+    far.name = "far".into();
+    far.lat = 1.0; // ~111 km north
+    far.lon = 0.0;
+    engine.create_object(&far).await.unwrap();
+
+    // Within 5 km — should match near + mid only.
+    let results: Vec<Place> = engine
+        .query_objects::<Place>(Query::default().where_geo_within(
+            &Place::FIELDS.location,
+            0.0,
+            0.0,
+            5_000.0,
+        ))
+        .await
+        .unwrap();
+    let names: std::collections::HashSet<&str> = results.iter().map(|p| p.name.as_str()).collect();
+    assert!(names.contains("near"), "missing 'near': {:?}", names);
+    assert!(names.contains("mid"), "missing 'mid': {:?}", names);
+    assert!(
+        !names.contains("far"),
+        "'far' should be outside 5km: {:?}",
+        names
+    );
+
+    // Count also flows through the geo path.
+    let count = engine
+        .count_objects::<Place>(Some(Query::default().where_geo_within(
+            &Place::FIELDS.location,
+            0.0,
+            0.0,
+            5_000.0,
+        )))
+        .await
+        .unwrap();
+    assert_eq!(count, 2);
+}
+
+#[tokio::test]
+async fn test_geo_multi_field() {
+    let (_resource, pool) = setup_test_db().await;
+    let adapter = PostgresAdapter::from_pool(pool.clone());
+    adapter.init_schema().await.unwrap();
+    let engine = Engine::new(Box::new(adapter));
+
+    // Lagos (3.3792, 6.5244) → Abuja (8.6753, 9.0820)
+    let mut d = Delivery::default();
+    d.pickup_lat = 6.5244;
+    d.pickup_lon = 3.3792;
+    d.dropoff_lat = 9.0820;
+    d.dropoff_lon = 8.6753;
+    engine.create_object(&d).await.unwrap();
+
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM object_geo WHERE object_id = $1")
+        .bind(d.id())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 2, "Delivery should write two object_geo rows");
+
+    // 50 km around Lagos on the pickup field → hits.
+    let near_lagos_pickup: Vec<Delivery> = engine
+        .query_objects::<Delivery>(Query::default().where_geo_within(
+            &Delivery::FIELDS.pickup,
+            3.3792,
+            6.5244,
+            50_000.0,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(near_lagos_pickup.len(), 1);
+
+    // Same point but filtered on the dropoff field → miss (Abuja is hundreds of km away).
+    let near_lagos_dropoff: Vec<Delivery> = engine
+        .query_objects::<Delivery>(Query::default().where_geo_within(
+            &Delivery::FIELDS.dropoff,
+            3.3792,
+            6.5244,
+            50_000.0,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(near_lagos_dropoff.len(), 0);
+
+    // Abuja point on the dropoff field → hit.
+    let near_abuja_dropoff: Vec<Delivery> = engine
+        .query_objects::<Delivery>(Query::default().where_geo_within(
+            &Delivery::FIELDS.dropoff,
+            8.6753,
+            9.0820,
+            50_000.0,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(near_abuja_dropoff.len(), 1);
 }

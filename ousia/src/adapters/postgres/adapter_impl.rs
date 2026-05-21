@@ -239,8 +239,11 @@ impl Adapter for PostgresAdapter {
         type_name: &'static str,
         plan: Query,
     ) -> Result<Vec<ObjectRecord>, Error> {
-        let mut where_clause = Self::build_object_query_conditions(&plan.filters, plan.cursor);
+        let geo = plan.geo_filter.as_ref();
+        let mut where_clause =
+            Self::build_object_query_conditions_with_geo(&plan.filters, plan.cursor, geo);
         let order_clause = Self::build_order_clause(&plan.filters, false);
+        let join_clause = Self::geo_join_clause(geo);
 
         if plan.owner.is_nil() {
             where_clause = where_clause.replace("owner = ", "owner > ");
@@ -252,8 +255,9 @@ impl Adapter for PostgresAdapter {
                 FROM objects o
                 {}
                 {}
+                {}
                 "#,
-            where_clause, order_clause
+            join_clause, where_clause, order_clause
         );
 
         if let Some(limit) = plan.limit {
@@ -267,6 +271,7 @@ impl Adapter for PostgresAdapter {
         }
 
         query = Self::query_bind_filters(query, &plan.filters);
+        query = Self::bind_geo_filter(query, geo);
 
         let rows = query
             .fetch_all(&self.pool)
@@ -286,14 +291,18 @@ impl Adapter for PostgresAdapter {
     ) -> Result<u64, Error> {
         match plan {
             Some(plan) => {
-                let where_clause = Self::build_object_query_conditions(&plan.filters, None);
+                let geo = plan.geo_filter.as_ref();
+                let where_clause =
+                    Self::build_object_query_conditions_with_geo(&plan.filters, None, geo);
+                let join_clause = Self::geo_join_clause(geo);
 
                 let mut sql = format!(
                     r#"
                     SELECT COUNT(*) FROM objects o
                     {}
+                    {}
                     "#,
-                    where_clause
+                    join_clause, where_clause
                 );
 
                 if let Some(limit) = plan.limit {
@@ -305,6 +314,7 @@ impl Adapter for PostgresAdapter {
                     .bind(plan.owner);
 
                 query = Self::query_scalar_bind_filters(query, &plan.filters);
+                query = Self::bind_geo_filter_scalar(query, geo);
 
                 let count = query
                     .fetch_one(&self.pool)

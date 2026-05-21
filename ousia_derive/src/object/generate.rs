@@ -6,7 +6,7 @@ use syn::{Data, DeriveInput, Expr, ExprLit, Field, Fields, Lit, Meta, Result, Ty
 
 use crate::shared::{
     get_field_default_value, get_ousia_attr, import_ousia, is_meta_field, is_private_field,
-    parse_index_kinds, parse_ousia_attr,
+    parse_geo_source_fields, parse_index_kinds, parse_ousia_attr,
 };
 
 const RESERVED_FIELDS: &[&str] = &["id", "owner", "type", "created_at", "updated_at"];
@@ -362,6 +362,36 @@ pub fn generate_object_impl(input: &DeriveInput) -> Result<TokenStream> {
         view_methods.push(view_method);
     }
 
+    // --- classify indexes into scalar vs geo ---
+    // Geo indexes use a virtual field name that does NOT need to exist on the
+    // struct; instead, the kind carries the lat/lon source fields that must
+    // exist. Geo values are stored in the `object_geo` side table, not
+    // `index_meta`, so they're excluded from `index_meta_insertions`.
+    let mut geo_indexes: Vec<(String, String, String)> = Vec::new(); // (virtual_name, lat_field, lon_field)
+    for (name, kind) in &indexes {
+        if let Some((lat, lon)) = parse_geo_source_fields(kind) {
+            if !non_meta_fields
+                .iter()
+                .any(|f| f.ident.as_ref().unwrap() == &lat)
+            {
+                panic!(
+                    "Geo index `{}`: lat field `{}` does not exist on {}",
+                    name, lat, ident
+                );
+            }
+            if !non_meta_fields
+                .iter()
+                .any(|f| f.ident.as_ref().unwrap() == &lon)
+            {
+                panic!(
+                    "Geo index `{}`: lon field `{}` does not exist on {}",
+                    name, lon, ident
+                );
+            }
+            geo_indexes.push((name.clone(), lat, lon));
+        }
+    }
+
     // --- generate IndexField list ---
     let index_fields = indexes.iter().map(|(name, kind)| {
         if RESERVED_FIELDS.contains(&name.as_str()) {
@@ -370,9 +400,11 @@ pub fn generate_object_impl(input: &DeriveInput) -> Result<TokenStream> {
                 name
             );
         }
-        if !non_meta_fields
-            .iter()
-            .any(|f| &f.ident.as_ref().unwrap().to_string() == name)
+        let is_geo = parse_geo_source_fields(kind).is_some();
+        if !is_geo
+            && !non_meta_fields
+                .iter()
+                .any(|f| &f.ident.as_ref().unwrap().to_string() == name)
         {
             panic!("Indexed field `{}` does not exist on {}", name, ident);
         }
@@ -387,18 +419,46 @@ pub fn generate_object_impl(input: &DeriveInput) -> Result<TokenStream> {
         }
     });
 
-    // --- generate index_meta insertions ---
-    let index_meta_insertions = indexes.iter().map(|(name, _kind)| {
+    // --- generate index_meta insertions (scalar fields only) ---
+    let index_meta_insertions = indexes.iter().filter_map(|(name, kind)| {
+        if parse_geo_source_fields(kind).is_some() {
+            return None;
+        }
         let field_name = format_ident!("{}", name);
         let name_str = name.as_str();
 
-        quote! {
+        Some(quote! {
             values.insert(
                 #name_str.to_string(),
                 #ousia::query::ToIndexValue::to_index_value(&self.#field_name)
             );
+        })
+    });
+
+    // --- generate geo_points() body ---
+    let has_geo_fields = !geo_indexes.is_empty();
+    let geo_point_pushes = geo_indexes.iter().map(|(virtual_name, lat, lon)| {
+        let lat_ident = format_ident!("{}", lat);
+        let lon_ident = format_ident!("{}", lon);
+        let virtual_name_str = virtual_name.as_str();
+        quote! {
+            {
+                let lon_v: f64 = self.#lon_ident as f64;
+                let lat_v: f64 = self.#lat_ident as f64;
+                points.push(#ousia::query::GeoPoint {
+                    field: #virtual_name_str,
+                    lon: lon_v,
+                    lat: lat_v,
+                    hash: #ousia::object::derive_geo_hash(#virtual_name_str, lon_v, lat_v),
+                });
+            }
         }
     });
+    let geo_points_body = quote! {
+        let mut points: Vec<#ousia::query::GeoPoint> = Vec::new();
+        #(#geo_point_pushes)*
+        points
+    };
 
     // --- generate Indexes struct ---
     let indexes_struct_name = format_ident!("{}Fields", ident);
@@ -796,6 +856,12 @@ pub fn generate_object_impl(input: &DeriveInput) -> Result<TokenStream> {
 
                 #(#index_meta_insertions)*
                 #ousia::query::IndexMeta(values)
+            }
+
+            const HAS_GEO_FIELDS: bool = #has_geo_fields;
+
+            fn geo_points(&self) -> Vec<#ousia::query::GeoPoint> {
+                #geo_points_body
             }
         }
 

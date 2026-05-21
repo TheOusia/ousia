@@ -8,7 +8,7 @@ use uuid::Uuid;
 
 use crate::{
     adapters::{
-        Adapter, EdgeQuery, EdgeRecord, EdgeTraversal, Error, ObjectRecord, Query,
+        Adapter, EdgeQuery, EdgeRecord, EdgeTraversal, Error, GeoAdapter, ObjectRecord, Query,
         TraversalDirection, UniqueAdapter,
     },
     query::{Cursor, IndexValue, IndexValueInner, QueryFilter},
@@ -1765,6 +1765,10 @@ impl Adapter for SqliteAdapter {
         next_val as u64
     }
 }
+
+// SQLite uses GeoAdapter's default impls — writes with geo points return
+// Error::Unsupported, reads/deletes are no-ops.
+impl GeoAdapter for SqliteAdapter {}
 
 #[async_trait::async_trait]
 impl UniqueAdapter for SqliteAdapter {

@@ -176,16 +176,57 @@ pub fn is_private_field(field: &Field) -> bool {
     })
 }
 
-/// Helper to parse kind strings into index kind tokens
+/// Helper to parse kind strings into index kind tokens.
+///
+/// Supports:
+/// - `search`, `sort` (combinable with `+`)
+/// - `geo(lat_field, lon_field)` — cannot be combined with anything else
 pub fn parse_index_kinds(kind_str: &str) -> Vec<proc_macro2::TokenStream> {
     let ousia = import_ousia();
-    kind_str
+    let trimmed = kind_str.trim();
+    if let Some(rest) = trimmed.strip_prefix("geo(") {
+        let inner = rest
+            .strip_suffix(')')
+            .unwrap_or_else(|| panic!("geo(...) index must end with ')', got: {}", kind_str));
+        let parts: Vec<&str> = inner.split(',').map(|s| s.trim()).collect();
+        if parts.len() != 2 || parts.iter().any(|p| p.is_empty()) {
+            panic!(
+                "geo(...) index must reference exactly two fields, got: {}",
+                kind_str
+            );
+        }
+        let lat = parts[0];
+        let lon = parts[1];
+        return vec![quote!(#ousia::query::IndexKind::Geo {
+            lat_field: #lat,
+            lon_field: #lon,
+        })];
+    }
+    trimmed
         .split('+')
         .map(|k| k.trim())
         .map(|k| match k {
             "search" => quote!(#ousia::query::IndexKind::Search),
             "sort" => quote!(#ousia::query::IndexKind::Sort),
-            _ => panic!("Invalid index kind `{}`. Valid kinds: search, sort", k),
+            _ => panic!(
+                "Invalid index kind `{}`. Valid kinds: search, sort, geo(lat_field, lon_field)",
+                k
+            ),
         })
         .collect()
+}
+
+/// If `kind_str` is a `geo(lat_field, lon_field)` expression, return
+/// `Some((lat_field, lon_field))`. Used by the macro codegen to:
+///   - skip struct-field-existence validation for the geo's virtual field name
+///   - generate `geo_points()` impls that read the source lat/lon fields
+pub fn parse_geo_source_fields(kind_str: &str) -> Option<(String, String)> {
+    let trimmed = kind_str.trim();
+    let rest = trimmed.strip_prefix("geo(")?;
+    let inner = rest.strip_suffix(')')?;
+    let parts: Vec<&str> = inner.split(',').map(|s| s.trim()).collect();
+    if parts.len() != 2 || parts.iter().any(|p| p.is_empty()) {
+        return None;
+    }
+    Some((parts[0].to_string(), parts[1].to_string()))
 }

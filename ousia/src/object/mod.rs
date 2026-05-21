@@ -24,3 +24,13 @@ pub fn derive_unique_hash(type_name: &str, field_name: &str, value: &str) -> Str
     hasher.update(value.as_bytes());
     hasher.finalize().to_hex().to_string()
 }
+
+pub fn derive_geo_hash(field_name: &str, lon: f64, lat: f64) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(field_name.as_bytes());
+    hasher.update(b"::");
+    hasher.update(&lon.to_le_bytes());
+    hasher.update(b"::");
+    hasher.update(&lat.to_le_bytes());
+    hasher.finalize().to_hex().to_string()
+}

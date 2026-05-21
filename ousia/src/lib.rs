@@ -165,6 +165,16 @@ impl Engine {
                 .await?;
         }
 
+        if T::HAS_GEO_FIELDS {
+            let points = obj.geo_points();
+            if !points.is_empty() {
+                self.inner
+                    .adapter
+                    .upsert_geo_points(obj.type_name(), obj.id(), points)
+                    .await?;
+            }
+        }
+
         Ok(())
     }
 
@@ -267,6 +277,50 @@ impl Engine {
             }
         }
 
+        if T::HAS_GEO_FIELDS {
+            let object_id = obj.id();
+            let new_points = obj.geo_points();
+            let old_hashes: std::collections::HashMap<String, String> = self
+                .inner
+                .adapter
+                .get_geo_hashes(object_id)
+                .await?
+                .into_iter()
+                .collect();
+
+            let new_fields: std::collections::HashSet<&str> =
+                new_points.iter().map(|p| p.field).collect();
+
+            // Points whose (field, hash) differs from the stored row — these
+            // need to be UPSERTed. Points whose hash is unchanged are skipped.
+            let points_to_upsert: Vec<crate::query::GeoPoint> = new_points
+                .iter()
+                .filter(|p| old_hashes.get(p.field).map(|h| h != &p.hash).unwrap_or(true))
+                .cloned()
+                .collect();
+
+            // Fields that existed before but are no longer produced by the
+            // object — these rows must be deleted.
+            let fields_to_delete: Vec<String> = old_hashes
+                .keys()
+                .filter(|f| !new_fields.contains(f.as_str()))
+                .cloned()
+                .collect();
+
+            if !points_to_upsert.is_empty() {
+                self.inner
+                    .adapter
+                    .upsert_geo_points(obj.type_name(), object_id, points_to_upsert)
+                    .await?;
+            }
+            if !fields_to_delete.is_empty() {
+                self.inner
+                    .adapter
+                    .delete_geo_fields(object_id, fields_to_delete)
+                    .await?;
+            }
+        }
+
         Ok(())
     }
 
@@ -277,6 +331,10 @@ impl Engine {
         owner: Uuid,
     ) -> Result<Option<T>, Error> {
         let record = self.inner.adapter.delete_object(T::TYPE, id, owner).await?;
+
+        if T::HAS_GEO_FIELDS && record.is_some() {
+            self.inner.adapter.delete_geo_for_object(id).await?;
+        }
 
         match record {
             Some(r) => r.to_object().map(Some),
@@ -289,11 +347,19 @@ impl Engine {
         ids: Vec<Uuid>,
         owner: Uuid,
     ) -> Result<u64, Error> {
+        let geo_cleanup_ids = if T::HAS_GEO_FIELDS {
+            ids.clone()
+        } else {
+            Vec::new()
+        };
         let record = self
             .inner
             .adapter
             .delete_bulk_objects(T::TYPE, ids, owner)
             .await?;
+        for id in geo_cleanup_ids {
+            self.inner.adapter.delete_geo_for_object(id).await?;
+        }
 
         Ok(record)
     }

@@ -1,19 +1,24 @@
-pub mod test_postgres_ledger_standalone;
-
-use std::sync::Arc;
-
+#[cfg(test)]
 use chrono::{Days, Utc};
+#[cfg(test)]
 use ousia::{
     Engine,
     adapters::postgres::PostgresAdapter,
-    ledger::{Asset, Balance, LedgerAdapter, LedgerSystem, Money, MoneyError},
+    ledger::{Asset, Balance, LedgerAdapter, Money, MoneyError},
 };
+#[cfg(test)]
 use sqlx::PgPool;
+#[cfg(test)]
+use std::sync::Arc;
+#[cfg(test)]
 use testcontainers::ContainerAsync;
+#[cfg(test)]
 use testcontainers_modules::postgres::Postgres;
+#[cfg(test)]
 use uuid::Uuid;
 
-pub(crate) async fn setup_test_db() -> (ContainerAsync<Postgres>, PgPool) {
+#[cfg(test)]
+async fn setup_test_db() -> (ContainerAsync<Postgres>, PgPool) {
     use sqlx::postgres::PgPoolOptions;
     use testcontainers::{ImageExt, runners::AsyncRunner as _};
 
@@ -21,7 +26,8 @@ pub(crate) async fn setup_test_db() -> (ContainerAsync<Postgres>, PgPool) {
         .with_password("postgres")
         .with_user("postgres")
         .with_db_name("postgres")
-        .with_tag("16-alpine")
+        .with_name("postgis/postgis")
+        .with_tag("16-3.4-alpine")
         .start()
         .await
     {
@@ -46,6 +52,7 @@ pub(crate) async fn setup_test_db() -> (ContainerAsync<Postgres>, PgPool) {
     (postgres, pool)
 }
 
+#[cfg(test)]
 async fn setup() -> (ContainerAsync<Postgres>, Engine, Uuid) {
     let (_resource, pool) = setup_test_db().await;
     let adapter = PostgresAdapter::from_pool(pool);
@@ -57,6 +64,7 @@ async fn setup() -> (ContainerAsync<Postgres>, Engine, Uuid) {
     (_resource, engine, user)
 }
 
+#[cfg(test)]
 async fn create_usd_asset(system: &Arc<dyn LedgerAdapter>) -> Asset {
     let usd = Asset::new("USD", 10_00, 2);
     system.create_asset(usd.clone()).await.unwrap();
@@ -87,7 +95,7 @@ async fn test_mint_creates_balance() {
 async fn test_simple_transfer() {
     let (_resource, engine, user) = setup().await;
     let merchant = Uuid::now_v7();
-    let usd = create_usd_asset(&engine.ledger()).await;
+    let _ = create_usd_asset(&engine.ledger()).await;
 
     // Mint initial balance
     let ctx = engine.ledger_ctx();
@@ -367,7 +375,10 @@ async fn test_settle_with_change() {
 
     assert_eq!(authority_balance.reserved, 20_00);
     assert_eq!(receiver_balance.available, 40_00);
-    assert_eq!(authority_balance.reserved + receiver_balance.available, 60_00);
+    assert_eq!(
+        authority_balance.reserved + receiver_balance.available,
+        60_00
+    );
 }
 
 #[tokio::test]

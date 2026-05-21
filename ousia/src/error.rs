@@ -7,6 +7,7 @@ pub enum Error {
     Deserialize(String),
     Storage(String),
     UniqueConstraintViolation(String),
+    Unsupported(String),
 }
 
 impl Display for Error {
@@ -19,6 +20,7 @@ impl Display for Error {
             Error::UniqueConstraintViolation(field) => {
                 write!(f, "Unique constraint violation on field: {}", field)
             }
+            Error::Unsupported(msg) => write!(f, "Unsupported operation: {}", msg),
         }
     }
 }

@@ -8,7 +8,7 @@ use uuid::Uuid;
 
 use crate::{
     adapters::{EdgeQuery, EdgeRecord, Error, ObjectRecord, TraversalDirection},
-    query::{Cursor, IndexValue, IndexValueInner, QueryFilter},
+    query::{Cursor, GeoFilter, IndexValue, IndexValueInner, QueryFilter},
 };
 
 impl PostgresAdapter {
@@ -328,7 +328,16 @@ impl PostgresAdapter {
         filters: &[QueryFilter],
         cursor: Option<Cursor>,
     ) -> String {
-        // $1 = type, $2 = owner, $3 = cursor (optional), $4+ = filter values
+        Self::build_object_query_conditions_with_geo(filters, cursor, None)
+    }
+
+    pub(super) fn build_object_query_conditions_with_geo(
+        filters: &[QueryFilter],
+        cursor: Option<Cursor>,
+        geo: Option<&GeoFilter>,
+    ) -> String {
+        // $1 = type, $2 = owner, $3 = cursor (optional), $4+ = filter values,
+        // then 4 trailing params for geo (field, lon, lat, radius) when present.
         let mut conditions: Vec<(String, &str)> = vec![
             ("o.type = $1".to_string(), "AND"),
             ("o.owner = $2".to_string(), "AND"),
@@ -346,7 +355,58 @@ impl PostgresAdapter {
             }
         }
 
+        if geo.is_some() {
+            let field_p = param_idx;
+            let lon_p = param_idx + 1;
+            let lat_p = param_idx + 2;
+            let rad_p = param_idx + 3;
+            conditions.push((format!("g.field = ${}", field_p), "AND"));
+            conditions.push((
+                format!(
+                    "ST_DWithin(g.location, ST_SetSRID(ST_MakePoint(${}, ${}), 4326)::geography, ${})",
+                    lon_p, lat_p, rad_p
+                ),
+                "AND",
+            ));
+        }
+
         format!("WHERE {}", Self::join_conditions(&conditions))
+    }
+
+    pub(super) fn geo_join_clause(geo: Option<&GeoFilter>) -> &'static str {
+        if geo.is_some() {
+            "JOIN public.object_geo g ON g.object_id = o.id"
+        } else {
+            ""
+        }
+    }
+
+    pub(super) fn bind_geo_filter<'a>(
+        mut query: PgQuery<'a, Postgres, PgArguments>,
+        geo: Option<&'a GeoFilter>,
+    ) -> PgQuery<'a, Postgres, PgArguments> {
+        if let Some(gf) = geo {
+            query = query
+                .bind(&gf.field)
+                .bind(gf.lon)
+                .bind(gf.lat)
+                .bind(gf.radius_m);
+        }
+        query
+    }
+
+    pub(super) fn bind_geo_filter_scalar<'a, O>(
+        mut query: QueryScalar<'a, Postgres, O, PgArguments>,
+        geo: Option<&'a GeoFilter>,
+    ) -> QueryScalar<'a, Postgres, O, PgArguments> {
+        if let Some(gf) = geo {
+            query = query
+                .bind(&gf.field)
+                .bind(gf.lon)
+                .bind(gf.lat)
+                .bind(gf.radius_m);
+        }
+        query
     }
 
     pub(super) fn build_edge_query_conditions(
