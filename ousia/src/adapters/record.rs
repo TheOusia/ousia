@@ -68,6 +68,8 @@ pub struct EdgeRecord {
     pub to: Uuid,
     pub data: serde_json::Value,
     pub index_meta: serde_json::Value,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
 }
 
 impl EdgeRecord {
@@ -77,6 +79,8 @@ impl EdgeRecord {
         let meta = val.meta_mut();
         meta.to = self.to;
         meta.from = self.from;
+        meta.created_at = self.created_at;
+        meta.updated_at = self.updated_at;
         Ok(val)
     }
 
@@ -89,6 +93,8 @@ impl EdgeRecord {
             data: serde_json::to_value(edge).expect("Failed to serialize edge"),
             index_meta: serde_json::to_value(edge.index_meta())
                 .expect("Failed to serialize index meta"),
+            created_at: meta.created_at,
+            updated_at: meta.updated_at,
         }
     }
 }

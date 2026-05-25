@@ -1,3 +1,4 @@
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -26,6 +27,8 @@ pub trait Edge: Serialize + for<'de> Deserialize<'de> + Sized + Send + Sync + 's
 pub trait EdgeMetaTrait {
     fn from(&self) -> Uuid;
     fn to(&self) -> Uuid;
+    fn created_at(&self) -> DateTime<Utc>;
+    fn updated_at(&self) -> DateTime<Utc>;
 }
 
 impl<E> EdgeMetaTrait for E
@@ -38,5 +41,13 @@ where
 
     fn to(&self) -> uuid::Uuid {
         self.meta().to()
+    }
+
+    fn created_at(&self) -> DateTime<Utc> {
+        self.meta().created_at()
+    }
+
+    fn updated_at(&self) -> DateTime<Utc> {
+        self.meta().updated_at()
     }
 }

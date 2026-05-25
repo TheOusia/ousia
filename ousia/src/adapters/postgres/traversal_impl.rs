@@ -66,6 +66,7 @@ impl EdgeTraversal for PostgresAdapter {
             SELECT
                 e."from" AS edge_from, e."to" AS edge_to, e.type AS edge_type,
                 e.data AS edge_data, e.index_meta AS edge_index_meta,
+                e.created_at AS edge_created_at, e.updated_at AS edge_updated_at,
                 o.id AS obj_id, o.type AS obj_type, o.owner AS obj_owner,
                 o.created_at AS obj_created_at, o.updated_at AS obj_updated_at, o.data AS obj_data
             FROM edges e
@@ -112,6 +113,7 @@ impl EdgeTraversal for PostgresAdapter {
             SELECT
                 e."from" AS edge_from, e."to" AS edge_to, e.type AS edge_type,
                 e.data AS edge_data, e.index_meta AS edge_index_meta,
+                e.created_at AS edge_created_at, e.updated_at AS edge_updated_at,
                 o.id AS obj_id, o.type AS obj_type, o.owner AS obj_owner,
                 o.created_at AS obj_created_at, o.updated_at AS obj_updated_at, o.data AS obj_data
             FROM edges e
@@ -150,7 +152,7 @@ impl EdgeTraversal for PostgresAdapter {
         let order_clause = Self::build_edge_order_clause(&plan.filters);
         let mut sql = format!(
             r#"
-            SELECT e."from", e."to", e.type, e.data, e.index_meta
+            SELECT e."from", e."to", e.type, e.data, e.index_meta, e.created_at, e.updated_at
             FROM edges e
             {where_clause}
             {order_clause}
@@ -182,7 +184,7 @@ impl EdgeTraversal for PostgresAdapter {
         let order_clause = Self::build_edge_order_clause(&plan.filters);
         let mut sql = format!(
             r#"
-            SELECT e."from", e."to", e.type, e.data, e.index_meta
+            SELECT e."from", e."to", e.type, e.data, e.index_meta, e.created_at, e.updated_at
             FROM edges e
             {where_clause}
             {order_clause}
@@ -231,6 +233,7 @@ impl EdgeTraversal for PostgresAdapter {
             SELECT
                 e."from" AS edge_from, e."to" AS edge_to, e.type AS edge_type,
                 e.data AS edge_data, e.index_meta AS edge_index_meta,
+                e.created_at AS edge_created_at, e.updated_at AS edge_updated_at,
                 o.id AS obj_id, o.type AS obj_type, o.owner AS obj_owner,
                 o.created_at AS obj_created_at, o.updated_at AS obj_updated_at, o.data AS obj_data
         "#;
@@ -282,10 +285,10 @@ impl EdgeTraversal for PostgresAdapter {
         );
         let sql = format!(
             r#"
-            SELECT e."from", e."to", e.type, e.data, e.index_meta
+            SELECT e."from", e."to", e.type, e.data, e.index_meta, e.created_at, e.updated_at
             FROM edges e {fwd_where}
             UNION ALL
-            SELECT e."from", e."to", e.type, e.data, e.index_meta
+            SELECT e."from", e."to", e.type, e.data, e.index_meta, e.created_at, e.updated_at
             FROM edges e {rev_where}
             "#,
         );

@@ -3,8 +3,13 @@ mod adapter;
 #[cfg(test)]
 #[tokio::test]
 async fn test_view() {
+    use std::time::Duration;
     use ousia::ObjectMeta;
-    use ousia::{Engine, Meta, OusiaDefault, OusiaObject, adapters::sqlite::SqliteAdapter};
+    use ousia::{Engine, Meta, OusiaDefault, OusiaObject, adapters::postgres::PostgresAdapter};
+    use sqlx::postgres::PgPoolOptions;
+    use testcontainers::{ImageExt, runners::AsyncRunner as _};
+    use testcontainers_modules::postgres::Postgres;
+
     #[derive(OusiaObject, OusiaDefault, Debug, Clone)]
     pub struct User {
         #[ousia_meta(view(dashboard = "id, owner, created_at, updated_at"))]
@@ -24,12 +29,31 @@ async fn test_view() {
         password: String,
     }
 
-    let adapter = SqliteAdapter::new_memory().await.unwrap();
-    adapter.init_schema().await.unwrap();
+    let postgres = Postgres::default()
+        .with_password("postgres")
+        .with_user("postgres")
+        .with_db_name("postgres")
+        .with_name("postgis/postgis")
+        .with_tag("16-3.4-alpine")
+        .start()
+        .await
+        .expect("Failed to start Postgres");
 
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    let port = postgres.get_host_port_ipv4(5432).await.unwrap();
+    let db_url = format!("postgres://postgres:postgres@localhost:{}/postgres", port);
+
+    let pool = PgPoolOptions::new()
+        .max_connections(5)
+        .connect(&db_url)
+        .await
+        .expect("Failed to connect to Postgres");
+
+    let adapter = PostgresAdapter::from_pool(pool);
+    adapter.init_schema().await.unwrap();
     let engine = Engine::new(Box::new(adapter));
 
-    // Create owner
     let mut user = User::default();
     user.display_name = "Owner".to_string();
     user.email = "owner@example.com".to_string();

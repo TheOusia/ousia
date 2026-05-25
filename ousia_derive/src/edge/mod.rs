@@ -510,6 +510,8 @@ pub fn derive(input: TokenStream) -> TokenStream {
         pub struct #indexes_struct_name {
             pub from: #ousia::query::IndexField,
             pub to: #ousia::query::IndexField,
+            pub created_at: #ousia::query::IndexField,
+            pub updated_at: #ousia::query::IndexField,
             #(#indexes_struct_fields),*
         }
 
@@ -522,6 +524,14 @@ pub fn derive(input: TokenStream) -> TokenStream {
                 to: #ousia::query::IndexField {
                     name: "to",
                     kinds: &[#ousia::query::IndexKind::Search],
+                },
+                created_at: #ousia::query::IndexField {
+                    name: "created_at",
+                    kinds: &[#ousia::query::IndexKind::Search, #ousia::query::IndexKind::Sort],
+                },
+                updated_at: #ousia::query::IndexField {
+                    name: "updated_at",
+                    kinds: &[#ousia::query::IndexKind::Search, #ousia::query::IndexKind::Sort],
                 },
                 #(#indexes_const_fields),*
             };

@@ -1,6 +1,6 @@
 [package]
 name = "ousia"
-version = "1.2.9"
+version = "1.3.0"
 edition = "2024"
 description = "Postgres ORM with native double-entry ledger, graph relations, and atomic money operations for Rust"
 license = "MIT"
@@ -17,10 +17,9 @@ rust-version = "1.85"
 default = ["derive", "postgres", "ledger"]
 derive = ["dep:ousia_derive"]
 
-full = ["derive", "postgres", "sqlite", "ledger"]
+full = ["derive", "postgres", "ledger"]
 
 postgres = ["dep:sqlx"]
-sqlite = ["dep:sqlx"]
 
 ledger = ["dep:ledger"]
 
@@ -32,7 +31,6 @@ async-trait = "0.1.89"
 serde_json = "1.0.145"
 sqlx = { version = "0.8", features = [
     "postgres",
-    "sqlite",
     "runtime-tokio",
     "derive",
     "tls-native-tls",

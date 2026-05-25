@@ -122,7 +122,9 @@ impl PostgresAdapter {
                 "to" uuid NOT NULL,
                 type TEXT NOT NULL,
                 data JSONB NOT NULL,
-                index_meta JSONB NOT NULL
+                index_meta JSONB NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             );
             "#,
         )
@@ -161,6 +163,26 @@ impl PostgresAdapter {
             r#"
             CREATE INDEX IF NOT EXISTS idx_edges_index_meta
                 ON public.edges USING GIN (index_meta jsonb_path_ops);
+            "#,
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| Error::Storage(e.to_string()))?;
+
+        sqlx::query(
+            r#"
+            CREATE INDEX IF NOT EXISTS idx_edges_from_type_created
+                ON public.edges("from", type, created_at DESC);
+            "#,
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| Error::Storage(e.to_string()))?;
+
+        sqlx::query(
+            r#"
+            CREATE INDEX IF NOT EXISTS idx_edges_to_type_created
+                ON public.edges("to", type, created_at DESC);
             "#,
         )
         .execute(&mut *tx)

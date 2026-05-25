@@ -650,13 +650,15 @@ impl Adapter for PostgresAdapter {
             type_name,
             data,
             index_meta,
+            created_at,
+            updated_at,
         } = record;
         let _ = sqlx::query(
             r#"
-            INSERT INTO edges ("from", "to", type, data, index_meta)
-            VALUES ($1, $2, $3, $4, $5)
+            INSERT INTO edges ("from", "to", type, data, index_meta, created_at, updated_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
             ON CONFLICT ("from", type, "to")
-            DO UPDATE SET data = $4, index_meta = $5;
+            DO UPDATE SET data = $4, index_meta = $5, updated_at = $7;
             "#,
         )
         .bind(from)
@@ -664,6 +666,8 @@ impl Adapter for PostgresAdapter {
         .bind(type_name.as_ref())
         .bind(data)
         .bind(index_meta)
+        .bind(created_at)
+        .bind(updated_at)
         .execute(&self.pool)
         .await
         .map_err(|err| Error::Storage(err.to_string()))?;
@@ -685,12 +689,13 @@ impl Adapter for PostgresAdapter {
         } = record;
         let _ = sqlx::query(
             r#"
-        UPDATE edges SET data = $1, "to" = $2
-        WHERE "from" = $3 AND type = $4 AND "to" = $5
+        UPDATE edges SET data = $1, "to" = $2, updated_at = $3
+        WHERE "from" = $4 AND type = $5 AND "to" = $6
         "#,
         )
         .bind(data)
         .bind(to.unwrap_or(old_to))
+        .bind(Utc::now())
         .bind(from)
         .bind(type_name.as_ref())
         .bind(old_to)
@@ -747,7 +752,7 @@ impl Adapter for PostgresAdapter {
     ) -> Result<Option<EdgeRecord>, Error> {
         let row = sqlx::query(
             r#"
-        SELECT e."from", e."to", e.type, e.data
+        SELECT e."from", e."to", e.type, e.data, e.created_at, e.updated_at
         FROM edges e
         WHERE type = $1 AND "from" = $2 AND "to" = $3
         "#,

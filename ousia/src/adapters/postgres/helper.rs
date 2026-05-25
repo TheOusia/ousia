@@ -57,24 +57,15 @@ impl PostgresAdapter {
     }
 
     pub(super) fn map_row_to_edge_record(row: PgRow) -> Result<EdgeRecord, Error> {
-        let type_name = row
-            .try_get::<String, _>("type")
-            .map_err(|e| Error::Deserialize(e.to_string()))?;
-        let from = row
-            .try_get::<Uuid, _>("from")
-            .map_err(|e| Error::Deserialize(e.to_string()))?;
-        let to = row
-            .try_get::<Uuid, _>("to")
-            .map_err(|e| Error::Deserialize(e.to_string()))?;
-        let data: serde_json::Value = row
-            .try_get("data")
-            .map_err(|e| Error::Deserialize(e.to_string()))?;
+        let de = |e: sqlx::Error| Error::Deserialize(e.to_string());
         Ok(EdgeRecord {
-            type_name: std::borrow::Cow::Owned(type_name),
-            from,
-            to,
-            data,
+            type_name: std::borrow::Cow::Owned(row.try_get::<String, _>("type").map_err(de)?),
+            from: row.try_get::<Uuid, _>("from").map_err(de)?,
+            to: row.try_get::<Uuid, _>("to").map_err(de)?,
+            data: row.try_get::<serde_json::Value, _>("data").map_err(de)?,
             index_meta: serde_json::Value::Null,
+            created_at: row.try_get("created_at").map_err(de)?,
+            updated_at: row.try_get("updated_at").map_err(de)?,
         })
     }
 
@@ -90,6 +81,8 @@ impl PostgresAdapter {
                 .try_get::<serde_json::Value, _>("edge_data")
                 .map_err(de)?,
             index_meta: serde_json::Value::Null,
+            created_at: row.try_get("edge_created_at").map_err(de)?,
+            updated_at: row.try_get("edge_updated_at").map_err(de)?,
         };
         let obj = ObjectRecord {
             id: row.try_get::<Uuid, _>("obj_id").map_err(de)?,
@@ -130,6 +123,7 @@ impl PostgresAdapter {
             SELECT
                 e."from" AS edge_from, e."to" AS edge_to, e.type AS edge_type,
                 e.data AS edge_data,
+                e.created_at AS edge_created_at, e.updated_at AS edge_updated_at,
                 o.id AS obj_id, o.type AS obj_type, o.owner AS obj_owner,
                 o.created_at AS obj_created_at, o.updated_at AS obj_updated_at,
                 o.data AS obj_data
@@ -186,7 +180,11 @@ impl PostgresAdapter {
                 .map(serde_json::Value::Number)
                 .unwrap_or(serde_json::Value::Null),
             IndexValue::Bool(b) => serde_json::Value::Bool(*b),
-            _ => unreachable!("UUID/Timestamp/Array handled in extraction path"),
+            IndexValue::Uuid(u) => serde_json::to_value(u).unwrap_or(serde_json::Value::Null),
+            IndexValue::Timestamp(ts) => {
+                serde_json::to_value(ts).unwrap_or(serde_json::Value::Null)
+            }
+            IndexValue::Array(_) => unreachable!("Array handled separately"),
         }
     }
 
@@ -214,7 +212,9 @@ impl PostgresAdapter {
                 IndexValue::String(_)
                 | IndexValue::Int(_)
                 | IndexValue::Float(_)
-                | IndexValue::Bool(_),
+                | IndexValue::Bool(_)
+                | IndexValue::Uuid(_)
+                | IndexValue::Timestamp(_),
             ) => {
                 let cond = format!("{}.index_meta @> ${}", alias, param_idx);
                 *param_idx += 1;
@@ -227,7 +227,9 @@ impl PostgresAdapter {
                 IndexValue::String(_)
                 | IndexValue::Int(_)
                 | IndexValue::Float(_)
-                | IndexValue::Bool(_),
+                | IndexValue::Bool(_)
+                | IndexValue::Uuid(_)
+                | IndexValue::Timestamp(_),
             ) => {
                 let cond = format!("NOT ({}.index_meta @> ${})", alias, param_idx);
                 *param_idx += 1;
@@ -307,16 +309,41 @@ impl PostgresAdapter {
     }
 
     pub(super) fn join_conditions(conditions: &[(String, &str)]) -> String {
-        let mut out = String::new();
-        for (i, (cond, op)) in conditions.iter().enumerate() {
-            out.push_str(cond);
-            if i < conditions.len() - 1 {
-                out.push(' ');
-                out.push_str(op);
-                out.push(' ');
+        if conditions.is_empty() {
+            return String::new();
+        }
+
+        // Each condition's operator means "how to connect THIS to the PREVIOUS condition".
+        // Consecutive conditions joined by OR are wrapped in parentheses so that
+        // SQL operator precedence (AND > OR) does not break the intended semantics.
+        //
+        // Example: [type=$1/AND, owner=$2/AND, meta@>$3/AND, meta@>$4/OR]
+        //   → "type=$1 AND owner=$2 AND (meta@>$3 OR meta@>$4)"
+        let mut segments: Vec<String> = Vec::new();
+        let mut or_group: Vec<String> = vec![conditions[0].0.clone()];
+
+        for (cond, op) in &conditions[1..] {
+            if *op == "OR" {
+                or_group.push(cond.clone());
+            } else {
+                // Flush the current OR group into a segment.
+                if or_group.len() == 1 {
+                    segments.push(or_group.remove(0));
+                } else {
+                    segments.push(format!("({})", or_group.join(" OR ")));
+                    or_group.clear();
+                }
+                or_group.push(cond.clone());
             }
         }
-        out
+        // Flush the final group.
+        if or_group.len() == 1 {
+            segments.push(or_group.remove(0));
+        } else {
+            segments.push(format!("({})", or_group.join(" OR ")));
+        }
+
+        segments.join(" AND ")
     }
 
     /// Maps an `IndexValue` to its Postgres cast type string.
@@ -782,7 +809,9 @@ impl PostgresAdapter {
                     IndexValue::String(_)
                     | IndexValue::Int(_)
                     | IndexValue::Float(_)
-                    | IndexValue::Bool(_),
+                    | IndexValue::Bool(_)
+                    | IndexValue::Uuid(_)
+                    | IndexValue::Timestamp(_),
                 ) => {
                     query = query.bind(Self::make_eq_json(
                         filter.field.name,
@@ -806,7 +835,7 @@ impl PostgresAdapter {
                         ));
                     }
                 }
-                // Extraction-based binds: range ops, ILIKE, UUID, timestamp
+                // Extraction-based binds: range ops, ILIKE
                 (_, IndexValue::String(s)) => {
                     query = match search.comparison {
                         BeginsWith => query.bind(format!("{}%", s)),
@@ -850,7 +879,9 @@ impl PostgresAdapter {
                     IndexValue::String(_)
                     | IndexValue::Int(_)
                     | IndexValue::Float(_)
-                    | IndexValue::Bool(_),
+                    | IndexValue::Bool(_)
+                    | IndexValue::Uuid(_)
+                    | IndexValue::Timestamp(_),
                 ) => {
                     query = query.bind(Self::make_eq_json(
                         filter.field.name,
@@ -874,7 +905,7 @@ impl PostgresAdapter {
                         ));
                     }
                 }
-                // Extraction-based binds: range ops, ILIKE, UUID, timestamp
+                // Extraction-based binds: range ops, ILIKE
                 (_, IndexValue::String(s)) => {
                     query = match search.comparison {
                         BeginsWith => query.bind(format!("{}%", s)),
@@ -1105,7 +1136,7 @@ impl PostgresAdapter {
 
         let mut sql = format!(
             r#"
-            SELECT e."from", e."to", e.type, e.data, e.index_meta
+            SELECT e."from", e."to", e.type, e.data, e.index_meta, e.created_at, e.updated_at
             FROM edges e
             {}
             {}
