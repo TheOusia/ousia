@@ -134,6 +134,26 @@ impl PostgresAdapter {
 
         sqlx::query(
             r#"
+            ALTER TABLE public.edges
+                ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+            "#,
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| Error::Storage(e.to_string()))?;
+
+        sqlx::query(
+            r#"
+            ALTER TABLE public.edges
+                ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+            "#,
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| Error::Storage(e.to_string()))?;
+
+        sqlx::query(
+            r#"
             CREATE UNIQUE INDEX IF NOT EXISTS idx_edges_key ON public.edges("from", "to", type);
             "#,
         )
