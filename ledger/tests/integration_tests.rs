@@ -41,6 +41,47 @@ async fn test_mint_creates_balance() {
 }
 
 #[tokio::test]
+async fn test_mint_and_reserve() {
+    let (system, ctx, user) = setup();
+    let _ = create_usd_asset(&system).await;
+
+    let oid = Uuid::now_v7();
+
+    Money::atomic(&ctx, |tx| async move {
+        tx.mint_idempotent(
+            "USD",
+            user,
+            100_00,
+            format!("checkout-deposit:{}", oid),
+            "unique-key".to_string(),
+        )
+        .await?;
+
+        tx.reserve(
+            "USD",
+            user,
+            oid,
+            100_00,
+            format!("checkout-reserve:{}", oid),
+        )
+        .await?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+
+    let user_balance = Balance::get("USD", user, &ctx).await.unwrap();
+    assert_eq!(user_balance.available, 0);
+    assert_eq!(user_balance.reserved, 0);
+    assert_eq!(user_balance.total, 0);
+
+    let authority_balance = Balance::get("USD", oid, &ctx).await.unwrap();
+    assert_eq!(authority_balance.available, 0);
+    assert_eq!(authority_balance.reserved, 100_00);
+    assert_eq!(authority_balance.total, 100_00);
+}
+
+#[tokio::test]
 async fn test_simple_transfer() {
     let (system, ctx, user) = setup();
     let merchant = Uuid::now_v7();
@@ -310,7 +351,10 @@ async fn test_settle_with_change() {
 
     assert_eq!(authority_balance.reserved, 20_00);
     assert_eq!(receiver_balance.available, 40_00);
-    assert_eq!(authority_balance.reserved + receiver_balance.available, 60_00);
+    assert_eq!(
+        authority_balance.reserved + receiver_balance.available,
+        60_00
+    );
 }
 
 #[tokio::test]

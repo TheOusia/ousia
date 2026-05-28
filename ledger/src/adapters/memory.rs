@@ -54,6 +54,34 @@ impl LedgerAdapter for MemoryAdapter {
         let assets = self.store.assets.lock().unwrap();
         let mut transactions = self.store.transactions.lock().unwrap();
 
+        // ── Phase 0: Apply mints ──────────────────────────────────────────────
+        // Mints create new value; they don't compete for existing VOs. Running
+        // them first means Phase 1's selection sees them as ordinary alive
+        // rows, so a reserve/transfer in the same atomic block can be funded
+        // by an in-plan mint without any special-case Phase 3 accounting.
+        for op in plan.operations() {
+            if let Operation::Mint {
+                asset_id,
+                owner,
+                amount,
+                ..
+            } = op
+            {
+                let asset = assets
+                    .values()
+                    .find(|a| a.id == *asset_id)
+                    .ok_or_else(|| MoneyError::AssetNotFound(asset_id.to_string()))?;
+
+                let mut remaining = *amount;
+                while remaining > 0 {
+                    let chunk = remaining.min(asset.unit);
+                    let vo = ValueObject::new_alive(*asset_id, *owner, chunk);
+                    value_objects.insert(vo.id, vo);
+                    remaining -= chunk;
+                }
+            }
+        }
+
         // ── Phase 1: Select & verify under lock ───────────────────────────────
         // HashMap<(asset_id, owner) -> (selected_vo_ids, total_locked)>
         let mut locked: HashMap<(Uuid, Uuid), (Vec<Uuid>, u64)> = HashMap::new();
@@ -88,30 +116,13 @@ impl LedgerAdapter for MemoryAdapter {
         }
 
         // ── Phase 2: Execute operations ───────────────────────────────────────
-        // Track how much of each locked pool is actually consumed
+        // Track how much of each locked pool is actually consumed.
+        // Mints already applied in Phase 0.
         let mut used: HashMap<(Uuid, Uuid), u64> = HashMap::new();
 
         for op in plan.operations() {
             match op {
-                Operation::Mint {
-                    asset_id,
-                    owner,
-                    amount,
-                    ..
-                } => {
-                    let asset = assets
-                        .values()
-                        .find(|a| a.id == *asset_id)
-                        .ok_or_else(|| MoneyError::AssetNotFound(asset_id.to_string()))?;
-
-                    let mut remaining = *amount;
-                    while remaining > 0 {
-                        let chunk = remaining.min(asset.unit);
-                        let vo = ValueObject::new_alive(*asset_id, *owner, chunk);
-                        value_objects.insert(vo.id, vo);
-                        remaining -= chunk;
-                    }
-                }
+                Operation::Mint { .. } => {}
 
                 Operation::Burn {
                     asset_id,

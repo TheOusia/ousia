@@ -472,6 +472,24 @@ where
             .await
             .map_err(|e| MoneyError::Storage(e.to_string()))?;
 
+        // ── Phase 0: Apply mints ───────────────────────────────────────────────
+        // Mints create new value; they don't compete for existing VOs. Running
+        // them first means Phase 1's FOR UPDATE sees them as ordinary alive
+        // rows, so a reserve/transfer in the same atomic block can be funded
+        // by an in-plan mint without any special-case Phase 3 accounting.
+        for op in plan.operations() {
+            if let Operation::Mint {
+                asset_id,
+                owner,
+                amount,
+                ..
+            } = op
+            {
+                self.mint_internal_tx(&mut tx, *asset_id, *owner, *amount)
+                    .await?;
+            }
+        }
+
         // ── Phase 1: Lock & verify ─────────────────────────────────────────────
         // Select oldest VOs first (FIFO) so burned rows age out predictably and
         // can be archived by a background job once cold.
@@ -523,19 +541,12 @@ where
         }
 
         // ── Phase 2: Execute operations ────────────────────────────────────────
+        // Mints already applied in Phase 0.
         let mut used: HashMap<(Uuid, Uuid), u64> = HashMap::new();
 
         for op in plan.operations() {
             match op {
-                Operation::Mint {
-                    asset_id,
-                    owner,
-                    amount,
-                    ..
-                } => {
-                    self.mint_internal_tx(&mut tx, *asset_id, *owner, *amount)
-                        .await?;
-                }
+                Operation::Mint { .. } => {}
                 Operation::Burn {
                     asset_id,
                     owner,
