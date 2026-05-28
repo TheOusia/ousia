@@ -5,8 +5,8 @@ use std::time::Duration;
 use super::*;
 #[cfg(test)]
 use ousia::{
-    EdgeMeta, EdgeMetaTrait, EdgeQuery, Engine, Error, Object, ObjectMeta, ObjectOwnership,
-    Query, Union,
+    EdgeMeta, EdgeMetaTrait, EdgeQuery, Engine, Error, Object, ObjectMeta, ObjectOwnership, Query,
+    Union,
     adapters::{ObjectRecord, postgres::PostgresAdapter},
     filter, system_owner,
 };
@@ -62,7 +62,10 @@ async fn test_insert_and_fetch_object() {
     let mut user = User::default();
     user.username = "alice".into();
     user.email = "alice@example.com".into();
-    adapter.insert_object(ObjectRecord::from_object(&user)).await.unwrap();
+    adapter
+        .insert_object(ObjectRecord::from_object(&user))
+        .await
+        .unwrap();
 
     let fetched = adapter.fetch_object(User::TYPE, user.id()).await.unwrap();
     assert!(fetched.is_some());
@@ -283,9 +286,7 @@ async fn test_query_string_filters() {
 
     // Enum equality / inequality
     let r: Vec<Post> = engine
-        .query_objects(
-            Query::new(owner.id()).where_eq(&Post::FIELDS.status, PostStatus::Published),
-        )
+        .query_objects(Query::new(owner.id()).where_eq(&Post::FIELDS.status, PostStatus::Published))
         .await
         .unwrap();
     assert_eq!(r.len(), 1, "where_eq enum");
@@ -368,9 +369,7 @@ async fn test_query_array_filters() {
 
     // contains any of [rust]
     let r: Vec<Post> = engine
-        .query_objects(
-            Query::new(owner.id()).where_contains(&Post::FIELDS.tags, vec!["rust"]),
-        )
+        .query_objects(Query::new(owner.id()).where_contains(&Post::FIELDS.tags, vec!["rust"]))
         .await
         .unwrap();
     assert_eq!(r.len(), 2, "contains [rust]");
@@ -378,8 +377,7 @@ async fn test_query_array_filters() {
     // contains_all [rust, async] — only B
     let r: Vec<Post> = engine
         .query_objects(
-            Query::new(owner.id())
-                .where_contains_all(&Post::FIELDS.tags, vec!["rust", "async"]),
+            Query::new(owner.id()).where_contains_all(&Post::FIELDS.tags, vec!["rust", "async"]),
         )
         .await
         .unwrap();
@@ -491,7 +489,11 @@ async fn test_query_sort_and_pagination() {
 
     // with_limit
     let r: Vec<User> = engine
-        .query_objects(Query::default().sort_asc(&User::FIELDS.username).with_limit(3))
+        .query_objects(
+            Query::default()
+                .sort_asc(&User::FIELDS.username)
+                .with_limit(3),
+        )
         .await
         .unwrap();
     assert_eq!(r.len(), 3);
@@ -633,6 +635,286 @@ async fn test_count_objects() {
     assert_eq!(count, 0);
 }
 
+#[tokio::test]
+async fn test_query_all_index_value_variants() {
+    let (_r, pool) = setup_test_db().await;
+    let adapter = PostgresAdapter::from_pool(pool);
+    adapter.init_schema().await.unwrap();
+    let engine = Engine::new(Box::new(adapter));
+
+    let uid_a = uuid::Uuid::now_v7();
+    let uid_b = uuid::Uuid::now_v7();
+    let t0 = chrono::DateTime::<chrono::Utc>::from_timestamp(1_700_000_000, 0).unwrap();
+    let t1 = t0 + chrono::Duration::days(1);
+    let t2 = t0 + chrono::Duration::days(2);
+
+    for (name, count, price, active, uid, ts, tags, scores) in [
+        (
+            "alpha",
+            1i64,
+            1.5f64,
+            true,
+            uid_a,
+            t0,
+            vec!["red", "blue"],
+            vec![10i64, 20],
+        ),
+        (
+            "bravo",
+            2,
+            2.5,
+            false,
+            uid_b,
+            t1,
+            vec!["green"],
+            vec![20, 30],
+        ),
+        (
+            "charlie",
+            3,
+            3.5,
+            true,
+            uid_a,
+            t2,
+            vec!["blue", "green"],
+            vec![10, 30],
+        ),
+    ] {
+        let mut v = Variants::default();
+        v.name = name.into();
+        v.count = count;
+        v.price = price;
+        v.active = active;
+        v.uid = uid;
+        v.occurred_at = EventTime(ts);
+        v.tags = tags.into_iter().map(String::from).collect();
+        v.scores = scores;
+        engine.create_object(&v).await.unwrap();
+    }
+
+    // String (IndexValue::String)
+    let r: Vec<Variants> = engine
+        .query_objects(Query::default().where_eq(&Variants::FIELDS.name, "alpha"))
+        .await
+        .unwrap();
+    assert_eq!(r.len(), 1, "String where_eq");
+    let r: Vec<Variants> = engine
+        .query_objects(Query::default().where_ne(&Variants::FIELDS.name, "alpha"))
+        .await
+        .unwrap();
+    assert_eq!(r.len(), 2, "String where_ne");
+    let r: Vec<Variants> = engine
+        .query_objects(Query::default().where_begins_with(&Variants::FIELDS.name, "br"))
+        .await
+        .unwrap();
+    assert_eq!(r.len(), 1, "String where_begins_with");
+    let r: Vec<Variants> = engine
+        .query_objects(Query::default().where_contains(&Variants::FIELDS.name, "ar"))
+        .await
+        .unwrap();
+    assert_eq!(r.len(), 1, "String where_contains 'ar' → 'charlie' only");
+    let r: Vec<Variants> = engine
+        .query_objects(Query::default().where_not_contains(&Variants::FIELDS.name, "a"))
+        .await
+        .unwrap();
+    assert_eq!(r.len(), 0, "String where_not_contains 'a' → none");
+
+    // Int (IndexValue::Int)
+    let r: Vec<Variants> = engine
+        .query_objects(Query::default().where_eq(&Variants::FIELDS.count, 2i64))
+        .await
+        .unwrap();
+    assert_eq!(r.len(), 1, "Int where_eq");
+    let r: Vec<Variants> = engine
+        .query_objects(Query::default().where_ne(&Variants::FIELDS.count, 2i64))
+        .await
+        .unwrap();
+    assert_eq!(r.len(), 2, "Int where_ne");
+    let r: Vec<Variants> = engine
+        .query_objects(Query::default().where_gt(&Variants::FIELDS.count, 1i64))
+        .await
+        .unwrap();
+    assert_eq!(r.len(), 2, "Int where_gt");
+    let r: Vec<Variants> = engine
+        .query_objects(Query::default().where_gte(&Variants::FIELDS.count, 2i64))
+        .await
+        .unwrap();
+    assert_eq!(r.len(), 2, "Int where_gte");
+    let r: Vec<Variants> = engine
+        .query_objects(Query::default().where_lt(&Variants::FIELDS.count, 3i64))
+        .await
+        .unwrap();
+    assert_eq!(r.len(), 2, "Int where_lt");
+    let r: Vec<Variants> = engine
+        .query_objects(Query::default().where_lte(&Variants::FIELDS.count, 2i64))
+        .await
+        .unwrap();
+    assert_eq!(r.len(), 2, "Int where_lte");
+
+    // Float (IndexValue::Float) — values chosen so equality is exact in IEEE 754
+    let r: Vec<Variants> = engine
+        .query_objects(Query::default().where_eq(&Variants::FIELDS.price, 1.5f64))
+        .await
+        .unwrap();
+    assert_eq!(r.len(), 1, "Float where_eq");
+    let r: Vec<Variants> = engine
+        .query_objects(Query::default().where_gt(&Variants::FIELDS.price, 2.0f64))
+        .await
+        .unwrap();
+    assert_eq!(r.len(), 2, "Float where_gt");
+    let r: Vec<Variants> = engine
+        .query_objects(Query::default().where_lte(&Variants::FIELDS.price, 2.5f64))
+        .await
+        .unwrap();
+    assert_eq!(r.len(), 2, "Float where_lte");
+
+    // Bool (IndexValue::Bool)
+    let r: Vec<Variants> = engine
+        .query_objects(Query::default().where_eq(&Variants::FIELDS.active, true))
+        .await
+        .unwrap();
+    assert_eq!(r.len(), 2, "Bool where_eq true");
+    let r: Vec<Variants> = engine
+        .query_objects(Query::default().where_ne(&Variants::FIELDS.active, true))
+        .await
+        .unwrap();
+    assert_eq!(r.len(), 1, "Bool where_ne true");
+
+    // Uuid (IndexValue::Uuid)
+    let r: Vec<Variants> = engine
+        .query_objects(Query::default().where_eq(&Variants::FIELDS.uid, uid_a))
+        .await
+        .unwrap();
+    assert_eq!(r.len(), 2, "Uuid where_eq");
+    let r: Vec<Variants> = engine
+        .query_objects(Query::default().where_ne(&Variants::FIELDS.uid, uid_a))
+        .await
+        .unwrap();
+    assert_eq!(r.len(), 1, "Uuid where_ne");
+
+    // Timestamp (IndexValue::Timestamp)
+    let r: Vec<Variants> = engine
+        .query_objects(Query::default().where_eq(&Variants::FIELDS.occurred_at, EventTime(t0)))
+        .await
+        .unwrap();
+    assert_eq!(r.len(), 1, "Timestamp where_eq");
+    let r: Vec<Variants> = engine
+        .query_objects(Query::default().where_gt(&Variants::FIELDS.occurred_at, EventTime(t0)))
+        .await
+        .unwrap();
+    assert_eq!(r.len(), 2, "Timestamp where_gt");
+    let r: Vec<Variants> = engine
+        .query_objects(Query::default().where_lte(&Variants::FIELDS.occurred_at, EventTime(t1)))
+        .await
+        .unwrap();
+    assert_eq!(r.len(), 2, "Timestamp where_lte");
+
+    // Array of String (IndexValue::Array(Vec<IndexValueInner::String>))
+    let r: Vec<Variants> = engine
+        .query_objects(Query::default().where_contains(&Variants::FIELDS.tags, vec!["blue"]))
+        .await
+        .unwrap();
+    assert_eq!(r.len(), 2, "Array<String> where_contains [blue]");
+    let r: Vec<Variants> = engine
+        .query_objects(
+            Query::default().where_contains_all(&Variants::FIELDS.tags, vec!["blue", "green"]),
+        )
+        .await
+        .unwrap();
+    assert_eq!(r.len(), 1, "Array<String> where_contains_all [blue,green]");
+    let r: Vec<Variants> = engine
+        .query_objects(Query::default().where_not_contains(&Variants::FIELDS.tags, vec!["red"]))
+        .await
+        .unwrap();
+    assert_eq!(r.len(), 2, "Array<String> where_not_contains [red]");
+
+    // Array of Int (IndexValue::Array(Vec<IndexValueInner::Int>))
+    let r: Vec<Variants> = engine
+        .query_objects(Query::default().where_contains(&Variants::FIELDS.scores, vec![10i64]))
+        .await
+        .unwrap();
+    assert_eq!(r.len(), 2, "Array<Int> where_contains [10]");
+    let r: Vec<Variants> = engine
+        .query_objects(
+            Query::default().where_contains_all(&Variants::FIELDS.scores, vec![10i64, 30]),
+        )
+        .await
+        .unwrap();
+    assert_eq!(r.len(), 1, "Array<Int> where_contains_all [10,30]");
+}
+
+/// Regression: `where_eq(field, false)` and `where_ne(field, true)` must
+/// return the same set for boolean fields. Before the fix, a row whose
+/// `index_meta` was missing the field entirely (e.g. legacy data written
+/// before the index was declared) satisfied `NOT @>` but not `@>`,
+/// producing asymmetric results.
+#[tokio::test]
+async fn test_query_ne_requires_key_existence() {
+    let (_r, pool) = setup_test_db().await;
+    let adapter = PostgresAdapter::from_pool(pool.clone());
+    adapter.init_schema().await.unwrap();
+    let engine = Engine::new(Box::new(adapter));
+
+    let mut explicit_false = Variants::default();
+    explicit_false.name = "explicit-false".into();
+    explicit_false.active = false;
+    engine.create_object(&explicit_false).await.unwrap();
+
+    let mut explicit_true = Variants::default();
+    explicit_true.name = "explicit-true".into();
+    explicit_true.active = true;
+    engine.create_object(&explicit_true).await.unwrap();
+
+    // Inject a legacy row whose index_meta is missing `active` entirely —
+    // simulates data written before the `active` index existed.
+    let legacy_id = uuid::Uuid::now_v7();
+    let now = chrono::Utc::now();
+    sqlx::query(
+        r#"INSERT INTO public.objects (id, type, owner, created_at, updated_at, data, index_meta)
+           VALUES ($1, $2, $3, $4, $5, $6, $7)"#,
+    )
+    .bind(legacy_id)
+    .bind(Variants::TYPE)
+    .bind(system_owner())
+    .bind(now)
+    .bind(now)
+    .bind(serde_json::json!({
+        "id": legacy_id,
+        "owner": system_owner(),
+        "created_at": now,
+        "updated_at": now,
+        "name": "legacy",
+        "count": 0,
+        "price": 0.0,
+        "active": false,
+        "uid": uuid::Uuid::nil(),
+        "occurred_at": chrono::DateTime::<chrono::Utc>::from_timestamp(0, 0).unwrap(),
+        "tags": [],
+        "scores": []
+    }))
+    .bind(serde_json::json!({"name": "legacy"}))
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let eq_false: Vec<Variants> = engine
+        .query_objects(Query::default().where_eq(&Variants::FIELDS.active, false))
+        .await
+        .unwrap();
+    let ne_true: Vec<Variants> = engine
+        .query_objects(Query::default().where_ne(&Variants::FIELDS.active, true))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        eq_false.len(),
+        ne_true.len(),
+        "where_eq(false) and where_ne(true) must agree on the same data"
+    );
+    assert_eq!(eq_false.len(), 1, "only the explicit `active=false` row should match");
+    assert_eq!(eq_false[0].id(), explicit_false.id());
+}
+
 // ============================================================
 // Section 3: Object Ownership & Bulk Operations
 // ============================================================
@@ -739,7 +1021,10 @@ async fn test_delete_owned_objects() {
         engine.create_object(&p).await.unwrap();
     }
 
-    let deleted = engine.delete_owned_objects::<Post>(owner.id()).await.unwrap();
+    let deleted = engine
+        .delete_owned_objects::<Post>(owner.id())
+        .await
+        .unwrap();
     assert_eq!(deleted, 4);
 
     let count = engine
@@ -762,7 +1047,10 @@ async fn test_fetch_union_object() {
     let mut alice = User::default();
     alice.username = "alice".into();
     alice.email = "alice@x.com".into();
-    adapter.insert_object(ObjectRecord::from_object(&alice)).await.unwrap();
+    adapter
+        .insert_object(ObjectRecord::from_object(&alice))
+        .await
+        .unwrap();
 
     let result = adapter
         .fetch_union_object(User::TYPE, Post::TYPE, alice.id())
@@ -781,11 +1069,17 @@ async fn test_fetch_union_objects() {
     let mut alice = User::default();
     alice.username = "alice".into();
     alice.email = "alice@x.com".into();
-    adapter.insert_object(ObjectRecord::from_object(&alice)).await.unwrap();
+    adapter
+        .insert_object(ObjectRecord::from_object(&alice))
+        .await
+        .unwrap();
 
     let mut post = Post::default();
     post.title = "Hello".into();
-    adapter.insert_object(ObjectRecord::from_object(&post)).await.unwrap();
+    adapter
+        .insert_object(ObjectRecord::from_object(&post))
+        .await
+        .unwrap();
 
     let results = adapter
         .fetch_union_objects(User::TYPE, Post::TYPE, vec![alice.id(), post.id()])
@@ -807,11 +1101,17 @@ async fn test_fetch_owned_union_objects() {
     let mut alice = User::default();
     alice.username = "alice".into();
     alice.email = "alice@x.com".into();
-    adapter.insert_object(ObjectRecord::from_object(&alice)).await.unwrap();
+    adapter
+        .insert_object(ObjectRecord::from_object(&alice))
+        .await
+        .unwrap();
 
     let mut post = Post::default();
     post.title = "Owned".into();
-    adapter.insert_object(ObjectRecord::from_object(&post)).await.unwrap();
+    adapter
+        .insert_object(ObjectRecord::from_object(&post))
+        .await
+        .unwrap();
 
     let results = adapter
         .fetch_owned_union_objects(User::TYPE, Post::TYPE, system_owner())
@@ -1038,7 +1338,11 @@ async fn test_edge_sort_desc_by_created_at() {
         .unwrap();
 
     assert_eq!(edges.len(), 3);
-    assert_eq!(edges[0].to(), targets[2].id(), "newest edge should be first");
+    assert_eq!(
+        edges[0].to(),
+        targets[2].id(),
+        "newest edge should be first"
+    );
     assert_eq!(edges[2].to(), targets[0].id(), "oldest edge should be last");
 }
 
@@ -1080,7 +1384,11 @@ async fn test_edge_sort_asc_by_created_at() {
         .unwrap();
 
     assert_eq!(edges.len(), 3);
-    assert_eq!(edges[0].to(), targets[0].id(), "oldest edge should be first");
+    assert_eq!(
+        edges[0].to(),
+        targets[0].id(),
+        "oldest edge should be first"
+    );
     assert_eq!(edges[2].to(), targets[2].id(), "newest edge should be last");
 }
 
@@ -1148,9 +1456,15 @@ async fn test_query_edges_forward_and_reverse() {
     assert_eq!(rev.len(), 2);
 
     // count_edges / count_reverse_edges
-    assert_eq!(engine.count_edges::<Follow>(bob.id(), None).await.unwrap(), 0);
     assert_eq!(
-        engine.count_reverse_edges::<Follow>(bob.id(), None).await.unwrap(),
+        engine.count_edges::<Follow>(bob.id(), None).await.unwrap(),
+        0
+    );
+    assert_eq!(
+        engine
+            .count_reverse_edges::<Follow>(bob.id(), None)
+            .await
+            .unwrap(),
         2
     );
 }
@@ -1287,7 +1601,10 @@ async fn test_count_edges_with_plan() {
             .unwrap();
     }
 
-    let total = engine.count_edges::<Follow>(pivot.id(), None).await.unwrap();
+    let total = engine
+        .count_edges::<Follow>(pivot.id(), None)
+        .await
+        .unwrap();
     assert_eq!(total, 4);
 
     let notif_count = engine
@@ -1729,7 +2046,10 @@ async fn test_multi_pivot_collect_following() {
     assert_eq!(alice_e.1.len(), 1);
     assert_eq!(alice_e.1[0].username, "bob");
 
-    let charlie_e = results.iter().find(|(u, _)| u.username == "charlie").unwrap();
+    let charlie_e = results
+        .iter()
+        .find(|(u, _)| u.username == "charlie")
+        .unwrap();
     assert!(charlie_e.1.is_empty());
 }
 
@@ -1933,7 +2253,10 @@ async fn test_multi_pivot_count_and_count_reverse() {
 
     let alice_c = counts.iter().find(|(u, _)| u.username == "alice").unwrap();
     assert_eq!(alice_c.1, 2);
-    let charlie_c = counts.iter().find(|(u, _)| u.username == "charlie").unwrap();
+    let charlie_c = counts
+        .iter()
+        .find(|(u, _)| u.username == "charlie")
+        .unwrap();
     assert_eq!(charlie_c.1, 0);
 
     let rev_counts: Vec<(User, u64)> = engine
@@ -1943,9 +2266,15 @@ async fn test_multi_pivot_count_and_count_reverse() {
         .await
         .unwrap();
 
-    let charlie_rc = rev_counts.iter().find(|(u, _)| u.username == "charlie").unwrap();
+    let charlie_rc = rev_counts
+        .iter()
+        .find(|(u, _)| u.username == "charlie")
+        .unwrap();
     assert_eq!(charlie_rc.1, 2);
-    let alice_rc = rev_counts.iter().find(|(u, _)| u.username == "alice").unwrap();
+    let alice_rc = rev_counts
+        .iter()
+        .find(|(u, _)| u.username == "alice")
+        .unwrap();
     assert_eq!(alice_rc.1, 0);
 }
 
@@ -2112,7 +2441,11 @@ async fn test_default_field_backward_compatible() {
     // Read it back as PostNew (new schema with default rating=10).
     let found: Option<PostNew> = engine.fetch_owned_object(owner.id()).await.unwrap();
     assert!(found.is_some());
-    assert_eq!(found.unwrap().rating, 10, "missing field should get default");
+    assert_eq!(
+        found.unwrap().rating,
+        10,
+        "missing field should get default"
+    );
 }
 
 #[tokio::test]
@@ -2156,7 +2489,10 @@ fn test_geo_derive_metadata() {
     let kinds = Place::FIELDS.location.kinds;
     assert_eq!(kinds.len(), 1);
     match kinds[0] {
-        IndexKind::Geo { lat_field, lon_field } => {
+        IndexKind::Geo {
+            lat_field,
+            lon_field,
+        } => {
             assert_eq!(lat_field, "lat");
             assert_eq!(lon_field, "lon");
         }
@@ -2208,7 +2544,10 @@ async fn test_geo_schema_and_crud() {
     assert!((lat_val - 48.8584).abs() < 1e-6);
 
     // Delete cascades to object_geo.
-    let _: Option<Place> = engine.delete_object(place.id(), system_owner()).await.unwrap();
+    let _: Option<Place> = engine
+        .delete_object(place.id(), system_owner())
+        .await
+        .unwrap();
     let gone: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM object_geo WHERE object_id = $1")
         .bind(place.id())
         .fetch_one(&pool)
@@ -2246,17 +2585,19 @@ async fn test_geo_update_diff() {
             .fetch_one(&pool)
             .await
             .unwrap();
-    assert_eq!(hash_before, hash_scalar, "scalar update must not change geo row");
+    assert_eq!(
+        hash_before, hash_scalar,
+        "scalar update must not change geo row"
+    );
 
     // Lat mutation: hash must change.
     place.lat = 11.0;
     engine.update_object(&mut place).await.unwrap();
-    let hash_geo: String =
-        sqlx::query_scalar("SELECT hash FROM object_geo WHERE object_id = $1")
-            .bind(place.id())
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+    let hash_geo: String = sqlx::query_scalar("SELECT hash FROM object_geo WHERE object_id = $1")
+        .bind(place.id())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
     assert_ne!(hash_before, hash_geo, "geo update must change hash");
 }
 
@@ -2279,12 +2620,13 @@ async fn test_geo_query_within() {
     let hits: Vec<Place> = engine
         .query_objects::<Place>(Query::default().where_geo_within(
             &Place::FIELDS.location,
-            0.0, 0.0, 5_000.0,
+            0.0,
+            0.0,
+            5_000.0,
         ))
         .await
         .unwrap();
-    let names: std::collections::HashSet<&str> =
-        hits.iter().map(|p| p.name.as_str()).collect();
+    let names: std::collections::HashSet<&str> = hits.iter().map(|p| p.name.as_str()).collect();
     assert!(names.contains("near"));
     assert!(names.contains("mid"));
     assert!(!names.contains("far"));
@@ -2292,7 +2634,9 @@ async fn test_geo_query_within() {
     let count = engine
         .count_objects::<Place>(Some(Query::default().where_geo_within(
             &Place::FIELDS.location,
-            0.0, 0.0, 5_000.0,
+            0.0,
+            0.0,
+            5_000.0,
         )))
         .await
         .unwrap();
@@ -2316,7 +2660,9 @@ async fn test_geo_query_within_empty() {
     let hits: Vec<Place> = engine
         .query_objects::<Place>(Query::default().where_geo_within(
             &Place::FIELDS.location,
-            0.0, 0.0, 100.0,
+            0.0,
+            0.0,
+            100.0,
         ))
         .await
         .unwrap();
@@ -2340,8 +2686,7 @@ fn haversine_m(lon1: f64, lat1: f64, lon2: f64, lat2: f64) -> f64 {
     let dlam = (lon2 - lon1) * to_rad;
     let phi1 = lat1 * to_rad;
     let phi2 = lat2 * to_rad;
-    let a =
-        (dphi / 2.0).sin().powi(2) + phi1.cos() * phi2.cos() * (dlam / 2.0).sin().powi(2);
+    let a = (dphi / 2.0).sin().powi(2) + phi1.cos() * phi2.cos() * (dlam / 2.0).sin().powi(2);
     2.0 * r * a.sqrt().asin()
 }
 
@@ -2364,7 +2709,10 @@ async fn test_geo_bbox_basic() {
     let hits: Vec<Place> = engine
         .query_objects::<Place>(Query::default().where_geo_in_bbox(
             &Place::FIELDS.location,
-            -0.5, -0.5, 0.5, 0.5,
+            -0.5,
+            -0.5,
+            0.5,
+            0.5,
         ))
         .await
         .unwrap();
@@ -2376,7 +2724,10 @@ async fn test_geo_bbox_basic() {
     let corner: Vec<Place> = engine
         .query_objects::<Place>(Query::default().where_geo_in_bbox(
             &Place::FIELDS.location,
-            -1.5, -1.5, -0.5, -0.5,
+            -1.5,
+            -1.5,
+            -0.5,
+            -0.5,
         ))
         .await
         .unwrap();
@@ -2392,15 +2743,25 @@ async fn test_geo_order_by_distance_asc_and_desc() {
     adapter.init_schema().await.unwrap();
     let engine = Engine::new(Box::new(adapter));
 
-    for (n, lat, lon) in [("a", 0.01, 0.01), ("b", 0.05, 0.05), ("c", 0.10, 0.10),
-                           ("d", 0.50, 0.50), ("e", 1.00, 1.00)]
-    {
-        engine.create_object(&make_place(n, lat, lon)).await.unwrap();
+    for (n, lat, lon) in [
+        ("a", 0.01, 0.01),
+        ("b", 0.05, 0.05),
+        ("c", 0.10, 0.10),
+        ("d", 0.50, 0.50),
+        ("e", 1.00, 1.00),
+    ] {
+        engine
+            .create_object(&make_place(n, lat, lon))
+            .await
+            .unwrap();
     }
 
     let asc: Vec<Place> = engine
         .query_objects::<Place>(Query::default().order_by_distance(
-            &Place::FIELDS.location, 0.0, 0.0, true,
+            &Place::FIELDS.location,
+            0.0,
+            0.0,
+            true,
         ))
         .await
         .unwrap();
@@ -2426,15 +2787,24 @@ async fn test_geo_collect_with_distance() {
     adapter.init_schema().await.unwrap();
     let engine = Engine::new(Box::new(adapter));
 
-    for (n, lat, lon) in [("near", 0.001, 0.001), ("mid", 0.05, 0.05),
-                           ("far", 0.2, 0.2), ("farther", 1.0, 1.0)]
-    {
-        engine.create_object(&make_place(n, lat, lon)).await.unwrap();
+    for (n, lat, lon) in [
+        ("near", 0.001, 0.001),
+        ("mid", 0.05, 0.05),
+        ("far", 0.2, 0.2),
+        ("farther", 1.0, 1.0),
+    ] {
+        engine
+            .create_object(&make_place(n, lat, lon))
+            .await
+            .unwrap();
     }
 
     let results: Vec<(Place, f64)> = engine
         .query_objects_with_distance::<Place>(Query::default().order_by_distance(
-            &Place::FIELDS.location, 0.0, 0.0, true,
+            &Place::FIELDS.location,
+            0.0,
+            0.0,
+            true,
         ))
         .await
         .unwrap();
@@ -2459,7 +2829,10 @@ async fn test_geo_collect_with_distance_requires_order() {
 
     let err = engine
         .query_objects_with_distance::<Place>(Query::default().where_geo_within(
-            &Place::FIELDS.location, 0.0, 0.0, 10_000.0,
+            &Place::FIELDS.location,
+            0.0,
+            0.0,
+            10_000.0,
         ))
         .await
         .unwrap_err();
@@ -2489,7 +2862,10 @@ async fn test_geo_multi_field_delivery() {
 
     let near_pickup: Vec<Delivery> = engine
         .query_objects::<Delivery>(Query::default().where_geo_within(
-            &Delivery::FIELDS.pickup, 3.3792, 6.5244, 50_000.0,
+            &Delivery::FIELDS.pickup,
+            3.3792,
+            6.5244,
+            50_000.0,
         ))
         .await
         .unwrap();
@@ -2497,7 +2873,10 @@ async fn test_geo_multi_field_delivery() {
 
     let not_dropoff: Vec<Delivery> = engine
         .query_objects::<Delivery>(Query::default().where_geo_within(
-            &Delivery::FIELDS.dropoff, 3.3792, 6.5244, 50_000.0,
+            &Delivery::FIELDS.dropoff,
+            3.3792,
+            6.5244,
+            50_000.0,
         ))
         .await
         .unwrap();
@@ -2551,9 +2930,18 @@ async fn test_geo_mixed_within_and_bbox() {
     adapter.init_schema().await.unwrap();
     let engine = Engine::new(Box::new(adapter));
 
-    engine.create_object(&make_place("in_both", 0.001, 0.001)).await.unwrap();
-    engine.create_object(&make_place("only_radius", 0.4, 0.0)).await.unwrap();
-    engine.create_object(&make_place("outside", 5.0, 5.0)).await.unwrap();
+    engine
+        .create_object(&make_place("in_both", 0.001, 0.001))
+        .await
+        .unwrap();
+    engine
+        .create_object(&make_place("only_radius", 0.4, 0.0))
+        .await
+        .unwrap();
+    engine
+        .create_object(&make_place("outside", 5.0, 5.0))
+        .await
+        .unwrap();
 
     let hits: Vec<Place> = engine
         .query_objects::<Place>(
@@ -2575,18 +2963,24 @@ async fn test_geo_order_on_different_field_than_filter() {
     let engine = Engine::new(Box::new(adapter));
 
     let mut d1 = Delivery::default();
-    d1.pickup_lat = 0.01;  d1.pickup_lon = 0.01;
-    d1.dropoff_lat = 9.0;  d1.dropoff_lon = 9.0;
+    d1.pickup_lat = 0.01;
+    d1.pickup_lon = 0.01;
+    d1.dropoff_lat = 9.0;
+    d1.dropoff_lon = 9.0;
     engine.create_object(&d1).await.unwrap();
 
     let mut d2 = Delivery::default();
-    d2.pickup_lat = 0.05;  d2.pickup_lon = 0.05;
-    d2.dropoff_lat = 9.9;  d2.dropoff_lon = 9.9;
+    d2.pickup_lat = 0.05;
+    d2.pickup_lon = 0.05;
+    d2.dropoff_lat = 9.9;
+    d2.dropoff_lon = 9.9;
     engine.create_object(&d2).await.unwrap();
 
     let mut d3 = Delivery::default();
-    d3.pickup_lat = 0.1;   d3.pickup_lon = 0.1;
-    d3.dropoff_lat = 9.5;  d3.dropoff_lon = 9.5;
+    d3.pickup_lat = 0.1;
+    d3.pickup_lon = 0.1;
+    d3.dropoff_lat = 9.5;
+    d3.dropoff_lon = 9.5;
     engine.create_object(&d3).await.unwrap();
 
     // Filter on pickup, order by dropoff distance to (10,10).

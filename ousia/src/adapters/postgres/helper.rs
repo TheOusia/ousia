@@ -221,7 +221,11 @@ impl PostgresAdapter {
                 return Some((cond, operator));
             }
 
-            // ── NotEqual: scalar — NOT @> ────────────────────────────────────────────
+            // ── NotEqual: scalar — key must exist AND value must differ ─────────────
+            // Without the `?` existence check, a row missing the field entirely
+            // would satisfy `NOT @>` (vacuously true), making `where_ne(field, true)`
+            // and `where_eq(field, false)` return different sets for boolean fields
+            // — see test_query_ne_requires_key_existence.
             (
                 NotEqual,
                 IndexValue::String(_)
@@ -231,7 +235,12 @@ impl PostgresAdapter {
                 | IndexValue::Uuid(_)
                 | IndexValue::Timestamp(_),
             ) => {
-                let cond = format!("NOT ({}.index_meta @> ${})", alias, param_idx);
+                let cond = format!(
+                    "({alias}.index_meta ? '{field}' AND NOT ({alias}.index_meta @> ${idx}))",
+                    alias = alias,
+                    field = filter.field.name,
+                    idx = param_idx
+                );
                 *param_idx += 1;
                 return Some((cond, operator));
             }

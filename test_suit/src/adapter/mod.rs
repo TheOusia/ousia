@@ -118,6 +118,50 @@ pub struct Place {
     pub lon: f64,
 }
 
+/// Newtype wrapper so a `chrono::DateTime<Utc>` field can derive `Default`
+/// (the underlying type doesn't impl Default).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub struct EventTime(pub chrono::DateTime<chrono::Utc>);
+
+impl Default for EventTime {
+    fn default() -> Self {
+        Self(chrono::DateTime::<chrono::Utc>::from_timestamp(0, 0).unwrap())
+    }
+}
+
+impl ToIndexValue for EventTime {
+    fn to_index_value(&self) -> ousia::query::IndexValue {
+        ousia::query::IndexValue::Timestamp(self.0)
+    }
+}
+
+/// Object that exercises every `IndexValue` variant via a single indexed
+/// field per variant. Used by `test_query_all_index_value_variants`.
+#[derive(OusiaObject, OusiaDefault, Debug)]
+#[ousia(
+    type_name = "Variants",
+    index = "name:search+sort",
+    index = "count:search+sort",
+    index = "price:search+sort",
+    index = "active:search",
+    index = "uid:search",
+    index = "occurred_at:search+sort",
+    index = "tags:search",
+    index = "scores:search"
+)]
+pub struct Variants {
+    _meta: Meta,
+
+    pub name: String,
+    pub count: i64,
+    pub price: f64,
+    pub active: bool,
+    pub uid: uuid::Uuid,
+    pub occurred_at: EventTime,
+    pub tags: Vec<String>,
+    pub scores: Vec<i64>,
+}
+
 /// Test object with two geo indexes on the same struct.
 #[derive(OusiaObject, OusiaDefault, Debug)]
 #[ousia(
