@@ -223,18 +223,41 @@ fn generate_view_code(
     (view_struct, view_method)
 }
 
-/// Generate the internal serialization implementation
-fn generate_internal_serialize(non_meta_fields: &[&Field]) -> proc_macro2::TokenStream {
-    let field_serializations = non_meta_fields.iter().map(|f| {
+/// Generate the internal serialization implementation.
+///
+/// Emits a MessagePack-encoded `Vec<u8>` representing the object's
+/// non-meta fields (including private ones). We build a one-shot
+/// `Serialize` adapter that writes a named map so deserialization via
+/// the user's derived `Deserialize` impl reads it back field-by-field.
+fn generate_internal_serialize(
+    ousia: &proc_macro2::TokenStream,
+    ident: &syn::Ident,
+    non_meta_fields: &[&Field],
+) -> proc_macro2::TokenStream {
+    let field_count = non_meta_fields.len();
+    let serialize_calls = non_meta_fields.iter().map(|f| {
         let field_name = f.ident.as_ref().unwrap();
         let field_name_str = field_name.to_string();
-        quote! { #field_name_str: self.#field_name }
+        quote! { map.serialize_entry(#field_name_str, &self.0.#field_name)?; }
     });
 
     quote! {
-        serde_json::json!({
-            #(#field_serializations),*
-        })
+        {
+            struct __InternalView<'a>(&'a #ident);
+            impl<'a> serde::Serialize for __InternalView<'a> {
+                fn serialize<__S>(&self, serializer: __S) -> ::std::result::Result<__S::Ok, __S::Error>
+                where
+                    __S: serde::Serializer,
+                {
+                    use serde::ser::SerializeMap;
+                    let mut map = serializer.serialize_map(Some(#field_count))?;
+                    #(#serialize_calls)*
+                    map.end()
+                }
+            }
+            #ousia::__rmp_serde::to_vec_named(&__InternalView(self))
+                .expect("ousia: msgpack serialization of object data failed")
+        }
     }
 }
 
@@ -367,57 +390,71 @@ pub fn generate_object_impl(input: &DeriveInput) -> Result<TokenStream> {
     // struct; instead, the kind carries the lat/lon source fields that must
     // exist. Geo values are stored in the `object_geo` side table, not
     // `index_meta`, so they're excluded from `index_meta_insertions`.
-    let mut geo_indexes: Vec<(String, String, String)> = Vec::new(); // (virtual_name, lat_field, lon_field)
+    // (virtual_name, lat_field, lon_field, lat_is_option, lon_is_option)
+    let mut geo_indexes: Vec<(String, String, String, bool, bool)> = Vec::new();
     for (name, kind) in &indexes {
         if let Some((lat, lon)) = parse_geo_source_fields(kind) {
-            if !non_meta_fields
+            let lat_field = non_meta_fields
                 .iter()
-                .any(|f| f.ident.as_ref().unwrap() == &lat)
-            {
-                panic!(
-                    "Geo index `{}`: lat field `{}` does not exist on {}",
-                    name, lat, ident
-                );
-            }
-            if !non_meta_fields
+                .find(|f| f.ident.as_ref().unwrap() == &lat)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "Geo index `{}`: lat field `{}` does not exist on {}",
+                        name, lat, ident
+                    )
+                });
+            let lon_field = non_meta_fields
                 .iter()
-                .any(|f| f.ident.as_ref().unwrap() == &lon)
-            {
-                panic!(
-                    "Geo index `{}`: lon field `{}` does not exist on {}",
-                    name, lon, ident
-                );
-            }
-            geo_indexes.push((name.clone(), lat, lon));
+                .find(|f| f.ident.as_ref().unwrap() == &lon)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "Geo index `{}`: lon field `{}` does not exist on {}",
+                        name, lon, ident
+                    )
+                });
+            let is_option = |ty: &syn::Type| -> bool {
+                if let syn::Type::Path(tp) = ty {
+                    if let Some(seg) = tp.path.segments.last() {
+                        return seg.ident == "Option";
+                    }
+                }
+                false
+            };
+            let lat_is_option = is_option(&lat_field.ty);
+            let lon_is_option = is_option(&lon_field.ty);
+            geo_indexes.push((name.clone(), lat, lon, lat_is_option, lon_is_option));
         }
     }
 
-    // --- generate IndexField list ---
-    let index_fields = indexes.iter().map(|(name, kind)| {
-        if RESERVED_FIELDS.contains(&name.as_str()) {
-            panic!(
-                "Index field `{}` is reserved for meta and cannot be indexed",
-                name
-            );
-        }
-        let is_geo = parse_geo_source_fields(kind).is_some();
-        if !is_geo
-            && !non_meta_fields
-                .iter()
-                .any(|f| &f.ident.as_ref().unwrap().to_string() == name)
-        {
-            panic!("Indexed field `{}` does not exist on {}", name, ident);
-        }
-
-        let kinds = parse_index_kinds(kind);
-
-        quote! {
-            #ousia::query::IndexField {
-                name: #name,
-                kinds: &[#(#kinds),*],
+    // --- generate IndexField list for `IndexQuery::indexed_fields()` ---
+    let index_fields: Vec<proc_macro2::TokenStream> = indexes
+        .iter()
+        .map(|(name, kind)| {
+            if RESERVED_FIELDS.contains(&name.as_str()) {
+                panic!(
+                    "Index field `{}` is reserved for meta and cannot be indexed",
+                    name
+                );
             }
-        }
-    });
+            let is_geo = parse_geo_source_fields(kind).is_some();
+            if !is_geo
+                && !non_meta_fields
+                    .iter()
+                    .any(|f| &f.ident.as_ref().unwrap().to_string() == name)
+            {
+                panic!("Indexed field `{}` does not exist on {}", name, ident);
+            }
+
+            let kinds = parse_index_kinds(kind);
+
+            quote! {
+                #ousia::query::IndexField {
+                    name: #name,
+                    kinds: &[#(#kinds),*],
+                }
+            }
+        })
+        .collect();
 
     // --- generate index_meta insertions (scalar fields only) ---
     let index_meta_insertions = indexes.iter().filter_map(|(name, kind)| {
@@ -437,20 +474,39 @@ pub fn generate_object_impl(input: &DeriveInput) -> Result<TokenStream> {
 
     // --- generate geo_points() body ---
     let has_geo_fields = !geo_indexes.is_empty();
-    let geo_point_pushes = geo_indexes.iter().map(|(virtual_name, lat, lon)| {
+    let geo_point_pushes = geo_indexes.iter().map(|(virtual_name, lat, lon, lat_is_option, lon_is_option)| {
         let lat_ident = format_ident!("{}", lat);
         let lon_ident = format_ident!("{}", lon);
         let virtual_name_str = virtual_name.as_str();
-        quote! {
-            {
-                let lon_v: f64 = self.#lon_ident as f64;
-                let lat_v: f64 = self.#lat_ident as f64;
-                points.push(#ousia::query::GeoPoint {
-                    field: #virtual_name_str,
-                    lon: lon_v,
-                    lat: lat_v,
-                    hash: #ousia::object::derive_geo_hash(#virtual_name_str, lon_v, lat_v),
-                });
+        if *lat_is_option || *lon_is_option {
+            // Optional coordinates: only push a GeoPoint when both are Some.
+            // Stores/objects without coordinates are simply absent from geo queries.
+            quote! {
+                {
+                    if let (Some(lat_raw), Some(lon_raw)) = (self.#lat_ident, self.#lon_ident) {
+                        let lat_v: f64 = lat_raw as f64;
+                        let lon_v: f64 = lon_raw as f64;
+                        points.push(#ousia::query::GeoPoint {
+                            field: #virtual_name_str,
+                            lon: lon_v,
+                            lat: lat_v,
+                            hash: #ousia::object::derive_geo_hash(#virtual_name_str, lon_v, lat_v),
+                        });
+                    }
+                }
+            }
+        } else {
+            quote! {
+                {
+                    let lon_v: f64 = self.#lon_ident as f64;
+                    let lat_v: f64 = self.#lat_ident as f64;
+                    points.push(#ousia::query::GeoPoint {
+                        field: #virtual_name_str,
+                        lon: lon_v,
+                        lat: lat_v,
+                        hash: #ousia::object::derive_geo_hash(#virtual_name_str, lon_v, lat_v),
+                    });
+                }
             }
         }
     });
@@ -548,7 +604,7 @@ pub fn generate_object_impl(input: &DeriveInput) -> Result<TokenStream> {
     let field_count = non_private_count + default_meta_fields.len();
 
     // --- generate internal serialization ---
-    let internal_serialize_body = generate_internal_serialize(&non_meta_fields);
+    let internal_serialize_body = generate_internal_serialize(&ousia, ident, &non_meta_fields);
 
     // --- generate Deserialize implementation ---
     let deserialize_field_names: Vec<_> = non_meta_fields
@@ -836,8 +892,24 @@ pub fn generate_object_impl(input: &DeriveInput) -> Result<TokenStream> {
         }
     };
 
+    // --- linkme manifest registration ---
+    // Unique static name per type so two `OusiaObject` derives in the same
+    // module never collide. The static is appended to `ousia::MANIFEST` at
+    // link time; init_schema walks the slice to decide partitions.
+    let manifest_static = format_ident!("__OUSIA_OBJECT_MANIFEST_{}", ident);
+
     // --- generate impl ---
     let expanded = quote! {
+        #[#ousia::__linkme::distributed_slice(#ousia::MANIFEST)]
+        #[linkme(crate = #ousia::__linkme)]
+        #[allow(non_upper_case_globals)]
+        static #manifest_static: #ousia::TypeManifestEntry = #ousia::TypeManifestEntry {
+            kind: #ousia::ManifestKind::Object,
+            type_name: #type_name,
+            from_type: None,
+            to_type: None,
+        };
+
         impl #ousia::object::traits::Object for #ident {
             const TYPE: &'static str = #type_name;
 
@@ -866,7 +938,7 @@ pub fn generate_object_impl(input: &DeriveInput) -> Result<TokenStream> {
         }
 
         impl #ousia::object::ObjectInternal for #ident {
-            fn __serialize_internal(&self) -> serde_json::Value {
+            fn __serialize_internal(&self) -> ::std::vec::Vec<u8> {
                 #internal_serialize_body
             }
         }

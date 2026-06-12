@@ -69,7 +69,7 @@ impl EdgeTraversal for PostgresAdapter {
                 e.created_at AS edge_created_at, e.updated_at AS edge_updated_at,
                 o.id AS obj_id, o.type AS obj_type, o.owner AS obj_owner,
                 o.created_at AS obj_created_at, o.updated_at AS obj_updated_at, o.data AS obj_data
-            FROM edges e
+            FROM object_edges e
             JOIN objects o ON e."to" = o.id
             {where_clause}
             {order_clause}
@@ -116,7 +116,7 @@ impl EdgeTraversal for PostgresAdapter {
                 e.created_at AS edge_created_at, e.updated_at AS edge_updated_at,
                 o.id AS obj_id, o.type AS obj_type, o.owner AS obj_owner,
                 o.created_at AS obj_created_at, o.updated_at AS obj_updated_at, o.data AS obj_data
-            FROM edges e
+            FROM object_edges e
             JOIN objects o ON e."from" = o.id
             {where_clause}
             {order_clause}
@@ -153,7 +153,7 @@ impl EdgeTraversal for PostgresAdapter {
         let mut sql = format!(
             r#"
             SELECT e."from", e."to", e.type, e.data, e.index_meta, e.created_at, e.updated_at
-            FROM edges e
+            FROM object_edges e
             {where_clause}
             {order_clause}
             "#,
@@ -185,7 +185,7 @@ impl EdgeTraversal for PostgresAdapter {
         let mut sql = format!(
             r#"
             SELECT e."from", e."to", e.type, e.data, e.index_meta, e.created_at, e.updated_at
-            FROM edges e
+            FROM object_edges e
             {where_clause}
             {order_clause}
             "#,
@@ -239,9 +239,9 @@ impl EdgeTraversal for PostgresAdapter {
         "#;
         let sql = format!(
             r#"
-            {sel} FROM edges e JOIN objects o ON e."to" = o.id {fwd_where}
+            {sel} FROM object_edges e JOIN objects o ON e."to" = o.id {fwd_where}
             UNION ALL
-            {sel} FROM edges e JOIN objects o ON e."from" = o.id {rev_where}
+            {sel} FROM object_edges e JOIN objects o ON e."from" = o.id {rev_where}
             "#,
         );
         let mut query = sqlx::query(&sql).bind(obj_type).bind(edge_type).bind(pivot);
@@ -286,10 +286,10 @@ impl EdgeTraversal for PostgresAdapter {
         let sql = format!(
             r#"
             SELECT e."from", e."to", e.type, e.data, e.index_meta, e.created_at, e.updated_at
-            FROM edges e {fwd_where}
+            FROM object_edges e {fwd_where}
             UNION ALL
             SELECT e."from", e."to", e.type, e.data, e.index_meta, e.created_at, e.updated_at
-            FROM edges e {rev_where}
+            FROM object_edges e {rev_where}
             "#,
         );
         let mut query = sqlx::query(&sql).bind(edge_type).bind(pivot);
@@ -326,7 +326,7 @@ impl EdgeTraversal for PostgresAdapter {
         let sql = format!(
             r#"
             SELECT e."from", COUNT(*) AS cnt
-            FROM edges e
+            FROM object_edges e
             {where_clause}
             GROUP BY e."from"
             "#,
@@ -362,7 +362,7 @@ impl EdgeTraversal for PostgresAdapter {
         let sql = format!(
             r#"
             SELECT e."to", COUNT(*) AS cnt
-            FROM edges e
+            FROM object_edges e
             {where_clause}
             GROUP BY e."to"
             "#,

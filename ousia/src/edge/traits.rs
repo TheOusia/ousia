@@ -11,6 +11,17 @@ pub trait Edge: Serialize + for<'de> Deserialize<'de> + Sized + Send + Sync + 's
     /// Edge logical type (e.g. "Follow", "Member", "Like")
     const TYPE: &'static str;
 
+    /// Logical type of the object the edge originates from. Wired by
+    /// `#[ousia(from = SomeObject)]` on the derive; used by `init_schema` to
+    /// add a per-partition `FOREIGN KEY (from) REFERENCES objects_<from_type>(id)
+    /// ON DELETE CASCADE`.
+    const FROM_TYPE: &'static str;
+
+    /// Logical type of the object the edge points to. Wired by
+    /// `#[ousia(to = SomeObject)]` on the derive; used identically to
+    /// [`Self::FROM_TYPE`] for the `(to)` foreign key.
+    const TO_TYPE: &'static str;
+
     /// Object type name helper
     fn type_name(&self) -> &'static str {
         Self::TYPE

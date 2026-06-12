@@ -9,6 +9,9 @@ pub enum Error {
     UniqueConstraintViolation(String),
     Unsupported(String),
     InvalidQuery(String),
+    /// The composed schema hash stored in `ousia_meta` is from a
+    /// different *major* schema version. Manual migration required.
+    SchemaMigrationRequired(String),
 }
 
 impl Display for Error {
@@ -23,6 +26,9 @@ impl Display for Error {
             }
             Error::Unsupported(msg) => write!(f, "Unsupported operation: {}", msg),
             Error::InvalidQuery(msg) => write!(f, "Invalid query: {}", msg),
+            Error::SchemaMigrationRequired(msg) => {
+                write!(f, "Schema migration required: {}", msg)
+            }
         }
     }
 }

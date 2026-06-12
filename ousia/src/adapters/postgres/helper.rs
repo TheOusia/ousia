@@ -42,7 +42,7 @@ impl PostgresAdapter {
         let updated_at = row
             .try_get("updated_at")
             .map_err(|e| Error::Deserialize(e.to_string()))?;
-        let data: serde_json::Value = row
+        let data: Vec<u8> = row
             .try_get("data")
             .map_err(|e| Error::Deserialize(e.to_string()))?;
         Ok(ObjectRecord {
@@ -62,7 +62,7 @@ impl PostgresAdapter {
             type_name: std::borrow::Cow::Owned(row.try_get::<String, _>("type").map_err(de)?),
             from: row.try_get::<Uuid, _>("from").map_err(de)?,
             to: row.try_get::<Uuid, _>("to").map_err(de)?,
-            data: row.try_get::<serde_json::Value, _>("data").map_err(de)?,
+            data: row.try_get::<Vec<u8>, _>("data").map_err(de)?,
             index_meta: serde_json::Value::Null,
             created_at: row.try_get("created_at").map_err(de)?,
             updated_at: row.try_get("updated_at").map_err(de)?,
@@ -78,7 +78,7 @@ impl PostgresAdapter {
             from: row.try_get::<Uuid, _>("edge_from").map_err(de)?,
             to: row.try_get::<Uuid, _>("edge_to").map_err(de)?,
             data: row
-                .try_get::<serde_json::Value, _>("edge_data")
+                .try_get::<Vec<u8>, _>("edge_data")
                 .map_err(de)?,
             index_meta: serde_json::Value::Null,
             created_at: row.try_get("edge_created_at").map_err(de)?,
@@ -91,7 +91,7 @@ impl PostgresAdapter {
             created_at: row.try_get("obj_created_at").map_err(de)?,
             updated_at: row.try_get("obj_updated_at").map_err(de)?,
             data: row
-                .try_get::<serde_json::Value, _>("obj_data")
+                .try_get::<Vec<u8>, _>("obj_data")
                 .map_err(de)?,
             index_meta: serde_json::Value::Null,
         };
@@ -127,7 +127,7 @@ impl PostgresAdapter {
                 o.id AS obj_id, o.type AS obj_type, o.owner AS obj_owner,
                 o.created_at AS obj_created_at, o.updated_at AS obj_updated_at,
                 o.data AS obj_data
-            FROM edges e
+            FROM object_edges e
             JOIN objects o ON e."{join_col}" = o.id
             {where_clause}
             {order_clause}
@@ -965,7 +965,7 @@ impl PostgresAdapter {
         let mut sql = format!(
             r#"
             SELECT o.id, o.type, o.owner, o.created_at, o.updated_at, o.data
-            FROM edges e
+            FROM object_edges e
             LEFT JOIN objects o ON e."{join_col}" = o.id
             {where_clause}
             {order_clause}
@@ -1146,7 +1146,7 @@ impl PostgresAdapter {
         let mut sql = format!(
             r#"
             SELECT e."from", e."to", e.type, e.data, e.index_meta, e.created_at, e.updated_at
-            FROM edges e
+            FROM object_edges e
             {}
             {}
             "#,

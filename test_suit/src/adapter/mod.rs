@@ -1,4 +1,5 @@
 pub mod test_postgres;
+pub mod test_v2_schema;
 
 use ousia::{EdgeMeta, Meta, OusiaDefault, OusiaEdge, OusiaObject, query::ToIndexValue};
 use serde::{Deserialize, Serialize};
@@ -96,7 +97,12 @@ pub struct User {
 }
 
 #[derive(Debug, OusiaEdge)]
-#[ousia(type_name = "Follow", index = "notification:search")]
+#[ousia(
+    type_name = "Follow",
+    from = User,
+    to = User,
+    index = "notification:search"
+)]
 struct Follow {
     _meta: EdgeMeta,
     notification: bool,

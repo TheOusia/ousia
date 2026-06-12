@@ -878,20 +878,30 @@ async fn test_query_ne_requires_key_existence() {
     .bind(system_owner())
     .bind(now)
     .bind(now)
-    .bind(serde_json::json!({
-        "id": legacy_id,
-        "owner": system_owner(),
-        "created_at": now,
-        "updated_at": now,
-        "name": "legacy",
-        "count": 0,
-        "price": 0.0,
-        "active": false,
-        "uid": uuid::Uuid::nil(),
-        "occurred_at": chrono::DateTime::<chrono::Utc>::from_timestamp(0, 0).unwrap(),
-        "tags": [],
-        "scores": []
-    }))
+    // v2: `data` is BYTEA / msgpack. Encode the legacy payload as a
+    // msgpack map matching the struct's field order.
+    .bind({
+        use rmp_serde::Serializer;
+        use serde::Serialize as _;
+        let mut buf = Vec::new();
+        let mut ser = Serializer::new(&mut buf).with_struct_map();
+        let payload = serde_json::json!({
+            "id": legacy_id,
+            "owner": system_owner(),
+            "created_at": now,
+            "updated_at": now,
+            "name": "legacy",
+            "count": 0,
+            "price": 0.0,
+            "active": false,
+            "uid": uuid::Uuid::nil(),
+            "occurred_at": chrono::DateTime::<chrono::Utc>::from_timestamp(0, 0).unwrap(),
+            "tags": [],
+            "scores": []
+        });
+        payload.serialize(&mut ser).unwrap();
+        buf
+    })
     .bind(serde_json::json!({"name": "legacy"}))
     .execute(&pool)
     .await
@@ -911,7 +921,11 @@ async fn test_query_ne_requires_key_existence() {
         ne_true.len(),
         "where_eq(false) and where_ne(true) must agree on the same data"
     );
-    assert_eq!(eq_false.len(), 1, "only the explicit `active=false` row should match");
+    assert_eq!(
+        eq_false.len(),
+        1,
+        "only the explicit `active=false` row should match"
+    );
     assert_eq!(eq_false[0].id(), explicit_false.id());
 }
 
@@ -2995,4 +3009,39 @@ async fn test_geo_order_on_different_field_than_filter() {
     assert_eq!(results.len(), 3);
     assert_eq!(results[0].id(), d2.id()); // closest dropoff to (10,10)
     assert_eq!(results[2].id(), d1.id()); // farthest dropoff
+}
+
+/// Manifest smoke test — every `OusiaObject`/`OusiaEdge` derive in this test
+/// crate must register an entry in `ousia::MANIFEST` at link time. No DB.
+#[test]
+fn test_manifest_registers_objects_and_edges() {
+    use ousia::manifest;
+
+    let objects = manifest::object_types_sorted();
+    // The test types defined in `adapter/mod.rs` (User, Place, Dropoff, etc.).
+    assert!(
+        objects.contains(&"User"),
+        "expected User in manifest, got {:?}",
+        objects
+    );
+    assert!(
+        objects.contains(&"Place"),
+        "expected Place in manifest, got {:?}",
+        objects
+    );
+
+    let edges = manifest::edge_entries_sorted();
+    let follow = edges
+        .iter()
+        .find(|e| e.type_name == "Follow")
+        .expect("Follow edge must register in MANIFEST");
+    assert_eq!(follow.from_type, Some("User"));
+    assert_eq!(follow.to_type, Some("User"));
+
+    // render_json should produce non-empty, parseable-looking output.
+    let json = manifest::render_json();
+    assert!(json.contains("\"objects\""));
+    assert!(json.contains("\"User\""));
+    assert!(json.contains("\"edges\""));
+    assert!(json.contains("\"Follow\""));
 }

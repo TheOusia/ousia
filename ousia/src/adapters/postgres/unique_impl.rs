@@ -21,7 +21,7 @@ impl UniqueAdapter for PostgresAdapter {
 
         let result = sqlx::query(
             r#"
-            INSERT INTO unique_constraints (id, type, key, field)
+            INSERT INTO object_constraints (id, type, key, field)
             SELECT $1, $2, unnest($3::text[]), unnest($4::text[])
             "#,
         )
@@ -37,7 +37,7 @@ impl UniqueAdapter for PostgresAdapter {
             Err(err) if err.to_string().contains("unique constraint") => {
                 // Find which key already exists to report the correct field name.
                 let conflicting: Vec<String> =
-                    sqlx::query_scalar("SELECT key FROM unique_constraints WHERE key = ANY($1)")
+                    sqlx::query_scalar("SELECT key FROM object_constraints WHERE key = ANY($1)")
                         .bind(&keys)
                         .fetch_all(&self.pool)
                         .await
@@ -58,7 +58,7 @@ impl UniqueAdapter for PostgresAdapter {
     async fn delete_unique(&self, hash: &str) -> Result<(), Error> {
         sqlx::query(
             r#"
-            DELETE FROM unique_constraints WHERE key = $1
+            DELETE FROM object_constraints WHERE key = $1
             "#,
         )
         .bind(hash)
@@ -72,7 +72,7 @@ impl UniqueAdapter for PostgresAdapter {
     async fn delete_unique_hashes(&self, hashes: Vec<String>) -> Result<(), Error> {
         sqlx::query(
             r#"
-        DELETE FROM unique_constraints WHERE key = ANY($1)
+        DELETE FROM object_constraints WHERE key = ANY($1)
         "#,
         )
         .bind(hashes)
@@ -86,7 +86,7 @@ impl UniqueAdapter for PostgresAdapter {
     async fn get_hashes_for_object(&self, object_id: Uuid) -> Result<Vec<String>, Error> {
         let rows = sqlx::query(
             r#"
-            SELECT key FROM unique_constraints WHERE id = $1
+            SELECT key FROM object_constraints WHERE id = $1
             "#,
         )
         .bind(object_id)

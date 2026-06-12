@@ -33,10 +33,11 @@ impl GeoAdapter for PostgresAdapter {
                    f.hash
             FROM UNNEST($3::text[], $4::float8[], $5::float8[], $6::text[])
                 AS f(field, lon, lat, hash)
-            ON CONFLICT (object_id, field) DO UPDATE
+            -- Conflict target must include the partition key (type)
+            -- because the partitioned table's PK is (type, object_id, field).
+            ON CONFLICT (type, object_id, field) DO UPDATE
                 SET location = EXCLUDED.location,
-                    hash     = EXCLUDED.hash,
-                    type     = EXCLUDED.type
+                    hash     = EXCLUDED.hash
             "#,
         )
         .bind(object_id)

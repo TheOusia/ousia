@@ -3,7 +3,8 @@ use std::collections::BTreeMap;
 use proc_macro::TokenStream;
 use quote::{format_ident, quote};
 use syn::{
-    Attribute, Data, DeriveInput, Expr, ExprLit, Fields, Lit, Meta, Type, parse_macro_input,
+    Attribute, Data, DeriveInput, Expr, ExprLit, ExprPath, Fields, Lit, Meta, Type,
+    parse_macro_input,
 };
 
 use crate::shared::{
@@ -12,12 +13,22 @@ use crate::shared::{
 
 const RESERVED_EDGE_FIELDS: &[&str] = &["from", "to", "type"];
 
-fn parse_edge_attr(
-    attr: Option<&Attribute>,
-    struct_name: &syn::Ident,
-) -> (String, Vec<(String, String)>) {
+struct EdgeAttr {
+    type_name: String,
+    indexes: Vec<(String, String)>,
+    /// Path of the Object type the edge originates from — emitted as
+    /// `<Path as Object>::TYPE` to populate `Edge::FROM_TYPE`.
+    from_ty: syn::Path,
+    /// Path of the Object type the edge points to — emitted as
+    /// `<Path as Object>::TYPE` to populate `Edge::TO_TYPE`.
+    to_ty: syn::Path,
+}
+
+fn parse_edge_attr(attr: Option<&Attribute>, struct_name: &syn::Ident) -> EdgeAttr {
     let mut type_name = None;
     let mut indexes = vec![];
+    let mut from_ty: Option<syn::Path> = None;
+    let mut to_ty: Option<syn::Path> = None;
 
     if let Some(attr) = attr {
         let meta = &attr.meta;
@@ -58,6 +69,24 @@ fn parse_edge_attr(
                             panic!("index must be a string literal");
                         }
                     }
+                    Meta::NameValue(nv) if nv.path.is_ident("from") => {
+                        if let Expr::Path(ExprPath { path, .. }) = &nv.value {
+                            from_ty = Some(path.clone());
+                        } else {
+                            panic!(
+                                "`from = <Type>` must reference an Object type, e.g. `from = User`"
+                            );
+                        }
+                    }
+                    Meta::NameValue(nv) if nv.path.is_ident("to") => {
+                        if let Expr::Path(ExprPath { path, .. }) = &nv.value {
+                            to_ty = Some(path.clone());
+                        } else {
+                            panic!(
+                                "`to = <Type>` must reference an Object type, e.g. `to = Post`"
+                            );
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -65,8 +94,25 @@ fn parse_edge_attr(
     }
 
     let type_name = type_name.unwrap_or_else(|| struct_name.to_string());
+    let from_ty = from_ty.unwrap_or_else(|| {
+        panic!(
+            "OusiaEdge `{struct_name}` is missing `from = <Object>` in `#[ousia(...)]`. \
+             v2 requires `from`/`to` so init_schema can wire ON DELETE CASCADE foreign keys."
+        )
+    });
+    let to_ty = to_ty.unwrap_or_else(|| {
+        panic!(
+            "OusiaEdge `{struct_name}` is missing `to = <Object>` in `#[ousia(...)]`. \
+             v2 requires `from`/`to` so init_schema can wire ON DELETE CASCADE foreign keys."
+        )
+    });
 
-    (type_name, indexes)
+    EdgeAttr {
+        type_name,
+        indexes,
+        from_ty,
+        to_ty,
+    }
 }
 
 pub fn derive(input: TokenStream) -> TokenStream {
@@ -76,7 +122,12 @@ pub fn derive(input: TokenStream) -> TokenStream {
 
     // --- get ousia attribute ---
     let attr = get_ousia_attr(&input.attrs);
-    let (type_name, indexes) = parse_edge_attr(attr, ident);
+    let EdgeAttr {
+        type_name,
+        indexes,
+        from_ty,
+        to_ty,
+    } = parse_edge_attr(attr, ident);
 
     // --- extract fields and identify meta field ---
     let fields = match &input.data {
@@ -124,30 +175,33 @@ pub fn derive(input: TokenStream) -> TokenStream {
         }
     }
 
-    // --- generate IndexField list ---
-    let index_fields = indexes.iter().map(|(name, kind)| {
-        if RESERVED_EDGE_FIELDS.contains(&name.as_str()) {
-            panic!(
-                "Index field `{}` is reserved for edge meta and cannot be indexed",
-                name
-            );
-        }
-        if !non_meta_fields
-            .iter()
-            .any(|f| &f.ident.as_ref().unwrap().to_string() == name)
-        {
-            panic!("Indexed field `{}` does not exist on {}", name, ident);
-        }
-
-        let kinds = parse_index_kinds(kind);
-
-        quote! {
-            #ousia::query::IndexField {
-                name: #name,
-                kinds: &[#(#kinds),*],
+    // --- generate IndexField list for `IndexQuery::indexed_fields()` ---
+    let index_fields: Vec<proc_macro2::TokenStream> = indexes
+        .iter()
+        .map(|(name, kind)| {
+            if RESERVED_EDGE_FIELDS.contains(&name.as_str()) {
+                panic!(
+                    "Index field `{}` is reserved for edge meta and cannot be indexed",
+                    name
+                );
             }
-        }
-    });
+            if !non_meta_fields
+                .iter()
+                .any(|f| &f.ident.as_ref().unwrap().to_string() == name)
+            {
+                panic!("Indexed field `{}` does not exist on {}", name, ident);
+            }
+
+            let kinds = parse_index_kinds(kind);
+
+            quote! {
+                #ousia::query::IndexField {
+                    name: #name,
+                    kinds: &[#(#kinds),*],
+                }
+            }
+        })
+        .collect();
 
     // --- generate index_meta insertions ---
     let index_meta_insertions = indexes.iter().map(|(name, _kind)| {
@@ -478,10 +532,25 @@ pub fn derive(input: TokenStream) -> TokenStream {
         }
     };
 
+    // --- linkme manifest registration ---
+    let manifest_static = format_ident!("__OUSIA_EDGE_MANIFEST_{}", ident);
+
     // --- generate impl ---
     let expanded = quote! {
+        #[#ousia::__linkme::distributed_slice(#ousia::MANIFEST)]
+        #[linkme(crate = #ousia::__linkme)]
+        #[allow(non_upper_case_globals)]
+        static #manifest_static: #ousia::TypeManifestEntry = #ousia::TypeManifestEntry {
+            kind: #ousia::ManifestKind::Edge,
+            type_name: #type_name,
+            from_type: Some(<#from_ty as #ousia::object::Object>::TYPE),
+            to_type: Some(<#to_ty as #ousia::object::Object>::TYPE),
+        };
+
         impl #ousia::edge::Edge for #ident {
             const TYPE: &'static str = #type_name;
+            const FROM_TYPE: &'static str = <#from_ty as #ousia::object::Object>::TYPE;
+            const TO_TYPE: &'static str = <#to_ty as #ousia::object::Object>::TYPE;
 
             fn meta(&self) -> &#ousia::edge::EdgeMeta {
                 &self.#meta_field_ident

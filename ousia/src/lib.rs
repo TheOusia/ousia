@@ -68,11 +68,41 @@
 //! let ctx = engine.ledger_ctx();
 //! ```
 //!
+//! ## v2 highlights
+//!
+//! - **MessagePack `data` column.** Object/edge bodies are stored as
+//!   `BYTEA` msgpack instead of JSONB. `index_meta` stays as JSONB so
+//!   Postgres can GIN-index it.
+//! - **Renamed tables.** `edges → object_edges`,
+//!   `unique_constraints → object_constraints`.
+//! - **Partitioned schema.** `objects`, `object_edges`,
+//!   `object_constraints`, and `object_geo` are all partitioned
+//!   `BY LIST (type)`, one partition per derived type.
+//! - **FK cascade.** Each constraint/geo/edge partition foreign-keys
+//!   into the matching `objects_<type>(id)` partition with
+//!   `ON DELETE CASCADE` — no more orphaned children, no more
+//!   round-trips to clean them up.
+//! - **Edges declare their endpoints.**
+//!   `#[ousia(from = User, to = Post)]` now required on
+//!   `OusiaEdge` derives; the trait exposes `FROM_TYPE` / `TO_TYPE` and
+//!   `init_schema` uses them to wire the correct FKs.
+//! - **Compile-time manifest.** Every `OusiaObject` / `OusiaEdge`
+//!   derive pushes into the `MANIFEST` distributed slice via `linkme`.
+//!   `init_schema()` walks the slice — no more enumerating types by
+//!   hand — and emits a `target/ousia.json` artifact for tooling.
+//! - **Composed schema hash.** One blake3 hash over every type's
+//!   indexed fields, stored as `major.minor:hash` in `ousia_meta`.
+//!   Major bump → hard error; minor drift → warn and overwrite.
+//! - **Explicit ledger asset list.** `init_ledger_schema(&["USD",…])`
+//!   takes the asset codes from the caller; the library reads no env.
+//!
 //! ## Feature flags
 //!
-//! | Flag       | Default | Description                        |
-//! |------------|---------|------------------------------------|
-//! | `postgres` | ✓       | PostgreSQL adapter via sqlx         |
+//! | Flag       | Default | Description                                 |
+//! |------------|---------|---------------------------------------------|
+//! | `derive`   | ✓       | Re-export `OusiaObject` / `OusiaEdge` derives|
+//! | `postgres` | ✓       | PostgreSQL adapter via sqlx                  |
+//! | `ledger`   | ✓       | Built-in double-entry ledger                 |
 //!
 //! ## Ousia
 //!
@@ -85,8 +115,13 @@
 pub mod adapters;
 pub mod edge;
 pub mod error;
+pub mod manifest;
 pub mod object;
 pub mod query;
+
+pub use manifest::{ManifestKind, TypeManifestEntry, MANIFEST};
+#[doc(hidden)]
+pub use manifest::{__linkme, __rmp_serde};
 
 #[cfg(feature = "ledger")]
 pub use ledger;
@@ -144,33 +179,53 @@ impl Engine {
     }
 
     // ==================== Object CRUD ====================
-    /// Create a new object in storage
+    /// Create a new object in storage.
+    ///
+    /// Insertion order is **object → unique hashes → geo points**. The
+    /// child tables (`object_constraints`, `object_geo`) hold `ON DELETE
+    /// CASCADE` foreign keys to the object's partition, so the object
+    /// row must exist first. If a unique-hash or geo insert fails, the
+    /// object is rolled back by deleting it (which cascades any
+    /// children that did succeed).
     pub async fn create_object<T: Object>(&self, obj: &T) -> Result<(), Error> {
-        if !T::HAS_UNIQUE_FIELDS {
-            self.inner
-                .adapter
-                .insert_object(ObjectRecord::from_object(obj))
-                .await?;
-        } else {
-            let unique_hashes = obj.derive_unique_hashes();
+        self.inner
+            .adapter
+            .insert_object(ObjectRecord::from_object(obj))
+            .await?;
 
-            self.inner
+        if T::HAS_UNIQUE_FIELDS {
+            let unique_hashes = obj.derive_unique_hashes();
+            if let Err(e) = self
+                .inner
                 .adapter
                 .insert_unique_hashes(obj.type_name(), obj.id(), unique_hashes)
-                .await?;
-            self.inner
-                .adapter
-                .insert_object(ObjectRecord::from_object(obj))
-                .await?;
+                .await
+            {
+                let _ = self
+                    .inner
+                    .adapter
+                    .delete_object(T::TYPE, obj.id(), obj.meta().owner)
+                    .await;
+                return Err(e);
+            }
         }
 
         if T::HAS_GEO_FIELDS {
             let points = obj.geo_points();
             if !points.is_empty() {
-                self.inner
+                if let Err(e) = self
+                    .inner
                     .adapter
                     .upsert_geo_points(obj.type_name(), obj.id(), points)
-                    .await?;
+                    .await
+                {
+                    let _ = self
+                        .inner
+                        .adapter
+                        .delete_object(T::TYPE, obj.id(), obj.meta().owner)
+                        .await;
+                    return Err(e);
+                }
             }
         }
 
@@ -323,18 +378,15 @@ impl Engine {
         Ok(())
     }
 
-    /// Delete an object
+    /// Delete an object. `object_constraints` and `object_geo` rows
+    /// are removed automatically by Postgres via `ON DELETE CASCADE` on
+    /// the per-partition FKs.
     pub async fn delete_object<T: Object>(
         &self,
         id: Uuid,
         owner: Uuid,
     ) -> Result<Option<T>, Error> {
         let record = self.inner.adapter.delete_object(T::TYPE, id, owner).await?;
-
-        if T::HAS_GEO_FIELDS && record.is_some() {
-            self.inner.adapter.delete_geo_for_object(id).await?;
-        }
-
         match record {
             Some(r) => r.to_object().map(Some),
             None => Ok(None),
@@ -346,21 +398,10 @@ impl Engine {
         ids: Vec<Uuid>,
         owner: Uuid,
     ) -> Result<u64, Error> {
-        let geo_cleanup_ids = if T::HAS_GEO_FIELDS {
-            ids.clone()
-        } else {
-            Vec::new()
-        };
-        let record = self
-            .inner
+        self.inner
             .adapter
             .delete_bulk_objects(T::TYPE, ids, owner)
-            .await?;
-        for id in geo_cleanup_ids {
-            self.inner.adapter.delete_geo_for_object(id).await?;
-        }
-
-        Ok(record)
+            .await
     }
 
     pub async fn delete_owned_objects<T: Object>(&self, owner: Uuid) -> Result<u64, Error> {

@@ -14,10 +14,17 @@ pub trait PostgresLedgerAdapter {
 
 #[async_trait::async_trait]
 pub trait PostgresSchemaLedgerAdapter {
-    /// Initialize the schema for the internal ledger.
-    /// This function should only be called for standalone ledger.
-    /// If using Ousia. Call init_schema() on the adapter.
-    async fn init_ledger_schema(&self) -> Result<(), MoneyError>;
+    /// Initialise the ledger schema, optionally seeding per-asset
+    /// partitions of `ledger_value_objects`.
+    ///
+    /// `assets` is the caller-supplied list of asset codes (e.g.
+    /// `&["USD", "NGN"]`). The library reads no environment variables
+    /// — the caller decides where the list comes from. Pass `&[]` to
+    /// create only the catch-all `_default` partition; assets can be
+    /// added by calling again later with a wider list.
+    ///
+    /// Idempotent: safe to call on every application start.
+    async fn init_ledger_schema(&self, assets: &[&str]) -> Result<(), MoneyError>;
 }
 
 #[async_trait::async_trait]
@@ -25,7 +32,7 @@ impl<T> PostgresSchemaLedgerAdapter for T
 where
     T: PostgresLedgerAdapter + Send + Sync,
 {
-    async fn init_ledger_schema(&self) -> Result<(), MoneyError> {
+    async fn init_ledger_schema(&self, assets: &[&str]) -> Result<(), MoneyError> {
         let mut tx = self
             .get_pool()
             .begin()
@@ -48,23 +55,51 @@ where
         .await
         .map_err(|e| MoneyError::Storage(e.to_string()))?;
 
-        // ValueObjects table
+        // ValueObjects table, partitioned by asset_code so each asset
+        // gets its own physical partition with independent vacuum and
+        // statistics. The asset UUID is kept alongside the code for
+        // referential integrity (FK to ledger_assets); the code is
+        // denormalised onto each row so PG can route writes.
         sqlx::query(
             r#"
             CREATE TABLE IF NOT EXISTS ledger_value_objects (
-                id UUID PRIMARY KEY,
-                asset UUID NOT NULL REFERENCES ledger_assets(id),
-                owner UUID NOT NULL,
-                amount BIGINT NOT NULL CHECK (amount > 0),
-                state TEXT NOT NULL CHECK (state IN ('alive', 'reserved', 'burned')),
+                id           UUID NOT NULL,
+                asset        UUID NOT NULL REFERENCES ledger_assets(id),
+                asset_code   TEXT NOT NULL,
+                owner        UUID NOT NULL,
+                amount       BIGINT NOT NULL CHECK (amount > 0),
+                state        TEXT NOT NULL CHECK (state IN ('alive', 'reserved', 'burned')),
                 reserved_for UUID,
-                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-            )
+                created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                PRIMARY KEY (asset_code, id)
+            ) PARTITION BY LIST (asset_code)
             "#,
         )
         .execute(&mut *tx)
         .await
         .map_err(|e| MoneyError::Storage(e.to_string()))?;
+
+        // Catch-all partition so writes succeed even before the caller
+        // has registered any specific asset code via this argument.
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS ledger_value_objects_default \
+             PARTITION OF ledger_value_objects DEFAULT",
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| MoneyError::Storage(e.to_string()))?;
+
+        for code in assets {
+            let safe = ledger_partition_segment(code);
+            let sql = format!(
+                "CREATE TABLE IF NOT EXISTS ledger_value_objects_{safe} \
+                 PARTITION OF ledger_value_objects FOR VALUES IN ('{code}')"
+            );
+            sqlx::query(&sql)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| MoneyError::Storage(e.to_string()))?;
+        }
 
         // Indexes for ValueObjects
         //
@@ -194,6 +229,13 @@ where
     }
 }
 
+/// Lowercase + `-` → `_` so an asset code like `"BTC-LN"` partitions as
+/// `ledger_value_objects_btc_ln`. Mirrors `partition_name_segment` in
+/// the ousia postgres adapter.
+fn ledger_partition_segment(code: &str) -> String {
+    code.to_lowercase().replace('-', "_")
+}
+
 // ── Fragmentation ─────────────────────────────────────────────────────────────
 //
 // `unit`          — preferred chunk size (soft, natural denomination).
@@ -319,12 +361,13 @@ where
         for fragment in fragments {
             sqlx::query(
                 r#"
-                INSERT INTO ledger_value_objects (id, asset, owner, amount, state, reserved_for, created_at)
-                VALUES ($1, $2, $3, $4, 'alive', NULL, NOW())
+                INSERT INTO ledger_value_objects (id, asset, asset_code, owner, amount, state, reserved_for, created_at)
+                VALUES ($1, $2, $3, $4, $5, 'alive', NULL, NOW())
                 "#,
             )
             .bind(fragment.id)
             .bind(fragment.asset)
+            .bind(&asset.code)
             .bind(fragment.owner)
             .bind(fragment.amount as i64)
             .execute(&mut **tx)
@@ -356,12 +399,13 @@ where
         for fragment in fragments {
             sqlx::query(
                 r#"
-                INSERT INTO ledger_value_objects (id, asset, owner, amount, state, reserved_for, created_at)
-                VALUES ($1, $2, $3, $4, 'reserved', $5, NOW())
+                INSERT INTO ledger_value_objects (id, asset, asset_code, owner, amount, state, reserved_for, created_at)
+                VALUES ($1, $2, $3, $4, $5, 'reserved', $6, NOW())
                 "#,
             )
             .bind(fragment.id)
             .bind(fragment.asset)
+            .bind(&asset.code)
             .bind(fragment.owner)
             .bind(fragment.amount as i64)
             .bind(authority)

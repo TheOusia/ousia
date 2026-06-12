@@ -73,7 +73,12 @@ impl ToIndexValue for PostStatus {
 }
 
 #[derive(OusiaEdge, Debug)]
-#[ousia(type_name = "BenchFollow", index = "weight:search+sort")]
+#[ousia(
+    type_name = "BenchFollow",
+    from = BenchUser,
+    to = BenchUser,
+    index = "weight:search+sort"
+)]
 pub struct BenchFollow {
     pub _meta: EdgeMeta,
     pub weight: i64,

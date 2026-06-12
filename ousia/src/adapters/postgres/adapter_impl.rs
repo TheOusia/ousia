@@ -655,7 +655,7 @@ impl Adapter for PostgresAdapter {
         } = record;
         let _ = sqlx::query(
             r#"
-            INSERT INTO edges ("from", "to", type, data, index_meta, created_at, updated_at)
+            INSERT INTO object_edges ("from", "to", type, data, index_meta, created_at, updated_at)
             VALUES ($1, $2, $3, $4, $5, $6, $7)
             ON CONFLICT ("from", type, "to")
             DO UPDATE SET data = $4, index_meta = $5, updated_at = $7;
@@ -689,7 +689,7 @@ impl Adapter for PostgresAdapter {
         } = record;
         let _ = sqlx::query(
             r#"
-        UPDATE edges SET data = $1, "to" = $2, updated_at = $3
+        UPDATE object_edges SET data = $1, "to" = $2, updated_at = $3
         WHERE "from" = $4 AND type = $5 AND "to" = $6
         "#,
         )
@@ -714,7 +714,7 @@ impl Adapter for PostgresAdapter {
     ) -> Result<(), Error> {
         let _ = sqlx::query(
             r#"
-            DELETE FROM edges
+            DELETE FROM object_edges
             WHERE type = $1 AND "from" = $2 AND "to" = $3
             "#,
         )
@@ -731,7 +731,7 @@ impl Adapter for PostgresAdapter {
     async fn delete_object_edge(&self, type_name: &'static str, from: Uuid) -> Result<(), Error> {
         let _ = sqlx::query(
             r#"
-            DELETE FROM edges
+            DELETE FROM object_edges
             WHERE type = $1 AND "from" = $2
             "#,
         )
@@ -753,7 +753,7 @@ impl Adapter for PostgresAdapter {
         let row = sqlx::query(
             r#"
         SELECT e."from", e."to", e.type, e.data, e.created_at, e.updated_at
-        FROM edges e
+        FROM object_edges e
         WHERE type = $1 AND "from" = $2 AND "to" = $3
         "#,
         )
@@ -845,7 +845,7 @@ impl Adapter for PostgresAdapter {
 
                 let mut sql = format!(
                     r#"
-                SELECT COUNT(*) FROM edges e
+                SELECT COUNT(*) FROM object_edges e
                 {}
                 "#,
                     where_clause
@@ -870,7 +870,7 @@ impl Adapter for PostgresAdapter {
             }
             None => {
                 let count: i64 = sqlx::query_scalar(
-                    r#"SELECT COUNT(*) FROM edges WHERE type = $1 AND "from" = $2"#,
+                    r#"SELECT COUNT(*) FROM object_edges WHERE type = $1 AND "from" = $2"#,
                 )
                 .bind(type_name)
                 .bind(owner)
@@ -899,7 +899,7 @@ impl Adapter for PostgresAdapter {
 
                 let mut sql = format!(
                     r#"
-                SELECT COUNT(*) FROM edges
+                SELECT COUNT(*) FROM object_edges
                 {}
                 "#,
                     where_clause
@@ -923,7 +923,7 @@ impl Adapter for PostgresAdapter {
             None => {
                 let count: i64 = sqlx::query_scalar(
                     r#"
-                    SELECT COUNT(*) FROM edges WHERE type = $1 AND "to" = $2
+                    SELECT COUNT(*) FROM object_edges WHERE type = $1 AND "to" = $2
                     "#,
                 )
                 .bind(type_name)
@@ -949,7 +949,7 @@ impl Adapter for PostgresAdapter {
 
     async fn sequence_next_value(&self, sq: String) -> u64 {
         // Upsert: insert with value=2 on first call, otherwise increment.
-        // This matches SQLite semantics: first sequence_value = 1, first next = 2.
+        // Convention: first `sequence_value` returns 1, first `sequence_next_value` returns 2.
         let next_val: i64 = sqlx::query_scalar(
             r#"
             INSERT INTO sequences (name, value) VALUES ($1, 2)
