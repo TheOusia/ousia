@@ -135,7 +135,7 @@ pub use crate::adapters::{
     Query, QueryContext,
 };
 pub use crate::edge::meta::*;
-pub use crate::edge::query::EdgeQuery;
+pub use crate::edge::query::{EdgeQuery, ObjectEdge};
 pub use crate::edge::traits::*;
 pub use crate::error::Error;
 pub use crate::object::*;
@@ -681,6 +681,93 @@ impl Engine {
             .adapter
             .count_reverse_edges(E::TYPE, to, query)
             .await
+    }
+
+    // ==================== Batch edge/ownership traversal (arbitrary id sets) ====================
+    //
+    // Unlike `preload_objects(query).edge()`, these take a raw `&[Uuid]` you
+    // already have in hand — no `Query` required. Each is exactly 1 query
+    // regardless of how many ids are passed. They exist for call sites that
+    // already hold a page of ids (e.g. from a prior `fetch_objects` or a
+    // manually-assembled list) and would otherwise fall back to N sequential
+    // single-id calls.
+
+    /// Batch forward-edge fetch across multiple pivot ids. Grouped by `from`.
+    pub async fn query_edges_batch<E: Edge>(
+        &self,
+        from_ids: &[Uuid],
+        plan: EdgeQuery,
+    ) -> Result<std::collections::HashMap<Uuid, Vec<E>>, Error> {
+        let records = self
+            .inner
+            .adapter
+            .query_edges_batch(E::TYPE, from_ids, plan)
+            .await?;
+        let mut grouped: std::collections::HashMap<Uuid, Vec<E>> = std::collections::HashMap::new();
+        for r in records {
+            let from = r.from;
+            grouped.entry(from).or_default().push(r.to_edge()?);
+        }
+        Ok(grouped)
+    }
+
+    /// Batch forward JOIN (edge + target object) across multiple pivot ids.
+    /// Grouped by `from`.
+    pub async fn query_edges_with_targets_batch<E: Edge, O: Object>(
+        &self,
+        from_ids: &[Uuid],
+        obj_filters: &[QueryFilter],
+        plan: EdgeQuery,
+    ) -> Result<std::collections::HashMap<Uuid, Vec<ObjectEdge<E, O>>>, Error> {
+        let pairs = self
+            .inner
+            .adapter
+            .query_edges_with_targets_batch(E::TYPE, O::TYPE, from_ids, obj_filters, plan)
+            .await?;
+        let mut grouped: std::collections::HashMap<Uuid, Vec<ObjectEdge<E, O>>> =
+            std::collections::HashMap::new();
+        for (er, or) in pairs {
+            let from = er.from;
+            grouped
+                .entry(from)
+                .or_default()
+                .push(ObjectEdge::new(er.to_edge()?, or.to_object()?));
+        }
+        Ok(grouped)
+    }
+
+    /// Batch reverse-edge count across multiple target ids. Grouped by `to`.
+    pub async fn count_reverse_edges_batch<E: Edge>(
+        &self,
+        to_ids: &[Uuid],
+        plan: EdgeQuery,
+    ) -> Result<std::collections::HashMap<Uuid, u64>, Error> {
+        let counts = self
+            .inner
+            .adapter
+            .count_reverse_edges_batch(E::TYPE, to_ids, plan)
+            .await?;
+        Ok(counts.into_iter().collect())
+    }
+
+    /// Batch owned-children fetch across multiple owner ids. Grouped by
+    /// `owner`. Also works for O2O types (e.g. `Profile`/`StoreSubscription`)
+    /// — each group will just have 0 or 1 element.
+    pub async fn fetch_owned_objects_batch<T: Object>(
+        &self,
+        owner_ids: &[Uuid],
+    ) -> Result<std::collections::HashMap<Uuid, Vec<T>>, Error> {
+        let records = self
+            .inner
+            .adapter
+            .fetch_owned_objects_batch(T::TYPE, owner_ids)
+            .await?;
+        let mut grouped: std::collections::HashMap<Uuid, Vec<T>> = std::collections::HashMap::new();
+        for r in records {
+            let owner = r.owner;
+            grouped.entry(owner).or_default().push(r.to_object()?);
+        }
+        Ok(grouped)
     }
 
     // ==================== Sequence ====================
