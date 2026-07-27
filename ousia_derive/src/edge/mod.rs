@@ -7,9 +7,7 @@ use syn::{
     parse_macro_input,
 };
 
-use crate::shared::{
-    get_field_default_value, get_ousia_attr, import_ousia, is_meta_field, parse_index_kinds,
-};
+use crate::shared::{get_field_default_value, get_ousia_attr, import_ousia, is_meta_field, parse_index_kinds};
 
 const RESERVED_EDGE_FIELDS: &[&str] = &["from", "to", "type"];
 
@@ -266,6 +264,10 @@ pub fn derive(input: TokenStream) -> TokenStream {
     });
 
     // --- generate Serialize implementation (skip meta field) ---
+    // Keyed by field name. This is the internal storage encoding — see
+    // the object derive's `generate_internal_serialize` for the
+    // equivalent (edges have no private-field split, so the public
+    // `Serialize` impl doubles as the blob encoder).
     let serialize_fields = non_meta_fields.iter().map(|f| {
         let field_name = f.ident.as_ref().unwrap();
         let field_name_str = field_name.to_string();
@@ -336,7 +338,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
                             while map.next_entry::<String, serde_json::Value>()?.is_some() {}
 
                             Ok(#ident {
-                                #meta_field_ident: #ousia::edge::EdgeMeta::new(uuid::Uuid::now_v7(), uuid::Uuid::now_v7()),
+                                #meta_field_ident: #ousia::edge::EdgeMeta::__deserialize_placeholder(),
                             })
                         }
 
@@ -345,7 +347,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
                             E: serde::de::Error,
                         {
                             Ok(#ident {
-                                #meta_field_ident: #ousia::edge::EdgeMeta::new(uuid::Uuid::now_v7(), uuid::Uuid::now_v7()),
+                                #meta_field_ident: #ousia::edge::EdgeMeta::__deserialize_placeholder(),
                             })
                         }
                     }
@@ -489,6 +491,11 @@ pub fn derive(input: TokenStream) -> TokenStream {
                 where
                     D: serde::Deserializer<'de>,
                 {
+                    // Field identity is the field name, matched via serde's
+                    // built-in field_identifier machinery. Unlike the
+                    // object derive, an unrecognized field name here is a
+                    // hard decode error (no `Unknown`/ignore catch-all) —
+                    // matches pre-existing edge behavior.
                     #[derive(serde::Deserialize)]
                     #[serde(field_identifier, rename_all = "snake_case")]
                     enum Field {
@@ -519,13 +526,13 @@ pub fn derive(input: TokenStream) -> TokenStream {
                             }
 
                             Ok(#ident {
-                                #meta_field_ident: #ousia::edge::EdgeMeta::new(uuid::Uuid::now_v7(), uuid::Uuid::now_v7()),
+                                #meta_field_ident: #ousia::edge::EdgeMeta::__deserialize_placeholder(),
                                 #(#field_inits,)*
                             })
                         }
                     }
 
-                    const FIELDS: &[&str] = &[#(#deserialize_field_names),*];
+                    const FIELDS: &[&str] = &[#(#deserialize_field_names,)*];
                     deserializer.deserialize_struct(stringify!(#ident), FIELDS, #visitor_name)
                 }
             }
@@ -545,6 +552,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
             type_name: #type_name,
             from_type: Some(<#from_ty as #ousia::object::Object>::TYPE),
             to_type: Some(<#to_ty as #ousia::object::Object>::TYPE),
+            field_names: &[#(#deserialize_field_names),*],
         };
 
         impl #ousia::edge::Edge for #ident {

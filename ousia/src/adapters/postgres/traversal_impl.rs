@@ -64,10 +64,10 @@ impl EdgeTraversal for PostgresAdapter {
         let mut sql = format!(
             r#"
             SELECT
-                e."from" AS edge_from, e."to" AS edge_to, e.type AS edge_type,
-                e.data AS edge_data, e.index_meta AS edge_index_meta,
+                e."from" AS edge_from, e."to" AS edge_to,
+                e.data AS edge_data,
                 e.created_at AS edge_created_at, e.updated_at AS edge_updated_at,
-                o.id AS obj_id, o.type AS obj_type, o.owner AS obj_owner,
+                o.id AS obj_id, o.owner AS obj_owner,
                 o.created_at AS obj_created_at, o.updated_at AS obj_updated_at, o.data AS obj_data
             FROM object_edges e
             JOIN objects o ON e."to" = o.id
@@ -90,7 +90,7 @@ impl EdgeTraversal for PostgresAdapter {
             .map_err(|e| Error::Storage(e.to_string()))?;
         Ok(rows
             .into_iter()
-            .filter_map(|row| Self::map_row_to_edge_and_object(row).ok())
+            .filter_map(|row| Self::map_row_to_edge_and_object(row, edge_type, obj_type).ok())
             .collect())
     }
 
@@ -111,10 +111,10 @@ impl EdgeTraversal for PostgresAdapter {
         let mut sql = format!(
             r#"
             SELECT
-                e."from" AS edge_from, e."to" AS edge_to, e.type AS edge_type,
-                e.data AS edge_data, e.index_meta AS edge_index_meta,
+                e."from" AS edge_from, e."to" AS edge_to,
+                e.data AS edge_data,
                 e.created_at AS edge_created_at, e.updated_at AS edge_updated_at,
-                o.id AS obj_id, o.type AS obj_type, o.owner AS obj_owner,
+                o.id AS obj_id, o.owner AS obj_owner,
                 o.created_at AS obj_created_at, o.updated_at AS obj_updated_at, o.data AS obj_data
             FROM object_edges e
             JOIN objects o ON e."from" = o.id
@@ -137,7 +137,7 @@ impl EdgeTraversal for PostgresAdapter {
             .map_err(|e| Error::Storage(e.to_string()))?;
         Ok(rows
             .into_iter()
-            .filter_map(|row| Self::map_row_to_edge_and_object(row).ok())
+            .filter_map(|row| Self::map_row_to_edge_and_object(row, edge_type, obj_type).ok())
             .collect())
     }
 
@@ -152,7 +152,7 @@ impl EdgeTraversal for PostgresAdapter {
         let order_clause = Self::build_edge_order_clause(&plan.filters);
         let mut sql = format!(
             r#"
-            SELECT e."from", e."to", e.type, e.data, e.index_meta, e.created_at, e.updated_at
+            SELECT e."from", e."to", e.data, e.created_at, e.updated_at
             FROM object_edges e
             {where_clause}
             {order_clause}
@@ -169,7 +169,7 @@ impl EdgeTraversal for PostgresAdapter {
             .map_err(|e| Error::Storage(e.to_string()))?;
         Ok(rows
             .into_iter()
-            .filter_map(|row| Self::map_row_to_edge_record(row).ok())
+            .filter_map(|row| Self::map_row_to_edge_record(row, edge_type).ok())
             .collect())
     }
 
@@ -184,7 +184,7 @@ impl EdgeTraversal for PostgresAdapter {
         let order_clause = Self::build_edge_order_clause(&plan.filters);
         let mut sql = format!(
             r#"
-            SELECT e."from", e."to", e.type, e.data, e.index_meta, e.created_at, e.updated_at
+            SELECT e."from", e."to", e.data, e.created_at, e.updated_at
             FROM object_edges e
             {where_clause}
             {order_clause}
@@ -201,7 +201,7 @@ impl EdgeTraversal for PostgresAdapter {
             .map_err(|e| Error::Storage(e.to_string()))?;
         Ok(rows
             .into_iter()
-            .filter_map(|row| Self::map_row_to_edge_record(row).ok())
+            .filter_map(|row| Self::map_row_to_edge_record(row, edge_type).ok())
             .collect())
     }
 
@@ -231,10 +231,10 @@ impl EdgeTraversal for PostgresAdapter {
         );
         let sel = r#"
             SELECT
-                e."from" AS edge_from, e."to" AS edge_to, e.type AS edge_type,
-                e.data AS edge_data, e.index_meta AS edge_index_meta,
+                e."from" AS edge_from, e."to" AS edge_to,
+                e.data AS edge_data,
                 e.created_at AS edge_created_at, e.updated_at AS edge_updated_at,
-                o.id AS obj_id, o.type AS obj_type, o.owner AS obj_owner,
+                o.id AS obj_id, o.owner AS obj_owner,
                 o.created_at AS obj_created_at, o.updated_at AS obj_updated_at, o.data AS obj_data
         "#;
         let sql = format!(
@@ -259,7 +259,7 @@ impl EdgeTraversal for PostgresAdapter {
             let edge_from: Uuid = row
                 .try_get::<Uuid, _>("edge_from")
                 .map_err(|e| Error::Deserialize(e.to_string()))?;
-            let pair = Self::map_row_to_edge_and_object(row)?;
+            let pair = Self::map_row_to_edge_and_object(row, edge_type, obj_type)?;
             if edge_from == pivot {
                 fwd.push(pair);
             } else {
@@ -285,10 +285,10 @@ impl EdgeTraversal for PostgresAdapter {
         );
         let sql = format!(
             r#"
-            SELECT e."from", e."to", e.type, e.data, e.index_meta, e.created_at, e.updated_at
+            SELECT e."from", e."to", e.data, e.created_at, e.updated_at
             FROM object_edges e {fwd_where}
             UNION ALL
-            SELECT e."from", e."to", e.type, e.data, e.index_meta, e.created_at, e.updated_at
+            SELECT e."from", e."to", e.data, e.created_at, e.updated_at
             FROM object_edges e {rev_where}
             "#,
         );
@@ -305,7 +305,7 @@ impl EdgeTraversal for PostgresAdapter {
             let edge_from: Uuid = row
                 .try_get::<Uuid, _>("from")
                 .map_err(|e| Error::Deserialize(e.to_string()))?;
-            let record = Self::map_row_to_edge_record(row)?;
+            let record = Self::map_row_to_edge_record(row, edge_type)?;
             if edge_from == pivot {
                 fwd.push(record);
             } else {
@@ -348,6 +348,77 @@ impl EdgeTraversal for PostgresAdapter {
                     .map_err(|e| Error::Deserialize(e.to_string()))?;
                 Ok((id, cnt as u64))
             })
+            .collect()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn query_two_hop_edges_with_targets_batch(
+        &self,
+        edge1_type: &'static str,
+        obj1_type: &'static str,
+        edge2_type: &'static str,
+        obj2_type: &'static str,
+        from_ids: &[Uuid],
+        obj1_filters: &[QueryFilter],
+        obj2_filters: &[QueryFilter],
+        plan1: EdgeQuery,
+        plan2: EdgeQuery,
+    ) -> Result<
+        Vec<(
+            EdgeRecord,
+            ObjectRecord,
+            Option<EdgeRecord>,
+            Option<ObjectRecord>,
+        )>,
+        Error,
+    > {
+        // Per-hop limit/cursor are unsupported on this path (see trait docs).
+        let (o1_on, o2_on, e2_on, where_clause) = Self::build_two_hop_traversal_conditions(
+            obj1_filters,
+            obj2_filters,
+            &plan2.filters,
+            &plan1.filters,
+        );
+        let order_clause = Self::build_two_hop_order_clause(&plan1.filters, &plan2.filters);
+        // The second hop is a parenthesized (edge JOIN object) so that its
+        // object filters can't strand a matched e2 with a NULL o2 — the pair
+        // either survives as a whole or the LEFT JOIN misses entirely.
+        let sql = format!(
+            r#"
+            SELECT
+                e1."from" AS e1_from, e1."to" AS e1_to,
+                e1.data AS e1_data, e1.created_at AS e1_created_at, e1.updated_at AS e1_updated_at,
+                o1.id AS o1_id, o1.owner AS o1_owner,
+                o1.created_at AS o1_created_at, o1.updated_at AS o1_updated_at, o1.data AS o1_data,
+                e2."from" AS e2_from, e2."to" AS e2_to,
+                e2.data AS e2_data, e2.created_at AS e2_created_at, e2.updated_at AS e2_updated_at,
+                o2.id AS o2_id, o2.owner AS o2_owner,
+                o2.created_at AS o2_created_at, o2.updated_at AS o2_updated_at, o2.data AS o2_data
+            FROM object_edges e1
+            JOIN objects o1 ON {o1_on}
+            LEFT JOIN (object_edges e2 JOIN objects o2 ON {o2_on}) ON {e2_on}
+            {where_clause}
+            {order_clause}
+            "#,
+        );
+        let mut query = sqlx::query(&sql)
+            .bind(edge1_type)
+            .bind(obj1_type)
+            .bind(edge2_type)
+            .bind(obj2_type)
+            .bind(from_ids);
+        // Bind order must match build_two_hop_traversal_conditions' param_idx
+        // assignment: obj1, obj2, edge2, edge1.
+        query = Self::query_bind_filters(query, obj1_filters);
+        query = Self::query_bind_filters(query, obj2_filters);
+        query = Self::query_bind_filters(query, &plan2.filters);
+        query = Self::query_bind_filters(query, &plan1.filters);
+        let rows = query
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| Error::Storage(e.to_string()))?;
+        rows.into_iter()
+            .map(|row| Self::map_row_to_two_hop(row, edge1_type, obj1_type, edge2_type, obj2_type))
             .collect()
     }
 

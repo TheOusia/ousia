@@ -1402,10 +1402,19 @@ impl<'a, P: Object> MultiPreloadContext<'a, P> {
     }
 }
 
+/// Where a multi-pivot context gets its pivot ids from: a fresh `Query` for
+/// the parent type, or an id list the caller already has in hand.
+pub(crate) enum PivotSource {
+    Query(Query),
+    Ids(Vec<Uuid>),
+}
+
 /// Multi-pivot edge context: executes exactly 2 queries — one for parents, one batch join.
+/// When built from raw ids (`Engine::batch_edge`), terminal methods that
+/// return parent objects fetch them by id instead of running a `Query`.
 pub struct MultiEdgeContext<'a, E: Edge, P: Object, C: Object> {
     adapter: &'a dyn Adapter,
-    parent_query: Query,
+    source: PivotSource,
     edge_query: EdgeQuery,
     obj_filters: Vec<QueryFilter>,
     _marker: std::marker::PhantomData<(E, P, C)>,
@@ -1415,9 +1424,46 @@ impl<'a, E: Edge, P: Object, C: Object> MultiEdgeContext<'a, E, P, C> {
     pub(crate) fn new(adapter: &'a dyn Adapter, parent_query: Query) -> Self {
         Self {
             adapter,
-            parent_query,
+            source: PivotSource::Query(parent_query),
             edge_query: EdgeQuery::default(),
             obj_filters: Vec::new(),
+            _marker: std::marker::PhantomData,
+        }
+    }
+
+    pub(crate) fn new_with_ids(adapter: &'a dyn Adapter, ids: Vec<Uuid>) -> Self {
+        Self {
+            adapter,
+            source: PivotSource::Ids(ids),
+            edge_query: EdgeQuery::default(),
+            obj_filters: Vec::new(),
+            _marker: std::marker::PhantomData,
+        }
+    }
+
+    /// Resolve the pivot rows: run the parent `Query`, or bulk-fetch by id.
+    async fn resolve_parents(
+        adapter: &'a dyn Adapter,
+        source: PivotSource,
+    ) -> Result<Vec<crate::adapters::ObjectRecord>, Error> {
+        match source {
+            PivotSource::Query(q) => adapter.query_objects(P::TYPE, q).await,
+            PivotSource::Ids(ids) => adapter.fetch_bulk_objects(P::TYPE, ids).await,
+        }
+    }
+
+    /// Chain a second hop: `C -[E2]-> C2`. Consumes self; the eventual
+    /// terminal method executes BOTH hops in one SQL query (two extra JOINs),
+    /// not two round trips. Hop-1 filters set on this context carry over;
+    /// hop-2 filters are configured on the returned context.
+    pub fn then_edge<E2: Edge, C2: Object>(self) -> MultiEdgeContext2<'a, E, P, C, E2, C2> {
+        MultiEdgeContext2 {
+            adapter: self.adapter,
+            source: self.source,
+            edge1_query: self.edge_query,
+            obj1_filters: self.obj_filters,
+            edge2_query: EdgeQuery::default(),
+            obj2_filters: Vec::new(),
             _marker: std::marker::PhantomData,
         }
     }
@@ -1444,10 +1490,7 @@ impl<'a, E: Edge, P: Object, C: Object> MultiEdgeContext<'a, E, P, C> {
     /// Forward: edges WHERE "from" IN parent_ids → joined target objects.
     /// Returns Vec<(P, Vec<C>)> — exactly 2 queries.
     pub async fn collect(self) -> Result<Vec<(P, Vec<C>)>, Error> {
-        let parents = self
-            .adapter
-            .query_objects(P::TYPE, self.parent_query)
-            .await?;
+        let parents = Self::resolve_parents(self.adapter, self.source).await?;
         if parents.is_empty() {
             return Ok(Vec::new());
         }
@@ -1485,10 +1528,7 @@ impl<'a, E: Edge, P: Object, C: Object> MultiEdgeContext<'a, E, P, C> {
     /// Reverse: edges WHERE "to" IN parent_ids → joined source objects.
     /// Returns Vec<(P, Vec<C>)> — exactly 2 queries.
     pub async fn collect_reverse(self) -> Result<Vec<(P, Vec<C>)>, Error> {
-        let parents = self
-            .adapter
-            .query_objects(P::TYPE, self.parent_query)
-            .await?;
+        let parents = Self::resolve_parents(self.adapter, self.source).await?;
         if parents.is_empty() {
             return Ok(Vec::new());
         }
@@ -1523,10 +1563,7 @@ impl<'a, E: Edge, P: Object, C: Object> MultiEdgeContext<'a, E, P, C> {
     /// Forward edges only — no object JOIN.
     /// Returns Vec<(P, Vec<E>)> — exactly 2 queries.
     pub async fn collect_edges(self) -> Result<Vec<(P, Vec<E>)>, Error> {
-        let parents = self
-            .adapter
-            .query_objects(P::TYPE, self.parent_query)
-            .await?;
+        let parents = Self::resolve_parents(self.adapter, self.source).await?;
         if parents.is_empty() {
             return Ok(Vec::new());
         }
@@ -1555,10 +1592,7 @@ impl<'a, E: Edge, P: Object, C: Object> MultiEdgeContext<'a, E, P, C> {
     /// Reverse edges only — no object JOIN.
     /// Returns Vec<(P, Vec<E>)> — exactly 2 queries.
     pub async fn collect_reverse_edges(self) -> Result<Vec<(P, Vec<E>)>, Error> {
-        let parents = self
-            .adapter
-            .query_objects(P::TYPE, self.parent_query)
-            .await?;
+        let parents = Self::resolve_parents(self.adapter, self.source).await?;
         if parents.is_empty() {
             return Ok(Vec::new());
         }
@@ -1587,10 +1621,7 @@ impl<'a, E: Edge, P: Object, C: Object> MultiEdgeContext<'a, E, P, C> {
     /// Forward join: edges + target objects per parent.
     /// Returns Vec<(P, Vec<ObjectEdge<E, C>>)> — exactly 2 queries.
     pub async fn collect_with_target(self) -> Result<Vec<(P, Vec<ObjectEdge<E, C>>)>, Error> {
-        let parents = self
-            .adapter
-            .query_objects(P::TYPE, self.parent_query)
-            .await?;
+        let parents = Self::resolve_parents(self.adapter, self.source).await?;
         if parents.is_empty() {
             return Ok(Vec::new());
         }
@@ -1632,10 +1663,7 @@ impl<'a, E: Edge, P: Object, C: Object> MultiEdgeContext<'a, E, P, C> {
     pub async fn collect_reverse_with_target(
         self,
     ) -> Result<Vec<(P, Vec<ObjectEdge<E, C>>)>, Error> {
-        let parents = self
-            .adapter
-            .query_objects(P::TYPE, self.parent_query)
-            .await?;
+        let parents = Self::resolve_parents(self.adapter, self.source).await?;
         if parents.is_empty() {
             return Ok(Vec::new());
         }
@@ -1675,10 +1703,7 @@ impl<'a, E: Edge, P: Object, C: Object> MultiEdgeContext<'a, E, P, C> {
     /// Forward edge count per parent — GROUP BY, exactly 2 queries.
     /// Returns Vec<(P, u64)>.
     pub async fn count(self) -> Result<Vec<(P, u64)>, Error> {
-        let parents = self
-            .adapter
-            .query_objects(P::TYPE, self.parent_query)
-            .await?;
+        let parents = Self::resolve_parents(self.adapter, self.source).await?;
         if parents.is_empty() {
             return Ok(Vec::new());
         }
@@ -1704,10 +1729,7 @@ impl<'a, E: Edge, P: Object, C: Object> MultiEdgeContext<'a, E, P, C> {
     /// Reverse edge count per parent — GROUP BY, exactly 2 queries.
     /// Returns Vec<(P, u64)>.
     pub async fn count_reverse(self) -> Result<Vec<(P, u64)>, Error> {
-        let parents = self
-            .adapter
-            .query_objects(P::TYPE, self.parent_query)
-            .await?;
+        let parents = Self::resolve_parents(self.adapter, self.source).await?;
         if parents.is_empty() {
             return Ok(Vec::new());
         }
@@ -1728,6 +1750,146 @@ impl<'a, E: Edge, P: Object, C: Object> MultiEdgeContext<'a, E, P, C> {
                 Ok((p, n))
             })
             .collect()
+    }
+}
+
+/// Nested result of a two-hop traversal, keyed by pivot id: each pivot's
+/// first-hop objects, each carrying its own (edge, target) pairs.
+pub type TwoHopMap<C, E2, C2> = std::collections::HashMap<Uuid, Vec<(C, Vec<ObjectEdge<E2, C2>>)>>;
+
+/// Two-hop multi-pivot edge context: `P -[E1]-> C -[E2]-> C2`, built via
+/// `MultiEdgeContext::then_edge`. Terminal methods execute both hops in ONE
+/// SQL query (the second hop is a LEFT JOIN — first-hop objects with zero
+/// second-hop edges still appear, with an empty inner Vec).
+///
+/// Hop-1 edge/object filters are configured on the `MultiEdgeContext` before
+/// calling `then_edge`; hop-2 filters on this context. Per-hop `limit`/
+/// `cursor` are NOT supported on the two-hop path and are ignored.
+pub struct MultiEdgeContext2<'a, E1: Edge, P: Object, C: Object, E2: Edge, C2: Object> {
+    adapter: &'a dyn Adapter,
+    source: PivotSource,
+    edge1_query: EdgeQuery,
+    obj1_filters: Vec<QueryFilter>,
+    edge2_query: EdgeQuery,
+    obj2_filters: Vec<QueryFilter>,
+    _marker: std::marker::PhantomData<(E1, P, C, E2, C2)>,
+}
+
+impl<'a, E1: Edge, P: Object, C: Object, E2: Edge, C2: Object>
+    MultiEdgeContext2<'a, E1, P, C, E2, C2>
+{
+    /// Apply an EdgeQuery to the second hop's edges (filters only —
+    /// `limit`/`cursor` are ignored on the two-hop path).
+    pub fn with_edge_query(mut self, edge_query: EdgeQuery) -> Self {
+        self.edge2_query = edge_query;
+        self
+    }
+
+    /// Filter the second hop's target objects (not the edges).
+    pub fn obj_eq(mut self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
+        self.obj2_filters.push(QueryFilter {
+            field,
+            value: value.to_index_value(),
+            mode: QueryMode::Search(QuerySearch {
+                comparison: Comparison::Equal,
+                operator: Operator::default(),
+            }),
+        });
+        self
+    }
+
+    /// Resolve pivot ids without fetching parent bodies: raw ids pass
+    /// through untouched; a `Query` source runs the parent query.
+    async fn resolve_pivot_ids(
+        adapter: &'a dyn Adapter,
+        source: PivotSource,
+    ) -> Result<Vec<Uuid>, Error> {
+        match source {
+            PivotSource::Ids(ids) => Ok(ids),
+            PivotSource::Query(q) => Ok(adapter
+                .query_objects(P::TYPE, q)
+                .await?
+                .into_iter()
+                .map(|r| r.id)
+                .collect()),
+        }
+    }
+
+    /// Nested result: for each pivot id, its first-hop objects, each carrying
+    /// its own (E2, C2) pairs. One SQL query (plus the parent query when the
+    /// context came from `preload_objects` rather than `batch_edge`).
+    ///
+    /// Every pivot id appears in the map — ids with zero first-hop edges map
+    /// to an empty Vec, matching the 1-hop `MultiEdgeContext` convention of
+    /// keeping zero-edge parents. (On the `batch_edge` path ids are not
+    /// existence-checked, so an unknown id also yields an empty entry.)
+    pub async fn collect_with_target(self) -> Result<TwoHopMap<C, E2, C2>, Error> {
+        let pivot_ids = Self::resolve_pivot_ids(self.adapter, self.source).await?;
+        if pivot_ids.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+
+        let rows = self
+            .adapter
+            .query_two_hop_edges_with_targets_batch(
+                E1::TYPE,
+                C::TYPE,
+                E2::TYPE,
+                C2::TYPE,
+                &pivot_ids,
+                &self.obj1_filters,
+                &self.obj2_filters,
+                self.edge1_query,
+                self.edge2_query,
+            )
+            .await?;
+
+        let mut out: TwoHopMap<C, E2, C2> = pivot_ids.iter().map(|id| (*id, Vec::new())).collect();
+        // Rows arrive flat — one per (e1, e2) pair, repeated per second-hop
+        // match. Track each first-hop object's slot so its leaves accumulate.
+        let mut slot: std::collections::HashMap<(Uuid, Uuid), usize> =
+            std::collections::HashMap::new();
+        for (e1, o1, e2, o2) in rows {
+            let pivot = e1.from;
+            let o1_id = o1.id;
+            let children = out.entry(pivot).or_default();
+            let idx = match slot.get(&(pivot, o1_id)) {
+                Some(&i) => i,
+                None => {
+                    children.push((o1.to_object::<C>()?, Vec::new()));
+                    let i = children.len() - 1;
+                    slot.insert((pivot, o1_id), i);
+                    i
+                }
+            };
+            if let (Some(e2), Some(o2)) = (e2, o2) {
+                children[idx]
+                    .1
+                    .push(ObjectEdge::new(e2.to_edge::<E2>()?, o2.to_object::<C2>()?));
+            }
+        }
+        Ok(out)
+    }
+
+    /// Lighter variant dropping E2 metadata, mirroring
+    /// `MultiEdgeContext::collect()`. Same query, same conventions.
+    pub async fn collect(
+        self,
+    ) -> Result<std::collections::HashMap<Uuid, Vec<(C, Vec<C2>)>>, Error> {
+        Ok(self
+            .collect_with_target()
+            .await?
+            .into_iter()
+            .map(|(pivot, children)| {
+                let children = children
+                    .into_iter()
+                    .map(|(c, leaves)| {
+                        (c, leaves.into_iter().map(|oe| oe.into_parts().1).collect())
+                    })
+                    .collect();
+                (pivot, children)
+            })
+            .collect())
     }
 }
 

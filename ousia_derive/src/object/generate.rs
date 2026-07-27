@@ -226,9 +226,10 @@ fn generate_view_code(
 /// Generate the internal serialization implementation.
 ///
 /// Emits a MessagePack-encoded `Vec<u8>` representing the object's
-/// non-meta fields (including private ones). We build a one-shot
-/// `Serialize` adapter that writes a named map so deserialization via
-/// the user's derived `Deserialize` impl reads it back field-by-field.
+/// non-meta fields (including private ones), keyed by field name. We
+/// build a one-shot `Serialize` adapter that writes a named map so
+/// deserialization via the derived `Deserialize` impl reads it back
+/// field-by-field.
 fn generate_internal_serialize(
     ousia: &proc_macro2::TokenStream,
     ident: &syn::Ident,
@@ -667,7 +668,7 @@ pub fn generate_object_impl(input: &DeriveInput) -> Result<TokenStream> {
                             while map.next_entry::<String, serde_json::Value>()?.is_some() {}
 
                             Ok(#ident {
-                                #meta_field_ident: #ousia::object::meta::Meta::default(),
+                                #meta_field_ident: #ousia::object::meta::Meta::__deserialize_placeholder(),
                             })
                         }
 
@@ -676,7 +677,7 @@ pub fn generate_object_impl(input: &DeriveInput) -> Result<TokenStream> {
                             E: serde::de::Error,
                         {
                             Ok(#ident {
-                                #meta_field_ident: #ousia::object::meta::Meta::default(),
+                                #meta_field_ident: #ousia::object::meta::Meta::__deserialize_placeholder(),
                             })
                         }
                     }
@@ -846,12 +847,14 @@ pub fn generate_object_impl(input: &DeriveInput) -> Result<TokenStream> {
                 where
                     D: serde::Deserializer<'de>,
                 {
+                    // Field identity is the field name, matched via serde's
+                    // built-in field_identifier machinery.
                     #[derive(serde::Deserialize)]
                     #[serde(field_identifier, rename_all = "snake_case")]
                     enum Field {
                         #(#deserialize_field_variants,)*
                         #[serde(other)]
-                         Unknown,
+                        Unknown,
                     }
 
                     struct #visitor_name;
@@ -879,13 +882,13 @@ pub fn generate_object_impl(input: &DeriveInput) -> Result<TokenStream> {
                             }
 
                             Ok(#ident {
-                                #meta_field_ident: #ousia::object::meta::Meta::default(),
+                                #meta_field_ident: #ousia::object::meta::Meta::__deserialize_placeholder(),
                                 #(#field_inits,)*
                             })
                         }
                     }
 
-                    const FIELDS: &[&str] = &[#(#deserialize_field_names),*];
+                    const FIELDS: &[&str] = &[#(#deserialize_field_names,)*];
                     deserializer.deserialize_struct(stringify!(#ident), FIELDS, #visitor_name)
                 }
             }
@@ -908,6 +911,7 @@ pub fn generate_object_impl(input: &DeriveInput) -> Result<TokenStream> {
             type_name: #type_name,
             from_type: None,
             to_type: None,
+            field_names: &[#(#deserialize_field_names),*],
         };
 
         impl #ousia::object::traits::Object for #ident {

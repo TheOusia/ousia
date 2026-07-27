@@ -181,6 +181,36 @@ pub trait EdgeTraversal {
         to_ids: &[Uuid],
         plan: EdgeQuery,
     ) -> Result<Vec<(Uuid, u64)>, Error>;
+
+    /// Two-hop forward JOIN, one query: `from_ids -[edge1]-> obj1 -[edge2]-> obj2`.
+    /// The second hop is a LEFT JOIN, so a first-hop object with zero
+    /// second-hop edges still produces a row (edge2/obj2 = None).
+    ///
+    /// `obj1_filters`/`plan1.filters` apply to the first hop's object/edge;
+    /// `obj2_filters`/`plan2.filters` to the second hop's. Per-hop `limit`
+    /// and `cursor` are NOT supported on this path (Postgres can't LIMIT a
+    /// single JOIN leg in flat SQL) and are ignored.
+    #[allow(clippy::too_many_arguments)]
+    async fn query_two_hop_edges_with_targets_batch(
+        &self,
+        edge1_type: &'static str,
+        obj1_type: &'static str,
+        edge2_type: &'static str,
+        obj2_type: &'static str,
+        from_ids: &[Uuid],
+        obj1_filters: &[QueryFilter],
+        obj2_filters: &[QueryFilter],
+        plan1: EdgeQuery,
+        plan2: EdgeQuery,
+    ) -> Result<
+        Vec<(
+            EdgeRecord,
+            ObjectRecord,
+            Option<EdgeRecord>,
+            Option<ObjectRecord>,
+        )>,
+        Error,
+    >;
 }
 
 #[async_trait]
@@ -279,6 +309,15 @@ pub trait Adapter: UniqueAdapter + GeoAdapter + EdgeTraversal + Send + Sync + 's
         type_name: &'static str,
         owner_ids: &[Uuid],
     ) -> Result<Vec<ObjectRecord>, Error>;
+
+    /// Count owned objects per owner in one GROUP BY query — Vec<(owner_id, count)>.
+    /// Owners with zero objects produce no row (same convention as
+    /// `count_reverse_edges_batch`).
+    async fn count_owned_objects_batch(
+        &self,
+        type_name: &'static str,
+        owner_ids: &[Uuid],
+    ) -> Result<Vec<(Uuid, u64)>, Error>;
 
     /// Fetch a SINGLE owned object (O2O)
     async fn fetch_owned_object(
@@ -402,5 +441,14 @@ impl dyn Adapter {
 
     pub fn preload_objects<'a, P: Object>(&'a self, query: Query) -> MultiPreloadContext<'a, P> {
         MultiPreloadContext::new(self, query)
+    }
+
+    /// Same chainable builder as `preload_objects(query).edge::<E, O>()`, but
+    /// starting from an already-known id list instead of re-running a Query.
+    pub fn batch_edge<'a, E: crate::edge::Edge, P: Object, O: Object>(
+        &'a self,
+        from_ids: &[Uuid],
+    ) -> MultiEdgeContext<'a, E, P, O> {
+        MultiEdgeContext::new_with_ids(self, from_ids.to_vec())
     }
 }

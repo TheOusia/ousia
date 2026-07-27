@@ -96,6 +96,55 @@
 //! - **Explicit ledger asset list.** `init_ledger_schema(&["USD",…])`
 //!   takes the asset codes from the caller; the library reads no env.
 //!
+//! ## v2.1 highlights
+//!
+//! - **Chained 2-hop batch traversal.** `engine.batch_edge::<E1, P, O1>(&ids)
+//!   .then_edge::<E2, O2>().collect_with_target()` joins
+//!   `P -[E1]-> O1 -[E2]-> O2` across many pivots in ONE SQL query (the
+//!   second hop is a LEFT JOIN, so first-hop objects with zero second-hop
+//!   edges still appear). Also reachable from a fresh query via
+//!   `preload_objects(query).edge::<E1, O1>().then_edge::<E2, O2>()`.
+//! - **`Engine::batch_edge`.** The multi-pivot edge builder
+//!   (`MultiEdgeContext`) can now start from a raw `&[Uuid]` instead of a
+//!   `Query` — one chainable entry point for both "I have ids" and "I have
+//!   a query".
+//! - **Batch object-count-by-owner.**
+//!   `engine.count_owned_objects_batch::<T>(&owner_ids)` — one GROUP BY
+//!   query replacing a `count_objects` call per owner.
+//!
+//! ## v3.0 — tagged wire format (breaking: data migration required)
+//!
+//! The `data` blob's internal msgpack encoding changed from named-map
+//! (`{"username": "alice"}`) to tag-keyed (`{0: "alice"}`), matching
+//! protobuf's field-number model:
+//!
+//! - **`#[ousia(tag = N)]` is now required on every non-meta field** of
+//!   every `OusiaObject`/`OusiaEdge` derive — a small, unique integer per
+//!   field, picked by you (never auto-assigned from declaration order,
+//!   which would make reordering fields for readability silently corrupt
+//!   the wire format). Missing or duplicate tags fail the build outright,
+//!   on every `cargo` subcommand including `--release` — there's no way
+//!   to ship a type with an invalid tag.
+//! - **Old field-added-with-a-default semantics are unchanged** — a tag
+//!   absent from a decoded row still means "apply this field's default,"
+//!   exactly like a missing name did before. What changed is the *key*,
+//!   not the "missing → default" contract
+//!   (`test_default_field_backward_compatible` still passes unmodified).
+//! - **The `Query`/`Engine` public API is untouched.** This is purely an
+//!   internal storage-format change — no method signature moved.
+//! - **Existing stored rows do not decode under this version.** The old
+//!   named-map `Deserialize` was replaced, not kept as a fallback. Data
+//!   written by ousia 2.x must be migrated (re-decoded under 2.x,
+//!   re-encoded under 3.x) before upgrading a service that reads it —
+//!   see `progress_3.0.md` for the migration approach.
+//! - **Why:** removes both the field-name bytes on the wire (small
+//!   integers cost 1 byte for tags 0-127 vs. a full name string) and the
+//!   string-comparison cost on decode (integer match instead) — see
+//!   `progress_3.0.md`'s benchmark section for measured numbers.
+//! - `ousia::MANIFEST` entries now carry `field_tags: &[(&str, u64)]` per
+//!   type — reflection data for building a generic migration tool without
+//!   hand-writing one migration per `OusiaObject`/`OusiaEdge`.
+//!
 //! ## Feature flags
 //!
 //! | Flag       | Default | Description                                 |
@@ -131,8 +180,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 pub use crate::adapters::{
-    Adapter, EdgeRecord, MultiEdgeContext, MultiOwnedContext, MultiPreloadContext, ObjectRecord,
-    Query, QueryContext,
+    Adapter, EdgeRecord, MultiEdgeContext, MultiEdgeContext2, MultiOwnedContext,
+    MultiPreloadContext, ObjectRecord, Query, QueryContext, TwoHopMap,
 };
 pub use crate::edge::meta::*;
 pub use crate::edge::query::{EdgeQuery, ObjectEdge};
@@ -750,6 +799,21 @@ impl Engine {
         Ok(counts.into_iter().collect())
     }
 
+    /// Batch owned-object count across multiple owner ids. Grouped by
+    /// `owner`. Owners with zero objects are absent from the map (GROUP BY
+    /// produces no row) — same convention as `count_reverse_edges_batch`.
+    pub async fn count_owned_objects_batch<T: Object>(
+        &self,
+        owner_ids: &[Uuid],
+    ) -> Result<std::collections::HashMap<Uuid, u64>, Error> {
+        let counts = self
+            .inner
+            .adapter
+            .count_owned_objects_batch(T::TYPE, owner_ids)
+            .await?;
+        Ok(counts.into_iter().collect())
+    }
+
     /// Batch owned-children fetch across multiple owner ids. Grouped by
     /// `owner`. Also works for O2O types (e.g. `Profile`/`StoreSubscription`)
     /// — each group will just have 0 or 1 element.
@@ -790,6 +854,25 @@ impl Engine {
     /// All terminal methods execute exactly 2 queries — never N+1.
     pub fn preload_objects<'a, P: Object>(&'a self, query: Query) -> MultiPreloadContext<'a, P> {
         self.inner.adapter.preload_objects(query)
+    }
+
+    /// Same chainable builder as `preload_objects(query).edge::<E, O>()`, but
+    /// starting from an already-known id list instead of re-running a Query.
+    /// Chain `.then_edge::<E2, O2>()` for a 2-hop traversal — its terminal
+    /// methods execute both hops in ONE query:
+    ///
+    /// ```rust,ignore
+    /// let by_highlight = engine
+    ///     .batch_edge::<HighlightItem, Highlight, Item>(&highlight_ids)
+    ///     .then_edge::<ItemModifier, Modifier>()
+    ///     .collect_with_target()
+    ///     .await?;
+    /// ```
+    pub fn batch_edge<'a, E: Edge, P: Object, O: Object>(
+        &'a self,
+        from_ids: &[Uuid],
+    ) -> MultiEdgeContext<'a, E, P, O> {
+        self.inner.adapter.batch_edge(from_ids)
     }
 
     #[cfg(feature = "ledger")]

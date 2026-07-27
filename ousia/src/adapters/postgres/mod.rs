@@ -124,6 +124,15 @@ impl PostgresAdapter {
             .await
             .map_err(|e| Error::Storage(e.to_string()))?;
 
+        // Warn (not fail) about field-name drift: a struct field renamed
+        // or removed since a row was last written stops matching that
+        // row's stored key, so the old value silently gets dropped on the
+        // next save. One sampled row per registered type, at startup only
+        // — see `check_field_drift`.
+        for warning in self.check_field_drift().await? {
+            eprintln!("[ousia warn] {warning}");
+        }
+
         // Best-effort: emit target/ousia.json for tooling. Failure here is
         // never fatal — the manifest lives in memory regardless.
         Self::emit_manifest_json();
@@ -201,6 +210,81 @@ impl PostgresAdapter {
             }
         }
         Ok(())
+    }
+
+    /// For every *distinct* `(kind, type_name)` registered in
+    /// [`crate::manifest::MANIFEST`], sample one stored row of that type
+    /// and decode its `data` blob generically — just the top-level key
+    /// set, via `BTreeMap<String, serde::de::IgnoredAny>`, no typed
+    /// struct needed — then diff those keys against the *union* of
+    /// `field_names` across every struct registered under that
+    /// `type_name`. Unioning matters: two struct definitions can
+    /// legitimately share a `type_name` (a "wide" vs "lean" view over
+    /// the same logical table, per [`crate::manifest::TypeManifestEntry`]'s
+    /// own doc), and checking a sampled row against just one of them
+    /// would flag the other's fields as false-positive drift. Any stored
+    /// key absent from every registered definition is real drift: the
+    /// field was renamed or removed since that row was written, so it'll
+    /// be silently dropped the next time the row is saved (a rewrite
+    /// only re-encodes the fields the struct still has).
+    ///
+    /// This is a warning, not an error — startup still succeeds. One
+    /// query per distinct type, once at startup; no per-row runtime
+    /// cost. Best-effort: a single sampled row can't prove the *absence*
+    /// of drift elsewhere, only surface it when present in that row.
+    ///
+    /// Returns one message per drifted key found (empty if none). Public
+    /// and side-effect-free (no `eprintln!` here) so it's directly
+    /// testable and so a caller can route the warnings through their own
+    /// logging instead of stderr — `init_schema` prints each one via
+    /// `eprintln!` after calling this.
+    pub async fn check_field_drift(&self) -> Result<Vec<String>, Error> {
+        use std::collections::{BTreeSet, HashMap};
+
+        let mut by_type: HashMap<(crate::manifest::ManifestKind, &'static str), BTreeSet<&'static str>> =
+            HashMap::new();
+        for entry in crate::manifest::MANIFEST.iter() {
+            by_type
+                .entry((entry.kind, entry.type_name))
+                .or_default()
+                .extend(entry.field_names.iter().copied());
+        }
+
+        let mut warnings = Vec::new();
+        for ((kind, type_name), field_names) in &by_type {
+            let (table, label) = match kind {
+                crate::manifest::ManifestKind::Object => ("objects", "object"),
+                crate::manifest::ManifestKind::Edge => ("object_edges", "edge"),
+            };
+
+            let row: Option<Vec<u8>> = sqlx::query_scalar(&format!(
+                "SELECT data FROM {table} WHERE type = $1 LIMIT 1"
+            ))
+            .bind(*type_name)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|e| Error::Storage(e.to_string()))?;
+
+            let Some(data) = row else { continue };
+
+            let Ok(stored) =
+                rmp_serde::from_slice::<std::collections::BTreeMap<String, serde::de::IgnoredAny>>(
+                    &data,
+                )
+            else {
+                continue;
+            };
+
+            for key in stored.keys() {
+                if !field_names.contains(key.as_str()) {
+                    warnings.push(format!(
+                        "ousia detected drift in {label}:{} — `{}` will be lost on save",
+                        type_name, key
+                    ));
+                }
+            }
+        }
+        Ok(warnings)
     }
 
     /// Hash the *actual* on-disk shape of the ousia-owned tables —

@@ -56,7 +56,7 @@ impl Adapter for PostgresAdapter {
     ) -> Result<Option<ObjectRecord>, Error> {
         let row = sqlx::query(
             r#"
-            SELECT o.id, o.type, o.owner, o.created_at, o.updated_at, o.data
+            SELECT o.id, o.owner, o.created_at, o.updated_at, o.data
             FROM objects o
             WHERE id = $1 AND type = $2
             "#,
@@ -68,7 +68,7 @@ impl Adapter for PostgresAdapter {
         .map_err(|err| Error::Storage(err.to_string()))?;
 
         match row {
-            Some(r) => Self::map_row_to_object_record_slim(r).map(|o| Some(o)),
+            Some(r) => Self::map_row_to_object_record_slim(r, Some(type_name)).map(Some),
             None => Ok(None),
         }
     }
@@ -80,7 +80,7 @@ impl Adapter for PostgresAdapter {
     ) -> Result<Vec<ObjectRecord>, Error> {
         let rows = sqlx::query(
             r#"
-            SELECT o.id, o.type, o.owner, o.created_at, o.updated_at, o.data
+            SELECT o.id, o.owner, o.created_at, o.updated_at, o.data
             FROM objects o
             WHERE id = ANY($1) AND type = $2
             "#,
@@ -92,7 +92,7 @@ impl Adapter for PostgresAdapter {
         .map_err(|err| Error::Storage(err.to_string()))?;
 
         rows.into_iter()
-            .map(Self::map_row_to_object_record_slim)
+            .map(|row| Self::map_row_to_object_record_slim(row, Some(type_name)))
             .collect()
     }
 
@@ -127,7 +127,7 @@ impl Adapter for PostgresAdapter {
             UPDATE objects
             SET updated_at = $3, owner = $4
             WHERE id = $1 AND owner = $2 AND type = $5
-            RETURNING id, type, owner, created_at, updated_at, data
+            RETURNING id, owner, created_at, updated_at, data
             "#,
         )
         .bind(id)
@@ -142,7 +142,7 @@ impl Adapter for PostgresAdapter {
             _ => Error::Storage(err.to_string()),
         })?;
 
-        Self::map_row_to_object_record_slim(row)
+        Self::map_row_to_object_record_slim(row, Some(type_name))
     }
 
     async fn delete_object(
@@ -155,7 +155,7 @@ impl Adapter for PostgresAdapter {
             r#"
             DELETE FROM objects
             WHERE id = $1 AND owner = $2 AND type = $3
-            RETURNING id, type, owner, created_at, updated_at, data
+            RETURNING id, owner, created_at, updated_at, data
             "#,
         )
         .bind(id)
@@ -166,7 +166,7 @@ impl Adapter for PostgresAdapter {
         .map_err(|err| Error::Storage(err.to_string()))?;
 
         match row {
-            Some(r) => Self::map_row_to_object_record_slim(r).map(|o| Some(o)),
+            Some(r) => Self::map_row_to_object_record_slim(r, Some(type_name)).map(Some),
             None => Ok(None),
         }
     }
@@ -214,7 +214,7 @@ impl Adapter for PostgresAdapter {
 
         let sql = format!(
             r#"
-            SELECT o.id, o.type, o.owner, o.created_at, o.updated_at, o.data
+            SELECT o.id, o.owner, o.created_at, o.updated_at, o.data
             FROM objects o
             {}
             {}
@@ -231,7 +231,7 @@ impl Adapter for PostgresAdapter {
             .map_err(|err| Error::Storage(err.to_string()))?;
 
         Ok(row
-            .map(|row| Self::map_row_to_object_record_slim(row).ok())
+            .map(|row| Self::map_row_to_object_record_slim(row, Some(type_name)).ok())
             .unwrap_or_default())
     }
 
@@ -283,7 +283,7 @@ impl Adapter for PostgresAdapter {
         // ── Build full SQL once ─────────────────────────────────────────────
         let mut sql = format!(
             r#"
-                SELECT o.id, o.type, o.owner, o.created_at, o.updated_at, o.data
+                SELECT o.id, o.owner, o.created_at, o.updated_at, o.data
                 FROM objects o
                 {}
                 {}
@@ -315,7 +315,7 @@ impl Adapter for PostgresAdapter {
 
         Ok(rows
             .into_iter()
-            .filter_map(|row| Self::map_row_to_object_record_slim(row).ok())
+            .filter_map(|row| Self::map_row_to_object_record_slim(row, Some(type_name)).ok())
             .collect())
     }
 
@@ -362,7 +362,7 @@ impl Adapter for PostgresAdapter {
 
         let sql = format!(
             r#"
-                SELECT o.id, o.type, o.owner, o.created_at, o.updated_at, o.data,
+                SELECT o.id, o.owner, o.created_at, o.updated_at, o.data,
                        ST_Distance({alias}.location, ST_SetSRID(ST_MakePoint(${lon}, ${lat}), 4326)::geography) AS __distance
                 FROM objects o
                 {joins}
@@ -404,7 +404,7 @@ impl Adapter for PostgresAdapter {
             let distance: f64 = row
                 .try_get("__distance")
                 .map_err(|e| Error::Deserialize(e.to_string()))?;
-            let rec = Self::map_row_to_object_record_slim(row)?;
+            let rec = Self::map_row_to_object_record_slim(row, Some(type_name))?;
             out.push((rec, distance));
         }
         Ok(out)
@@ -477,7 +477,7 @@ impl Adapter for PostgresAdapter {
     ) -> Result<Vec<ObjectRecord>, Error> {
         let rows = sqlx::query(
             r#"
-            SELECT o.id, o.type, o.owner, o.created_at, o.updated_at, o.data
+            SELECT o.id, o.owner, o.created_at, o.updated_at, o.data
             FROM objects o
             WHERE type = $1 AND owner = ANY($2)
             "#,
@@ -489,7 +489,39 @@ impl Adapter for PostgresAdapter {
         .map_err(|err| Error::Storage(err.to_string()))?;
 
         rows.into_iter()
-            .map(Self::map_row_to_object_record_slim)
+            .map(|row| Self::map_row_to_object_record_slim(row, Some(type_name)))
+            .collect()
+    }
+
+    async fn count_owned_objects_batch(
+        &self,
+        type_name: &'static str,
+        owner_ids: &[Uuid],
+    ) -> Result<Vec<(Uuid, u64)>, Error> {
+        let rows = sqlx::query(
+            r#"
+            SELECT owner, COUNT(*) AS cnt
+            FROM objects
+            WHERE type = $1 AND owner = ANY($2)
+            GROUP BY owner
+            "#,
+        )
+        .bind(type_name)
+        .bind(owner_ids)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|err| Error::Storage(err.to_string()))?;
+
+        rows.into_iter()
+            .map(|row| {
+                let id: Uuid = row
+                    .try_get("owner")
+                    .map_err(|e| Error::Deserialize(e.to_string()))?;
+                let cnt: i64 = row
+                    .try_get("cnt")
+                    .map_err(|e| Error::Deserialize(e.to_string()))?;
+                Ok((id, cnt as u64))
+            })
             .collect()
     }
 
@@ -500,7 +532,7 @@ impl Adapter for PostgresAdapter {
     ) -> Result<Vec<ObjectRecord>, Error> {
         let rows = sqlx::query(
             r#"
-            SELECT o.id, o.type, o.owner, o.created_at, o.updated_at, o.data
+            SELECT o.id, o.owner, o.created_at, o.updated_at, o.data
             FROM objects o
             WHERE owner = $1 AND type = $2
             "#,
@@ -512,7 +544,7 @@ impl Adapter for PostgresAdapter {
         .map_err(|err| Error::Storage(err.to_string()))?;
 
         rows.into_iter()
-            .map(Self::map_row_to_object_record_slim)
+            .map(|row| Self::map_row_to_object_record_slim(row, Some(type_name)))
             .collect()
     }
 
@@ -523,7 +555,7 @@ impl Adapter for PostgresAdapter {
     ) -> Result<Option<ObjectRecord>, Error> {
         let row = sqlx::query(
             r#"
-            SELECT o.id, o.type, o.owner, o.created_at, o.updated_at, o.data
+            SELECT o.id, o.owner, o.created_at, o.updated_at, o.data
             FROM objects o
             WHERE owner = $1 AND type = $2
             "#,
@@ -535,7 +567,7 @@ impl Adapter for PostgresAdapter {
         .map_err(|err| Error::Storage(err.to_string()))?;
 
         match row {
-            Some(r) => Self::map_row_to_object_record_slim(r).map(|o| Some(o)),
+            Some(r) => Self::map_row_to_object_record_slim(r, Some(type_name)).map(Some),
             None => Ok(None),
         }
     }
@@ -561,7 +593,7 @@ impl Adapter for PostgresAdapter {
         .map_err(|err| Error::Storage(err.to_string()))?;
 
         match row {
-            Some(r) => Self::map_row_to_object_record_slim(r).map(|o| Some(o)),
+            Some(r) => Self::map_row_to_object_record_slim(r, None).map(Some),
             None => Ok(None),
         }
     }
@@ -587,7 +619,7 @@ impl Adapter for PostgresAdapter {
         .map_err(|err| Error::Storage(err.to_string()))?;
 
         rows.into_iter()
-            .map(Self::map_row_to_object_record_slim)
+            .map(|row| Self::map_row_to_object_record_slim(row, None))
             .collect()
     }
 
@@ -612,7 +644,7 @@ impl Adapter for PostgresAdapter {
         .map_err(|err| Error::Storage(err.to_string()))?;
 
         match row {
-            Some(r) => Self::map_row_to_object_record_slim(r).map(|o| Some(o)),
+            Some(r) => Self::map_row_to_object_record_slim(r, None).map(Some),
             None => Ok(None),
         }
     }
@@ -638,7 +670,7 @@ impl Adapter for PostgresAdapter {
         .map_err(|err| Error::Storage(err.to_string()))?;
 
         rows.into_iter()
-            .map(Self::map_row_to_object_record_slim)
+            .map(|row| Self::map_row_to_object_record_slim(row, None))
             .collect()
     }
 
@@ -752,7 +784,7 @@ impl Adapter for PostgresAdapter {
     ) -> Result<Option<EdgeRecord>, Error> {
         let row = sqlx::query(
             r#"
-        SELECT e."from", e."to", e.type, e.data, e.created_at, e.updated_at
+        SELECT e."from", e."to", e.data, e.created_at, e.updated_at
         FROM object_edges e
         WHERE type = $1 AND "from" = $2 AND "to" = $3
         "#,
@@ -768,7 +800,7 @@ impl Adapter for PostgresAdapter {
             return Ok(None);
         };
 
-        Self::map_row_to_edge_record(row).map(|e| Some(e))
+        Self::map_row_to_edge_record(row, type_name).map(Some)
     }
 
     async fn query_edges(

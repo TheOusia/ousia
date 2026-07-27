@@ -19,7 +19,7 @@ pub use linkme as __linkme;
 #[doc(hidden)]
 pub use rmp_serde as __rmp_serde;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ManifestKind {
     Object,
     Edge,
@@ -28,12 +28,20 @@ pub enum ManifestKind {
 /// One entry per registered type. `from_type` / `to_type` are populated
 /// for edges (resolved via `<T as Object>::TYPE` in the derive
 /// expansion) and `None` for objects.
+///
+/// `field_names` lists every non-meta field, in declaration order — the
+/// same set the derived `Serialize`/`Deserialize` use to encode/decode
+/// the `data` blob (keyed by name). Exposed here so `init_schema` can
+/// sample stored rows and warn about field-name drift (a field present
+/// in old data but no longer declared on the struct) without needing a
+/// fully-typed decode — see `check_field_drift`.
 #[derive(Debug, Clone, Copy)]
 pub struct TypeManifestEntry {
     pub kind: ManifestKind,
     pub type_name: &'static str,
     pub from_type: Option<&'static str>,
     pub to_type: Option<&'static str>,
+    pub field_names: &'static [&'static str],
 }
 
 /// Compile-time set of every Object/Edge linked into the binary.

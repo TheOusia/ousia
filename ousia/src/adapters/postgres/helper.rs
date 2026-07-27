@@ -26,10 +26,27 @@ pub(super) struct GeoJoinPlan {
 
 impl PostgresAdapter {
     /// Slim mapper — for all read paths. Skips index_meta (not in SELECT, not needed by to_object()).
-    pub(super) fn map_row_to_object_record_slim(row: PgRow) -> Result<ObjectRecord, Error> {
-        let type_name = row
-            .try_get::<String, _>("type")
-            .map_err(|e| Error::Deserialize(e.to_string()))?;
+    ///
+    /// `known_type`: pass `Some(type_name)` when the caller's query already
+    /// filters by a single known `&'static str` type (the common case) — the
+    /// mapper then borrows that constant instead of reading+allocating a
+    /// `type` column, and the caller should drop `type` from its SELECT
+    /// list entirely (mirrors the same fix applied to the edge-side mappers
+    /// — see `map_row_to_edge_record`). Pass `None` for union-type reads
+    /// (`fetch_union_object[s]`, `fetch_owned_union_object[s]`) where a row
+    /// can genuinely be either of two types and must be read to tell which —
+    /// those callers must keep `o.type` in their SELECT list.
+    pub(super) fn map_row_to_object_record_slim(
+        row: PgRow,
+        known_type: Option<&'static str>,
+    ) -> Result<ObjectRecord, Error> {
+        let type_name = match known_type {
+            Some(t) => std::borrow::Cow::Borrowed(t),
+            None => std::borrow::Cow::Owned(
+                row.try_get::<String, _>("type")
+                    .map_err(|e| Error::Deserialize(e.to_string()))?,
+            ),
+        };
         let id = row
             .try_get::<Uuid, _>("id")
             .map_err(|e| Error::Deserialize(e.to_string()))?;
@@ -47,7 +64,7 @@ impl PostgresAdapter {
             .map_err(|e| Error::Deserialize(e.to_string()))?;
         Ok(ObjectRecord {
             id,
-            type_name: std::borrow::Cow::Owned(type_name),
+            type_name,
             owner,
             created_at,
             updated_at,
@@ -56,10 +73,18 @@ impl PostgresAdapter {
         })
     }
 
-    pub(super) fn map_row_to_edge_record(row: PgRow) -> Result<EdgeRecord, Error> {
+    /// `type_name` is a param, not a row column: every call site filters
+    /// the query by this exact static string already (`type = $n`), so
+    /// selecting and re-parsing a `type` column that can only ever equal
+    /// the value we already hold would be pure waste — one fewer TEXT
+    /// column on the wire and one fewer String allocation per row.
+    pub(super) fn map_row_to_edge_record(
+        row: PgRow,
+        type_name: &'static str,
+    ) -> Result<EdgeRecord, Error> {
         let de = |e: sqlx::Error| Error::Deserialize(e.to_string());
         Ok(EdgeRecord {
-            type_name: std::borrow::Cow::Owned(row.try_get::<String, _>("type").map_err(de)?),
+            type_name: std::borrow::Cow::Borrowed(type_name),
             from: row.try_get::<Uuid, _>("from").map_err(de)?,
             to: row.try_get::<Uuid, _>("to").map_err(de)?,
             data: row.try_get::<Vec<u8>, _>("data").map_err(de)?,
@@ -69,12 +94,16 @@ impl PostgresAdapter {
         })
     }
 
+    /// See `map_row_to_edge_record` — `edge_type`/`obj_type` are known from
+    /// the query's own filter predicate, not read from the row.
     pub(super) fn map_row_to_edge_and_object(
         row: PgRow,
+        edge_type: &'static str,
+        obj_type: &'static str,
     ) -> Result<(EdgeRecord, ObjectRecord), Error> {
         let de = |e: sqlx::Error| Error::Deserialize(e.to_string());
         let edge = EdgeRecord {
-            type_name: std::borrow::Cow::Owned(row.try_get::<String, _>("edge_type").map_err(de)?),
+            type_name: std::borrow::Cow::Borrowed(edge_type),
             from: row.try_get::<Uuid, _>("edge_from").map_err(de)?,
             to: row.try_get::<Uuid, _>("edge_to").map_err(de)?,
             data: row
@@ -86,7 +115,7 @@ impl PostgresAdapter {
         };
         let obj = ObjectRecord {
             id: row.try_get::<Uuid, _>("obj_id").map_err(de)?,
-            type_name: std::borrow::Cow::Owned(row.try_get::<String, _>("obj_type").map_err(de)?),
+            type_name: std::borrow::Cow::Borrowed(obj_type),
             owner: row.try_get::<Uuid, _>("obj_owner").map_err(de)?,
             created_at: row.try_get("obj_created_at").map_err(de)?,
             updated_at: row.try_get("obj_updated_at").map_err(de)?,
@@ -98,10 +127,76 @@ impl PostgresAdapter {
         Ok((edge, obj))
     }
 
+    /// Row mapper for the 2-hop batch traversal. Columns are aliased
+    /// `e1_*`/`o1_*`/`e2_*`/`o2_*`; the `e2_*`/`o2_*` set may be NULL when the
+    /// LEFT-JOINed second hop found no match. All four `type` values are
+    /// known from the query's own filter predicate (see
+    /// `map_row_to_edge_record`) — not read from the row.
+    pub(super) fn map_row_to_two_hop(
+        row: PgRow,
+        e1_type: &'static str,
+        o1_type: &'static str,
+        e2_type: &'static str,
+        o2_type: &'static str,
+    ) -> Result<
+        (
+            EdgeRecord,
+            ObjectRecord,
+            Option<EdgeRecord>,
+            Option<ObjectRecord>,
+        ),
+        Error,
+    > {
+        let de = |e: sqlx::Error| Error::Deserialize(e.to_string());
+        let edge1 = EdgeRecord {
+            type_name: std::borrow::Cow::Borrowed(e1_type),
+            from: row.try_get::<Uuid, _>("e1_from").map_err(de)?,
+            to: row.try_get::<Uuid, _>("e1_to").map_err(de)?,
+            data: row.try_get::<Vec<u8>, _>("e1_data").map_err(de)?,
+            index_meta: serde_json::Value::Null,
+            created_at: row.try_get("e1_created_at").map_err(de)?,
+            updated_at: row.try_get("e1_updated_at").map_err(de)?,
+        };
+        let obj1 = ObjectRecord {
+            id: row.try_get::<Uuid, _>("o1_id").map_err(de)?,
+            type_name: std::borrow::Cow::Borrowed(o1_type),
+            owner: row.try_get::<Uuid, _>("o1_owner").map_err(de)?,
+            created_at: row.try_get("o1_created_at").map_err(de)?,
+            updated_at: row.try_get("o1_updated_at").map_err(de)?,
+            data: row.try_get::<Vec<u8>, _>("o1_data").map_err(de)?,
+            index_meta: serde_json::Value::Null,
+        };
+        let edge2 = match row.try_get::<Option<Uuid>, _>("e2_from").map_err(de)? {
+            None => None,
+            Some(from) => Some(EdgeRecord {
+                type_name: std::borrow::Cow::Borrowed(e2_type),
+                from,
+                to: row.try_get::<Uuid, _>("e2_to").map_err(de)?,
+                data: row.try_get::<Vec<u8>, _>("e2_data").map_err(de)?,
+                index_meta: serde_json::Value::Null,
+                created_at: row.try_get("e2_created_at").map_err(de)?,
+                updated_at: row.try_get("e2_updated_at").map_err(de)?,
+            }),
+        };
+        let obj2 = match row.try_get::<Option<Uuid>, _>("o2_id").map_err(de)? {
+            None => None,
+            Some(id) => Some(ObjectRecord {
+                id,
+                type_name: std::borrow::Cow::Borrowed(o2_type),
+                owner: row.try_get::<Uuid, _>("o2_owner").map_err(de)?,
+                created_at: row.try_get("o2_created_at").map_err(de)?,
+                updated_at: row.try_get("o2_updated_at").map_err(de)?,
+                data: row.try_get::<Vec<u8>, _>("o2_data").map_err(de)?,
+                index_meta: serde_json::Value::Null,
+            }),
+        };
+        Ok((edge1, obj1, edge2, obj2))
+    }
+
     pub(super) async fn query_edges_with_objects_inner(
         &self,
-        edge_type_name: &str,
-        type_name: &str,
+        edge_type_name: &'static str,
+        type_name: &'static str,
         owner: Uuid,
         obj_filters: &[QueryFilter],
         plan: EdgeQuery,
@@ -121,10 +216,10 @@ impl PostgresAdapter {
         let mut sql = format!(
             r#"
             SELECT
-                e."from" AS edge_from, e."to" AS edge_to, e.type AS edge_type,
+                e."from" AS edge_from, e."to" AS edge_to,
                 e.data AS edge_data,
                 e.created_at AS edge_created_at, e.updated_at AS edge_updated_at,
-                o.id AS obj_id, o.type AS obj_type, o.owner AS obj_owner,
+                o.id AS obj_id, o.owner AS obj_owner,
                 o.created_at AS obj_created_at, o.updated_at AS obj_updated_at,
                 o.data AS obj_data
             FROM object_edges e
@@ -151,7 +246,9 @@ impl PostgresAdapter {
             .map_err(|e| Error::Storage(e.to_string()))?;
         Ok(rows
             .into_iter()
-            .filter_map(|row| Self::map_row_to_edge_and_object(row).ok())
+            .filter_map(|row| {
+                Self::map_row_to_edge_and_object(row, edge_type_name, type_name).ok()
+            })
             .collect())
     }
 
@@ -1006,9 +1103,12 @@ impl PostgresAdapter {
             .await
             .map_err(|err| Error::Storage(err.to_string()))?;
 
+        // `type_name` here is `&str` (bound by the public `EdgeTraversal`
+        // trait signature, not `'static`), so it can't be borrowed into a
+        // `Cow<'static, str>` — read `type` off the row as before.
         Ok(rows
             .into_iter()
-            .filter_map(|row| Self::map_row_to_object_record_slim(row).ok())
+            .filter_map(|row| Self::map_row_to_object_record_slim(row, None).ok())
             .collect())
     }
 
@@ -1047,6 +1147,89 @@ impl PostgresAdapter {
             Self::join_conditions(&obj_conditions),
             Self::join_conditions(&edge_conditions)
         )
+    }
+
+    /// Build the JOIN-ON and WHERE clauses for the 2-hop batch traversal.
+    ///
+    /// Fixed bindings: $1=e1_type, $2=o1_type, $3=e2_type, $4=o2_type,
+    /// $5=from_ids. Filter params start at $6 and MUST be bound in this order:
+    /// obj1 filters, obj2 filters, edge2 filters, edge1 filters (matching the
+    /// param_idx assignment order here — sqlx maps binds positionally to $N
+    /// regardless of where the placeholder appears in the SQL text).
+    ///
+    /// Returned tuple: (o1_on, o2_on, e2_on, e1_where). The hop-2 conditions
+    /// live in the LEFT JOIN's ON clauses (not WHERE) so a first-hop object
+    /// with no matching second hop still produces a row.
+    pub(super) fn build_two_hop_traversal_conditions(
+        obj1_filters: &[QueryFilter],
+        obj2_filters: &[QueryFilter],
+        edge2_filters: &[QueryFilter],
+        edge1_filters: &[QueryFilter],
+    ) -> (String, String, String, String) {
+        let mut param_idx: usize = 6;
+
+        let mut o1_conditions: Vec<(String, &str)> = vec![
+            (r#"e1."to" = o1.id"#.to_string(), "AND"),
+            ("o1.type = $2".to_string(), "AND"),
+        ];
+        for f in obj1_filters {
+            if let Some((c, op)) = Self::build_filter_condition("o1", f, &mut param_idx) {
+                o1_conditions.push((c, op));
+            }
+        }
+
+        let mut o2_conditions: Vec<(String, &str)> = vec![
+            (r#"e2."to" = o2.id"#.to_string(), "AND"),
+            ("o2.type = $4".to_string(), "AND"),
+        ];
+        for f in obj2_filters {
+            if let Some((c, op)) = Self::build_filter_condition("o2", f, &mut param_idx) {
+                o2_conditions.push((c, op));
+            }
+        }
+
+        let mut e2_conditions: Vec<(String, &str)> = vec![
+            (r#"e2."from" = o1.id"#.to_string(), "AND"),
+            ("e2.type = $3".to_string(), "AND"),
+        ];
+        for f in edge2_filters {
+            if let Some((c, op)) = Self::build_filter_condition("e2", f, &mut param_idx) {
+                e2_conditions.push((c, op));
+            }
+        }
+
+        let mut e1_conditions: Vec<(String, &str)> = vec![
+            ("e1.type = $1".to_string(), "AND"),
+            (r#"e1."from" = ANY($5)"#.to_string(), "AND"),
+        ];
+        for f in edge1_filters {
+            if let Some((c, op)) = Self::build_filter_condition("e1", f, &mut param_idx) {
+                e1_conditions.push((c, op));
+            }
+        }
+
+        (
+            Self::join_conditions(&o1_conditions),
+            Self::join_conditions(&o2_conditions),
+            Self::join_conditions(&e2_conditions),
+            format!("WHERE {}", Self::join_conditions(&e1_conditions)),
+        )
+    }
+
+    /// ORDER BY for the 2-hop query: hop-1 edge sorts (alias `e1`) first,
+    /// then hop-2 edge sorts (alias `e2`). Empty when neither hop sorts.
+    pub(super) fn build_two_hop_order_clause(
+        edge1_filters: &[QueryFilter],
+        edge2_filters: &[QueryFilter],
+    ) -> String {
+        let c1 = Self::build_order_clause_aliased(edge1_filters, "e1", true);
+        let c2 = Self::build_order_clause_aliased(edge2_filters, "e2", true);
+        match (c1.is_empty(), c2.is_empty()) {
+            (true, true) => String::new(),
+            (false, true) => c1,
+            (true, false) => c2,
+            (false, false) => format!("{}, {}", c1, c2.trim_start_matches("ORDER BY ")),
+        }
     }
 
     /// Build WHERE clause for batch edge-only queries (no object JOIN).
@@ -1145,7 +1328,7 @@ impl PostgresAdapter {
 
         let mut sql = format!(
             r#"
-            SELECT e."from", e."to", e.type, e.data, e.index_meta, e.created_at, e.updated_at
+            SELECT e."from", e."to", e.data, e.created_at, e.updated_at
             FROM object_edges e
             {}
             {}
@@ -1171,7 +1354,7 @@ impl PostgresAdapter {
 
         Ok(rows
             .into_iter()
-            .filter_map(|row| Self::map_row_to_edge_record(row).ok())
+            .filter_map(|row| Self::map_row_to_edge_record(row, type_name).ok())
             .collect())
     }
 }

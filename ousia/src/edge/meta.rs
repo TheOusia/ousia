@@ -28,6 +28,25 @@ impl EdgeMeta {
             updated_at: now,
         }
     }
+
+    /// Cheap, syscall-free placeholder used only by derive-macro-generated
+    /// `Deserialize` impls while decoding a stored edge. `EdgeRecord::to_edge`
+    /// unconditionally overwrites every field immediately after a successful
+    /// decode, so these values are never observed — unlike `new()`, this
+    /// skips two `Uuid::now_v7()` calls (clock read + CSPRNG each) and
+    /// `Utc::now()` (clock read), which cost real, measured time on every
+    /// single row decoded and would otherwise be pure waste.
+    ///
+    /// Not for general use — construct real edges with `new()`.
+    #[doc(hidden)]
+    pub fn __deserialize_placeholder() -> Self {
+        Self {
+            from: Uuid::nil(),
+            to: Uuid::nil(),
+            created_at: crate::object::meta::deserialize_placeholder_time(),
+            updated_at: crate::object::meta::deserialize_placeholder_time(),
+        }
+    }
 }
 
 impl EdgeMetaTrait for EdgeMeta {
