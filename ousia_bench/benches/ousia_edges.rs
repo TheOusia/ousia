@@ -103,7 +103,7 @@ async fn setup() -> Ctx {
     let adapter = PostgresAdapter::from_pool(ousia_pool.clone());
     adapter.init_schema().await.expect("ousia schema");
     // Clean any data from a previous run before re-seeding.
-    sqlx::query("TRUNCATE public.edges, public.objects")
+    sqlx::query("TRUNCATE public.object_edges, public.objects CASCADE")
         .execute(&ousia_pool).await.unwrap();
     let engine = Engine::new(Box::new(PostgresAdapter::from_pool(ousia_pool.clone())));
 

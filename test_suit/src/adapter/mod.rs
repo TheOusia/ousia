@@ -32,6 +32,10 @@ pub struct Post {
 pub struct PostNew {
     _meta: Meta,
 
+    // Tags 0-4 deliberately match `Post`'s — this is the exact schema-
+    // evolution scenario: data written as `Post` (tags 0-4 only) must
+    // still decode correctly as `PostNew`, with `rating` (tag 5, absent
+    // from old data) filled in via its default.
     pub title: String,
     pub content: String,
     pub status: PostStatus,
@@ -106,6 +110,57 @@ pub struct User {
 struct Follow {
     _meta: EdgeMeta,
     notification: bool,
+}
+
+/// 3-level chain fixtures for the 2-hop batch traversal tests
+/// (Hub -[HubSpoke]-> Spoke -[SpokeLeaf]-> Leaf) — mirrors the motivating
+/// Highlight -[HighlightItem]-> Item -[ItemModifier]-> Modifier shape.
+#[derive(OusiaObject, OusiaDefault, Debug)]
+#[ousia(type_name = "Hub", index = "name:search")]
+pub struct Hub {
+    _meta: Meta,
+
+    pub name: String,
+}
+
+#[derive(OusiaObject, OusiaDefault, Debug)]
+#[ousia(type_name = "Spoke", index = "name:search")]
+pub struct Spoke {
+    _meta: Meta,
+
+    pub name: String,
+}
+
+#[derive(OusiaObject, OusiaDefault, Debug)]
+#[ousia(type_name = "Leaf", index = "name:search")]
+pub struct Leaf {
+    _meta: Meta,
+
+    pub name: String,
+}
+
+#[derive(Debug, OusiaEdge)]
+#[ousia(
+    type_name = "HubSpoke",
+    from = Hub,
+    to = Spoke,
+    index = "position:search"
+)]
+pub struct HubSpoke {
+    _meta: EdgeMeta,
+    pub position: i64,
+}
+
+#[derive(Debug, OusiaEdge)]
+#[ousia(
+    type_name = "SpokeLeaf",
+    from = Spoke,
+    to = Leaf,
+    index = "required:search"
+)]
+pub struct SpokeLeaf {
+    _meta: EdgeMeta,
+    pub required: bool,
 }
 
 /// Test object with a single geo index. The virtual field name `"location"`

@@ -29,8 +29,8 @@ async fn setup_test_db() -> (ContainerAsync<Postgres>, PgPool) {
         .with_password("postgres")
         .with_user("postgres")
         .with_db_name("postgres")
-        .with_name("postgis/postgis")
-        .with_tag("16-3.4-alpine")
+        .with_name("imresamu/postgis")
+        .with_tag("16-3.6-alpine")
         .start()
         .await
         .expect("Failed to start Postgres");
@@ -1137,6 +1137,36 @@ async fn test_fetch_owned_union_objects() {
     assert!(unions.iter().any(|u| u.is_first()));
 }
 
+#[tokio::test]
+async fn test_engine_fetch_owned_union_object() {
+    let (_r, pool) = setup_test_db().await;
+    let adapter = PostgresAdapter::from_pool(pool);
+    adapter.init_schema().await.unwrap();
+    let engine = Engine::new(Box::new(adapter));
+
+    let owner = uuid::Uuid::now_v7();
+
+    // Nothing owned yet — the singular O2O union fetch must return None,
+    // not an error, and not silently pick up an unrelated owner's row.
+    let none: Option<Union<User, Post>> = engine
+        .fetch_owned_union_object::<User, Post>(owner)
+        .await
+        .unwrap();
+    assert!(none.is_none());
+
+    let mut post = Post::default();
+    post.set_owner(owner);
+    post.title = "Owned singular".into();
+    engine.create_object(&post).await.unwrap();
+
+    let found: Union<User, Post> = engine
+        .fetch_owned_union_object::<User, Post>(owner)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(found.is_second());
+}
+
 // ============================================================
 // Section 5: Edge CRUD
 // ============================================================
@@ -1263,6 +1293,162 @@ async fn test_delete_edge() {
         .await
         .unwrap();
     assert!(gone.is_empty());
+}
+
+#[tokio::test]
+async fn test_update_edge_data_only() {
+    let (_r, pool) = setup_test_db().await;
+    let adapter = PostgresAdapter::from_pool(pool);
+    adapter.init_schema().await.unwrap();
+    let engine = Engine::new(Box::new(adapter));
+
+    let mut alice = User::default();
+    alice.username = "ue_alice".into();
+    alice.email = "ue_alice@x.com".into();
+    engine.create_object(&alice).await.unwrap();
+
+    let mut bob = User::default();
+    bob.username = "ue_bob".into();
+    bob.email = "ue_bob@x.com".into();
+    engine.create_object(&bob).await.unwrap();
+
+    engine
+        .create_edge(&Follow {
+            _meta: EdgeMeta::new(alice.id(), bob.id()),
+            notification: false,
+        })
+        .await
+        .unwrap();
+
+    let mut edge = engine
+        .fetch_edge::<Follow>(alice.id(), bob.id())
+        .await
+        .unwrap()
+        .unwrap();
+    edge.notification = true;
+    engine.update_edge(&mut edge, None).await.unwrap();
+
+    let refetched = engine
+        .fetch_edge::<Follow>(alice.id(), bob.id())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(refetched.notification, "update_edge should persist data changes");
+    assert_eq!(refetched.to(), bob.id(), "no retarget requested — `to` unchanged");
+}
+
+#[tokio::test]
+async fn test_update_edge_retargets_to() {
+    let (_r, pool) = setup_test_db().await;
+    let adapter = PostgresAdapter::from_pool(pool);
+    adapter.init_schema().await.unwrap();
+    let engine = Engine::new(Box::new(adapter));
+
+    let mut alice = User::default();
+    alice.username = "uer_alice".into();
+    alice.email = "uer_alice@x.com".into();
+    engine.create_object(&alice).await.unwrap();
+
+    let mut bob = User::default();
+    bob.username = "uer_bob".into();
+    bob.email = "uer_bob@x.com".into();
+    engine.create_object(&bob).await.unwrap();
+
+    let mut charlie = User::default();
+    charlie.username = "uer_charlie".into();
+    charlie.email = "uer_charlie@x.com".into();
+    engine.create_object(&charlie).await.unwrap();
+
+    engine
+        .create_edge(&Follow {
+            _meta: EdgeMeta::new(alice.id(), bob.id()),
+            notification: true,
+        })
+        .await
+        .unwrap();
+
+    let mut edge = engine
+        .fetch_edge::<Follow>(alice.id(), bob.id())
+        .await
+        .unwrap()
+        .unwrap();
+    engine
+        .update_edge(&mut edge, Some(charlie.id()))
+        .await
+        .unwrap();
+
+    // Old (from, bob) key is gone — retargeting moves the edge, doesn't duplicate it.
+    let old = engine
+        .fetch_edge::<Follow>(alice.id(), bob.id())
+        .await
+        .unwrap();
+    assert!(old.is_none());
+
+    let retargeted = engine
+        .fetch_edge::<Follow>(alice.id(), charlie.id())
+        .await
+        .unwrap();
+    assert!(retargeted.is_some());
+    assert!(retargeted.unwrap().notification);
+}
+
+#[tokio::test]
+async fn test_delete_object_edge_removes_all_forward_edges() {
+    let (_r, pool) = setup_test_db().await;
+    let adapter = PostgresAdapter::from_pool(pool);
+    adapter.init_schema().await.unwrap();
+    let engine = Engine::new(Box::new(adapter));
+
+    let mut alice = User::default();
+    alice.username = "doe_alice".into();
+    alice.email = "doe_alice@x.com".into();
+    engine.create_object(&alice).await.unwrap();
+
+    let mut targets = Vec::new();
+    for name in ["doe_t1", "doe_t2", "doe_t3"] {
+        let mut u = User::default();
+        u.username = name.into();
+        u.email = format!("{name}@x.com");
+        engine.create_object(&u).await.unwrap();
+        targets.push(u.id());
+    }
+
+    for &to in &targets {
+        engine
+            .create_edge(&Follow {
+                _meta: EdgeMeta::new(alice.id(), to),
+                notification: true,
+            })
+            .await
+            .unwrap();
+    }
+
+    // A second user's edges must survive — this only touches `alice`'s.
+    let mut dave = User::default();
+    dave.username = "doe_dave".into();
+    dave.email = "doe_dave@x.com".into();
+    engine.create_object(&dave).await.unwrap();
+    engine
+        .create_edge(&Follow {
+            _meta: EdgeMeta::new(dave.id(), targets[0]),
+            notification: true,
+        })
+        .await
+        .unwrap();
+
+    engine.delete_object_edge::<Follow>(alice.id()).await.unwrap();
+
+    let alice_edges: Vec<Follow> = engine
+        .query_edges(alice.id(), EdgeQuery::default())
+        .await
+        .unwrap();
+    assert!(alice_edges.is_empty());
+
+    let dave_edges: Vec<Follow> = engine
+        .query_edges(dave.id(), EdgeQuery::default())
+        .await
+        .unwrap();
+    assert_eq!(dave_edges.len(), 1, "delete_object_edge must not touch other owners' edges");
 }
 
 // ============================================================
@@ -1634,6 +1820,93 @@ async fn test_count_edges_with_plan() {
 // ============================================================
 // Section 8: Edge Traversal — collect variants
 // ============================================================
+
+#[tokio::test]
+async fn test_query_context_get() {
+    let (_r, pool) = setup_test_db().await;
+    let adapter = PostgresAdapter::from_pool(pool);
+    adapter.init_schema().await.unwrap();
+    let engine = Engine::new(Box::new(adapter));
+
+    let mut alice = User::default();
+    alice.username = "qcg_alice".into();
+    alice.email = "qcg_alice@x.com".into();
+    engine.create_object(&alice).await.unwrap();
+
+    let found = engine.preload_object::<User>(alice.id()).get().await.unwrap();
+    assert_eq!(found.unwrap().username, "qcg_alice");
+
+    let missing = engine
+        .preload_object::<User>(uuid::Uuid::now_v7())
+        .get()
+        .await
+        .unwrap();
+    assert!(missing.is_none());
+}
+
+#[tokio::test]
+async fn test_edge_query_context_paginate() {
+    let (_r, pool) = setup_test_db().await;
+    let adapter = PostgresAdapter::from_pool(pool);
+    adapter.init_schema().await.unwrap();
+    let engine = Engine::new(Box::new(adapter));
+
+    let mut alice = User::default();
+    alice.username = "eqp_alice".into();
+    alice.email = "eqp_alice@x.com".into();
+    engine.create_object(&alice).await.unwrap();
+
+    let mut targets = Vec::new();
+    for name in ["eqp_t1", "eqp_t2", "eqp_t3"] {
+        let mut u = User::default();
+        u.username = name.into();
+        u.email = format!("{name}@x.com");
+        engine.create_object(&u).await.unwrap();
+        targets.push(u.id());
+    }
+    // Edges are returned newest-`to`-first by default cursor ordering, so
+    // insert in a known order and page from the most recent.
+    for &to in &targets {
+        engine
+            .create_edge(&Follow {
+                _meta: EdgeMeta::new(alice.id(), to),
+                notification: true,
+            })
+            .await
+            .unwrap();
+    }
+
+    let all: Vec<Follow> = engine
+        .preload_object::<User>(alice.id())
+        .edge::<Follow, User>()
+        .collect_edges()
+        .await
+        .unwrap();
+    assert_eq!(all.len(), 3);
+
+    // paginate(None) must behave identically to no pagination at all.
+    let unpaginated: Vec<Follow> = engine
+        .preload_object::<User>(alice.id())
+        .edge::<Follow, User>()
+        .paginate(None::<uuid::Uuid>)
+        .collect_edges()
+        .await
+        .unwrap();
+    assert_eq!(unpaginated.len(), 3);
+
+    // paginate(Some(cursor)) filters to `to < cursor` (same contract as
+    // `with_cursor`) — use the max `to` so exactly one row (itself) drops.
+    let cursor_to = all.iter().map(|e| e.to()).max().unwrap();
+    let page: Vec<Follow> = engine
+        .preload_object::<User>(alice.id())
+        .edge::<Follow, User>()
+        .paginate(Some(cursor_to))
+        .collect_edges()
+        .await
+        .unwrap();
+    assert!(page.iter().all(|e| e.to() < cursor_to));
+    assert_eq!(page.len(), all.len() - 1);
+}
 
 #[tokio::test]
 async fn test_collect_forward_and_reverse() {
@@ -3285,6 +3558,503 @@ async fn test_fetch_owned_objects_batch() {
     assert_eq!(grouped.get(&owner1.id()).unwrap().len(), 2);
     assert_eq!(grouped.get(&owner2.id()).unwrap().len(), 1);
     assert!(grouped.get(&no_posts_owner).is_none());
+}
+
+// ============================================================
+// Section 15: Two-hop batch traversal + batch owned-object count (2.1.0)
+// ============================================================
+
+/// Ids for the shared 2-hop fixture graph:
+///
+/// hub1 -[pos 1]-> s1 -> l1(req), l2(!req), l3(req)
+/// hub1 -[pos 2]-> s2 -> (no leaves)
+/// hub2 -[pos 1]-> s3 -> l4(req)
+/// hub3 -> (no spokes)
+#[cfg(test)]
+struct TwoHopIds {
+    hub1: uuid::Uuid,
+    hub2: uuid::Uuid,
+    hub3: uuid::Uuid,
+    s1: uuid::Uuid,
+    s2: uuid::Uuid,
+    s3: uuid::Uuid,
+    l1: uuid::Uuid,
+    l2: uuid::Uuid,
+    l3: uuid::Uuid,
+    l4: uuid::Uuid,
+}
+
+#[cfg(test)]
+async fn setup_two_hop_fixture() -> (ContainerAsync<Postgres>, Engine, TwoHopIds) {
+    let (container, pool) = setup_test_db().await;
+    let adapter = PostgresAdapter::from_pool(pool);
+    adapter.init_schema().await.unwrap();
+    let engine = Engine::new(Box::new(adapter));
+
+    let mut hubs = Vec::new();
+    for name in ["hub1", "hub2", "hub3"] {
+        let mut h = Hub::default();
+        h.name = name.into();
+        engine.create_object(&h).await.unwrap();
+        hubs.push(h.id());
+    }
+    let mut spokes = Vec::new();
+    for name in ["s1", "s2", "s3"] {
+        let mut s = Spoke::default();
+        s.name = name.into();
+        engine.create_object(&s).await.unwrap();
+        spokes.push(s.id());
+    }
+    let mut leaves = Vec::new();
+    for name in ["l1", "l2", "l3", "l4"] {
+        let mut l = Leaf::default();
+        l.name = name.into();
+        engine.create_object(&l).await.unwrap();
+        leaves.push(l.id());
+    }
+    let ids = TwoHopIds {
+        hub1: hubs[0],
+        hub2: hubs[1],
+        hub3: hubs[2],
+        s1: spokes[0],
+        s2: spokes[1],
+        s3: spokes[2],
+        l1: leaves[0],
+        l2: leaves[1],
+        l3: leaves[2],
+        l4: leaves[3],
+    };
+
+    for (hub, spoke, position) in [
+        (ids.hub1, ids.s1, 1i64),
+        (ids.hub1, ids.s2, 2),
+        (ids.hub2, ids.s3, 1),
+    ] {
+        engine
+            .create_edge(&HubSpoke {
+                _meta: EdgeMeta::new(hub, spoke),
+                position,
+            })
+            .await
+            .unwrap();
+    }
+    for (spoke, leaf, required) in [
+        (ids.s1, ids.l1, true),
+        (ids.s1, ids.l2, false),
+        (ids.s1, ids.l3, true),
+        (ids.s3, ids.l4, true),
+    ] {
+        engine
+            .create_edge(&SpokeLeaf {
+                _meta: EdgeMeta::new(spoke, leaf),
+                required,
+            })
+            .await
+            .unwrap();
+    }
+
+    (container, engine, ids)
+}
+
+#[tokio::test]
+async fn test_two_hop_collect_with_target_full_chain() {
+    let (_r, engine, ids) = setup_two_hop_fixture().await;
+
+    let unknown_id = uuid::Uuid::now_v7();
+    let by_hub = engine
+        .batch_edge::<HubSpoke, Hub, Spoke>(&[ids.hub1, ids.hub2, ids.hub3, unknown_id])
+        .then_edge::<SpokeLeaf, Leaf>()
+        .collect_with_target()
+        .await
+        .unwrap();
+
+    // Every pivot id appears — zero-edge and unknown ids map to empty Vecs.
+    assert_eq!(by_hub.len(), 4);
+    assert!(by_hub.get(&ids.hub3).unwrap().is_empty());
+    assert!(by_hub.get(&unknown_id).unwrap().is_empty());
+
+    // hub1: two spokes; s1 carries 3 leaves with edge metadata, s2 none (LEFT JOIN).
+    let hub1_children = by_hub.get(&ids.hub1).unwrap();
+    assert_eq!(hub1_children.len(), 2);
+    let (s1, s1_leaves) = hub1_children
+        .iter()
+        .find(|(s, _)| s.id() == ids.s1)
+        .unwrap();
+    assert_eq!(s1.name, "s1");
+    assert_eq!(s1_leaves.len(), 3);
+    let mut leaf_ids: Vec<uuid::Uuid> = s1_leaves.iter().map(|oe| oe.object().id()).collect();
+    leaf_ids.sort();
+    let mut expected = vec![ids.l1, ids.l2, ids.l3];
+    expected.sort();
+    assert_eq!(leaf_ids, expected);
+    // Edge metadata survives the join.
+    let l2_edge = s1_leaves
+        .iter()
+        .find(|oe| oe.object().id() == ids.l2)
+        .unwrap()
+        .edge();
+    assert!(!l2_edge.required);
+    assert!(
+        s1_leaves
+            .iter()
+            .filter(|oe| oe.object().id() != ids.l2)
+            .all(|oe| oe.edge().required)
+    );
+    let (_, s2_leaves) = hub1_children
+        .iter()
+        .find(|(s, _)| s.id() == ids.s2)
+        .unwrap();
+    assert!(s2_leaves.is_empty());
+
+    // hub2: one spoke with exactly its own leaf — no cross-contamination.
+    let hub2_children = by_hub.get(&ids.hub2).unwrap();
+    assert_eq!(hub2_children.len(), 1);
+    let (s3, s3_leaves) = &hub2_children[0];
+    assert_eq!(s3.id(), ids.s3);
+    assert_eq!(s3_leaves.len(), 1);
+    assert_eq!(s3_leaves[0].object().id(), ids.l4);
+}
+
+#[tokio::test]
+async fn test_two_hop_collect_drops_edge_metadata() {
+    let (_r, engine, ids) = setup_two_hop_fixture().await;
+
+    let by_hub = engine
+        .batch_edge::<HubSpoke, Hub, Spoke>(&[ids.hub1, ids.hub2])
+        .then_edge::<SpokeLeaf, Leaf>()
+        .collect()
+        .await
+        .unwrap();
+
+    let hub1_children = by_hub.get(&ids.hub1).unwrap();
+    assert_eq!(hub1_children.len(), 2);
+    let (_, s1_leaves) = hub1_children
+        .iter()
+        .find(|(s, _)| s.id() == ids.s1)
+        .unwrap();
+    assert_eq!(s1_leaves.len(), 3);
+    let (_, s2_leaves) = hub1_children
+        .iter()
+        .find(|(s, _)| s.id() == ids.s2)
+        .unwrap();
+    assert!(s2_leaves.is_empty());
+    assert_eq!(by_hub.get(&ids.hub2).unwrap().len(), 1);
+}
+
+/// `batch_edge` (raw ids) and `preload_objects(query).edge()` must be the
+/// same code path into `then_edge` — identical results on identical data.
+#[tokio::test]
+async fn test_two_hop_batch_edge_vs_preload_objects_parity() {
+    let (_r, engine, ids) = setup_two_hop_fixture().await;
+
+    let from_ids = engine
+        .batch_edge::<HubSpoke, Hub, Spoke>(&[ids.hub1, ids.hub2, ids.hub3])
+        .then_edge::<SpokeLeaf, Leaf>()
+        .collect_with_target()
+        .await
+        .unwrap();
+    let from_query = engine
+        .preload_objects::<Hub>(Query::default())
+        .edge::<HubSpoke, Spoke>()
+        .then_edge::<SpokeLeaf, Leaf>()
+        .collect_with_target()
+        .await
+        .unwrap();
+
+    // Same keys, same per-hub spoke sets, same per-spoke leaf sets.
+    let shape = |m: &std::collections::HashMap<
+        uuid::Uuid,
+        Vec<(Spoke, Vec<ousia::ObjectEdge<SpokeLeaf, Leaf>>)>,
+    >| {
+        let mut out: Vec<(uuid::Uuid, Vec<(uuid::Uuid, Vec<uuid::Uuid>)>)> = m
+            .iter()
+            .map(|(hub, children)| {
+                let mut children: Vec<(uuid::Uuid, Vec<uuid::Uuid>)> = children
+                    .iter()
+                    .map(|(s, leaves)| {
+                        let mut leaf_ids: Vec<uuid::Uuid> =
+                            leaves.iter().map(|oe| oe.object().id()).collect();
+                        leaf_ids.sort();
+                        (s.id(), leaf_ids)
+                    })
+                    .collect();
+                children.sort();
+                (*hub, children)
+            })
+            .collect();
+        out.sort();
+        out
+    };
+    assert_eq!(shape(&from_ids), shape(&from_query));
+}
+
+#[tokio::test]
+async fn test_two_hop_filter_passthrough() {
+    let (_r, engine, ids) = setup_two_hop_fixture().await;
+    let all_hubs = [ids.hub1, ids.hub2, ids.hub3];
+
+    // Hop-2 edge filter: only required leaves survive.
+    let required_only = engine
+        .batch_edge::<HubSpoke, Hub, Spoke>(&all_hubs)
+        .then_edge::<SpokeLeaf, Leaf>()
+        .with_edge_query(EdgeQuery::default().where_eq(&SpokeLeaf::FIELDS.required, true))
+        .collect_with_target()
+        .await
+        .unwrap();
+    let (_, s1_leaves) = required_only
+        .get(&ids.hub1)
+        .unwrap()
+        .iter()
+        .find(|(s, _)| s.id() == ids.s1)
+        .unwrap();
+    let mut leaf_ids: Vec<uuid::Uuid> = s1_leaves.iter().map(|oe| oe.object().id()).collect();
+    leaf_ids.sort();
+    let mut expected = vec![ids.l1, ids.l3];
+    expected.sort();
+    assert_eq!(leaf_ids, expected);
+
+    // Hop-2 object filter: an excluded leaf drops its edge with it — the
+    // spoke stays, with an empty leaf Vec (not a stranded half-pair).
+    let l2_only = engine
+        .batch_edge::<HubSpoke, Hub, Spoke>(&all_hubs)
+        .then_edge::<SpokeLeaf, Leaf>()
+        .obj_eq(&Leaf::FIELDS.name, "l2")
+        .collect_with_target()
+        .await
+        .unwrap();
+    let hub1_children = l2_only.get(&ids.hub1).unwrap();
+    let (_, s1_leaves) = hub1_children
+        .iter()
+        .find(|(s, _)| s.id() == ids.s1)
+        .unwrap();
+    assert_eq!(s1_leaves.len(), 1);
+    assert_eq!(s1_leaves[0].object().id(), ids.l2);
+    let (_, s3_leaves) = l2_only
+        .get(&ids.hub2)
+        .unwrap()
+        .iter()
+        .find(|(s, _)| s.id() == ids.s3)
+        .unwrap();
+    assert!(s3_leaves.is_empty());
+
+    // Hop-1 edge filter: position=1 keeps s1/s3, drops s2 entirely.
+    let pos1 = engine
+        .batch_edge::<HubSpoke, Hub, Spoke>(&all_hubs)
+        .with_edge_query(EdgeQuery::default().where_eq(&HubSpoke::FIELDS.position, 1i64))
+        .then_edge::<SpokeLeaf, Leaf>()
+        .collect_with_target()
+        .await
+        .unwrap();
+    let hub1_children = pos1.get(&ids.hub1).unwrap();
+    assert_eq!(hub1_children.len(), 1);
+    assert_eq!(hub1_children[0].0.id(), ids.s1);
+    assert_eq!(pos1.get(&ids.hub2).unwrap().len(), 1);
+
+    // Hop-1 object filter: only the named spoke survives; hub2 goes empty.
+    let s1_only = engine
+        .batch_edge::<HubSpoke, Hub, Spoke>(&all_hubs)
+        .obj_eq(&Spoke::FIELDS.name, "s1")
+        .then_edge::<SpokeLeaf, Leaf>()
+        .collect_with_target()
+        .await
+        .unwrap();
+    let hub1_children = s1_only.get(&ids.hub1).unwrap();
+    assert_eq!(hub1_children.len(), 1);
+    assert_eq!(hub1_children[0].0.id(), ids.s1);
+    assert!(s1_only.get(&ids.hub2).unwrap().is_empty());
+}
+
+/// Per-hop LIMIT is deliberately unsupported on the 2-hop path for 2.1.0 —
+/// Postgres can't LIMIT one leg of a flat JOIN; a lateral-join variant is
+/// deferred until a concrete need shows up (see plan_2.1.md, "SQL shape").
+/// `EdgeQuery::limit`/`cursor` are ignored by
+/// `query_two_hop_edges_with_targets_batch`. This test exists to document
+/// that decision; enable it if lateral-join limits ever land.
+#[tokio::test]
+#[ignore = "per-hop LIMIT unsupported on the 2-hop path (deferred to a lateral-join follow-up)"]
+async fn test_two_hop_per_hop_limit() {
+    let (_r, engine, ids) = setup_two_hop_fixture().await;
+    let limited = engine
+        .batch_edge::<HubSpoke, Hub, Spoke>(&[ids.hub1])
+        .then_edge::<SpokeLeaf, Leaf>()
+        .with_edge_query(EdgeQuery::default().with_limit(1))
+        .collect_with_target()
+        .await
+        .unwrap();
+    let (_, s1_leaves) = limited
+        .get(&ids.hub1)
+        .unwrap()
+        .iter()
+        .find(|(s, _)| s.id() == ids.s1)
+        .unwrap();
+    assert_eq!(s1_leaves.len(), 1); // would require JOIN LATERAL (... LIMIT 1)
+}
+
+#[tokio::test]
+async fn test_count_owned_objects_batch() {
+    let (_r, pool) = setup_test_db().await;
+    let adapter = PostgresAdapter::from_pool(pool);
+    adapter.init_schema().await.unwrap();
+    let engine = Engine::new(Box::new(adapter));
+
+    let mut owner1 = User::default();
+    owner1.username = "coob_owner1".into();
+    owner1.email = "coob_owner1@x.com".into();
+    engine.create_object(&owner1).await.unwrap();
+
+    let mut owner2 = User::default();
+    owner2.username = "coob_owner2".into();
+    owner2.email = "coob_owner2@x.com".into();
+    engine.create_object(&owner2).await.unwrap();
+
+    let mut owner3 = User::default();
+    owner3.username = "coob_owner3".into();
+    owner3.email = "coob_owner3@x.com".into();
+    engine.create_object(&owner3).await.unwrap();
+
+    for title in ["Count A", "Count B", "Count C"] {
+        let mut p = Post::default();
+        p.set_owner(owner1.id());
+        p.title = title.into();
+        engine.create_object(&p).await.unwrap();
+    }
+    let mut p = Post::default();
+    p.set_owner(owner2.id());
+    p.title = "Count D".into();
+    engine.create_object(&p).await.unwrap();
+
+    let absent_owner = uuid::Uuid::now_v7();
+
+    let counts = engine
+        .count_owned_objects_batch::<Post>(&[
+            owner1.id(),
+            owner2.id(),
+            owner3.id(),
+            absent_owner,
+        ])
+        .await
+        .unwrap();
+
+    assert_eq!(counts.get(&owner1.id()).copied(), Some(3));
+    assert_eq!(counts.get(&owner2.id()).copied(), Some(1));
+    // Zero objects → absent from the map entirely (GROUP BY produces no
+    // row), matching count_reverse_edges_batch's convention.
+    assert!(counts.get(&owner3.id()).is_none());
+    assert!(counts.get(&absent_owner).is_none());
+}
+
+// ============================================================
+// Section 16: Field-name drift detection at startup
+// ============================================================
+//
+// `PostgresAdapter::check_field_drift` (called from `init_schema`) samples
+// one stored row per registered type and warns — doesn't fail — when a
+// key present in stored data no longer matches any field on the current
+// struct (the field was renamed or removed, so its old value will be
+// dropped on the next save). Named-key encoding means field identity is
+// the field's name, so this is the safety net for renames the compiler
+// can't catch.
+
+#[tokio::test]
+async fn test_check_field_drift_detects_renamed_field_on_object() {
+    let (_r, pool) = setup_test_db().await;
+    let adapter = PostgresAdapter::from_pool(pool.clone());
+    adapter.init_schema().await.unwrap();
+
+    // Simulate a row written before `avatar` was renamed/removed from
+    // `User` — insert directly, bypassing the engine (which only knows
+    // the struct's *current* field set).
+    let mut legacy = std::collections::BTreeMap::new();
+    legacy.insert("username", serde_json::json!("alice"));
+    legacy.insert("avatar", serde_json::json!("http://example.com/a.png"));
+    let data = rmp_serde::to_vec_named(&legacy).unwrap();
+    sqlx::query(
+        "INSERT INTO objects (id, type, owner, created_at, updated_at, data, index_meta) \
+         VALUES ($1, 'User', $2, now(), now(), $3, '{}'::jsonb)",
+    )
+    .bind(uuid::Uuid::now_v7())
+    .bind(uuid::Uuid::nil())
+    .bind(data)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let warnings = adapter.check_field_drift().await.unwrap();
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.contains("object:User") && w.contains("`avatar`")),
+        "expected an avatar drift warning, got {:?}",
+        warnings
+    );
+}
+
+#[tokio::test]
+async fn test_check_field_drift_detects_renamed_field_on_edge() {
+    let (_r, pool) = setup_test_db().await;
+    let adapter = PostgresAdapter::from_pool(pool.clone());
+    adapter.init_schema().await.unwrap();
+
+    let engine = Engine::new(Box::new(PostgresAdapter::from_pool(pool.clone())));
+    let mut alice = User::default();
+    alice.username = "alice_drift_edge_test".into();
+    let mut bob = User::default();
+    bob.username = "bob_drift_edge_test".into();
+    engine.create_object(&alice).await.unwrap();
+    engine.create_object(&bob).await.unwrap();
+
+    let mut legacy = std::collections::BTreeMap::new();
+    legacy.insert("notification", serde_json::json!(true));
+    legacy.insert("legacy_field", serde_json::json!(42));
+    let data = rmp_serde::to_vec_named(&legacy).unwrap();
+    sqlx::query(
+        "INSERT INTO object_edges (\"from\", \"to\", type, created_at, updated_at, data, index_meta) \
+         VALUES ($1, $2, 'Follow', now(), now(), $3, '{}'::jsonb)",
+    )
+    .bind(alice.id())
+    .bind(bob.id())
+    .bind(data)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let warnings = adapter.check_field_drift().await.unwrap();
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.contains("edge:Follow") && w.contains("`legacy_field`")),
+        "expected a legacy_field drift warning, got {:?}",
+        warnings
+    );
+}
+
+#[tokio::test]
+async fn test_check_field_drift_no_warnings_on_matching_data() {
+    let (_r, pool) = setup_test_db().await;
+    let adapter = PostgresAdapter::from_pool(pool.clone());
+    adapter.init_schema().await.unwrap();
+
+    let engine = Engine::new(Box::new(PostgresAdapter::from_pool(pool.clone())));
+    let mut user = User::default();
+    user.username = "no_drift_test_user".into();
+    engine.create_object(&user).await.unwrap();
+
+    let warnings = adapter.check_field_drift().await.unwrap();
+    assert!(
+        warnings.iter().all(|w| !w.contains("object:User")),
+        "expected no User drift warnings, got {:?}",
+        warnings
+    );
+}
+
+#[tokio::test]
+async fn test_check_field_drift_clean_db_no_rows() {
+    let (_r, pool) = setup_test_db().await;
+    let adapter = PostgresAdapter::from_pool(pool);
+    // No rows in any table yet — must not be mistaken for drift.
+    adapter.init_schema().await.unwrap();
+    let warnings = adapter.check_field_drift().await.unwrap();
+    assert!(warnings.is_empty(), "got {:?}", warnings);
 }
 
 /// Manifest smoke test — every `OusiaObject`/`OusiaEdge` derive in this test

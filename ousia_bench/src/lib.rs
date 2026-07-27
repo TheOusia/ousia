@@ -394,7 +394,7 @@ pub async fn seed_raw_follows_bulk(pool: &PgPool, user_ids: &[uuid::Uuid], follo
 pub async fn seed_ousia_users_bulk(pool: &PgPool, n: usize) -> Vec<uuid::Uuid> {
     let nil = uuid::Uuid::nil();
     let mut ids: Vec<uuid::Uuid> = Vec::with_capacity(n);
-    let mut data_strs: Vec<String> = Vec::with_capacity(n);
+    let mut data_bytes: Vec<Vec<u8>> = Vec::with_capacity(n);
     let mut index_meta_strs: Vec<String> = Vec::with_capacity(n);
 
     for i in 0..n {
@@ -406,16 +406,18 @@ pub async fn seed_ousia_users_bulk(pool: &PgPool, n: usize) -> Vec<uuid::Uuid> {
         let active = i % 3 != 0;
 
         ids.push(id);
-        data_strs.push(
-            serde_json::json!({
-                "username": username,
-                "email": email,
-                "display_name": display_name,
-                "score": score,
-                "active": active,
-            })
-            .to_string(),
-        );
+        // `data` is BYTEA msgpack keyed by BenchUser's `#[ousia(tag = N)]`
+        // (0=username, 1=email, 2=display_name, 3=score, 4=active), not
+        // JSONB — must match the real `ObjectRecord::from_object` wire
+        // format exactly since this bypasses the engine/derive entirely.
+        let mut data: std::collections::BTreeMap<u32, serde_json::Value> =
+            std::collections::BTreeMap::new();
+        data.insert(0, serde_json::json!(username));
+        data.insert(1, serde_json::json!(email));
+        data.insert(2, serde_json::json!(display_name));
+        data.insert(3, serde_json::json!(score));
+        data.insert(4, serde_json::json!(active));
+        data_bytes.push(rmp_serde::to_vec(&data).expect("msgpack encode"));
         index_meta_strs.push(
             serde_json::json!({
                 "username": username,
@@ -429,13 +431,13 @@ pub async fn seed_ousia_users_bulk(pool: &PgPool, n: usize) -> Vec<uuid::Uuid> {
 
     sqlx::query(
         "INSERT INTO public.objects (id, type, owner, created_at, updated_at, data, index_meta) \
-         SELECT t.id, $2, $3::uuid, now(), now(), t.data::jsonb, t.im::jsonb \
-         FROM unnest($1::uuid[], $4::text[], $5::text[]) AS t(id, data, im)",
+         SELECT t.id, $2, $3::uuid, now(), now(), t.data, t.im::jsonb \
+         FROM unnest($1::uuid[], $4::bytea[], $5::text[]) AS t(id, data, im)",
     )
     .bind(&ids)
     .bind("BenchUser")
     .bind(nil)
-    .bind(&data_strs)
+    .bind(&data_bytes)
     .bind(&index_meta_strs)
     .execute(pool)
     .await
@@ -444,7 +446,7 @@ pub async fn seed_ousia_users_bulk(pool: &PgPool, n: usize) -> Vec<uuid::Uuid> {
     ids
 }
 
-/// Batch-insert `BenchFollow` edges directly into `public.edges`.
+/// Batch-insert `BenchFollow` edges directly into `public.object_edges`.
 ///
 /// Each user follows the next `follows_per` users (circular). Bypasses the engine.
 pub async fn seed_ousia_edges_bulk(pool: &PgPool, user_ids: &[uuid::Uuid], follows_per: usize) {
@@ -452,7 +454,7 @@ pub async fn seed_ousia_edges_bulk(pool: &PgPool, user_ids: &[uuid::Uuid], follo
     let cap = n * follows_per;
     let mut froms: Vec<uuid::Uuid> = Vec::with_capacity(cap);
     let mut tos: Vec<uuid::Uuid> = Vec::with_capacity(cap);
-    let mut data_strs: Vec<String> = Vec::with_capacity(cap);
+    let mut data_bytes: Vec<Vec<u8>> = Vec::with_capacity(cap);
     let mut index_meta_strs: Vec<String> = Vec::with_capacity(cap);
 
     for i in 0..n {
@@ -460,21 +462,25 @@ pub async fn seed_ousia_edges_bulk(pool: &PgPool, user_ids: &[uuid::Uuid], follo
             let weight = j as i64;
             froms.push(user_ids[i]);
             tos.push(user_ids[(i + j) % n]);
-            data_strs.push(serde_json::json!({ "weight": weight }).to_string());
+            // BenchFollow: weight = tag 0.
+            let mut data: std::collections::BTreeMap<u32, serde_json::Value> =
+                std::collections::BTreeMap::new();
+            data.insert(0, serde_json::json!(weight));
+            data_bytes.push(rmp_serde::to_vec(&data).expect("msgpack encode"));
             index_meta_strs.push(serde_json::json!({ "weight": weight }).to_string());
         }
     }
 
     sqlx::query(
-        r#"INSERT INTO public.edges ("from", "to", type, data, index_meta)
-           SELECT t.f, t.t, $3, t.data::jsonb, t.im::jsonb
-           FROM unnest($1::uuid[], $2::uuid[], $4::text[], $5::text[]) AS t(f, t, data, im)
+        r#"INSERT INTO public.object_edges ("from", "to", type, data, index_meta)
+           SELECT t.f, t.t, $3, t.data, t.im::jsonb
+           FROM unnest($1::uuid[], $2::uuid[], $4::bytea[], $5::text[]) AS t(f, t, data, im)
            ON CONFLICT DO NOTHING"#,
     )
     .bind(&froms)
     .bind(&tos)
     .bind("BenchFollow")
-    .bind(&data_strs)
+    .bind(&data_bytes)
     .bind(&index_meta_strs)
     .execute(pool)
     .await

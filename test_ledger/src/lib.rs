@@ -26,8 +26,8 @@ async fn setup_test_db() -> (ContainerAsync<Postgres>, PgPool) {
         .with_password("postgres")
         .with_user("postgres")
         .with_db_name("postgres")
-        .with_name("postgis/postgis")
-        .with_tag("16-3.4-alpine")
+        .with_name("imresamu/postgis")
+        .with_tag("16-3.6-alpine")
         .start()
         .await
     {
