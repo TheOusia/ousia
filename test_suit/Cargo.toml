@@ -6,7 +6,7 @@ publish = false
 
 [dependencies]
 chrono = { version = "0.4.42", features = ["serde"] }
-ousia = { version = "2", path = "../ousia", features = ["default",] }
+ousia = { version = "2.1", path = "../ousia", features = ["default",] }
 serde = "1.0.228"
 tokio = { version = "1", features = ["macros", "time"] }
 sqlx = { version = "0.8", features = [
