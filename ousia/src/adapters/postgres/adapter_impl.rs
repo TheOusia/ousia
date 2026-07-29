@@ -252,11 +252,8 @@ impl Adapter for PostgresAdapter {
         // `param_idx` now points to the slot where bind_geo_filters will start
         // emitting its bindings. Reconstruct the per-geo-order lon/lat slot
         // indices so we can splice them into the ORDER BY suffix.
-        let (order_lon_p, order_lat_p) = Self::compute_geo_order_param_slots(
-            param_idx,
-            &plan.geo_filters,
-            &geo_plan,
-        );
+        let (order_lon_p, order_lat_p) =
+            Self::compute_geo_order_param_slots(param_idx, &plan.geo_filters, &geo_plan);
 
         let scalar_order = Self::build_order_clause(&plan.filters, false);
         if plan.owner.is_nil() {
@@ -272,7 +269,11 @@ impl Adapter for PostgresAdapter {
         ) {
             Some(geo_term) => {
                 if scalar_order.starts_with("ORDER BY ") {
-                    format!("ORDER BY {}, {}", geo_term, &scalar_order["ORDER BY ".len()..])
+                    format!(
+                        "ORDER BY {}, {}",
+                        geo_term,
+                        &scalar_order["ORDER BY ".len()..]
+                    )
                 } else {
                     format!("ORDER BY {}", geo_term)
                 }
@@ -301,12 +302,8 @@ impl Adapter for PostgresAdapter {
             query = query.bind(cursor.last_id);
         }
         query = Self::query_bind_filters(query, &plan.filters);
-        query = Self::bind_geo_filters(
-            query,
-            &plan.geo_filters,
-            plan.geo_order.as_ref(),
-            &geo_plan,
-        );
+        query =
+            Self::bind_geo_filters(query, &plan.geo_filters, plan.geo_order.as_ref(), &geo_plan);
 
         let rows = query
             .fetch_all(&self.pool)
@@ -326,8 +323,7 @@ impl Adapter for PostgresAdapter {
     ) -> Result<Vec<(ObjectRecord, f64)>, Error> {
         if plan.geo_order.is_none() {
             return Err(Error::InvalidQuery(
-                "query_objects_with_distance requires order_by_distance(...) to be set"
-                    .to_string(),
+                "query_objects_with_distance requires order_by_distance(...) to be set".to_string(),
             ));
         }
 
@@ -352,8 +348,9 @@ impl Adapter for PostgresAdapter {
             .as_deref()
             .expect("geo_order set → order_alias planned");
 
-        let geo_term = Self::build_geo_order_suffix(plan.geo_order.as_ref(), &geo_plan, lon_p, lat_p)
-            .expect("geo_order set");
+        let geo_term =
+            Self::build_geo_order_suffix(plan.geo_order.as_ref(), &geo_plan, lon_p, lat_p)
+                .expect("geo_order set");
         let tail = if scalar_order.starts_with("ORDER BY ") {
             format!(", {}", &scalar_order["ORDER BY ".len()..])
         } else {
@@ -387,12 +384,8 @@ impl Adapter for PostgresAdapter {
             query = query.bind(cursor.last_id);
         }
         query = Self::query_bind_filters(query, &plan.filters);
-        query = Self::bind_geo_filters(
-            query,
-            &plan.geo_filters,
-            plan.geo_order.as_ref(),
-            &geo_plan,
-        );
+        query =
+            Self::bind_geo_filters(query, &plan.geo_filters, plan.geo_order.as_ref(), &geo_plan);
 
         let rows = query
             .fetch_all(&self.pool)
@@ -418,13 +411,17 @@ impl Adapter for PostgresAdapter {
         match plan {
             Some(plan) => {
                 let mut param_idx = 3;
-                let (where_clause, geo_plan) = Self::build_object_query_conditions_with_geo(
+                let (mut where_clause, geo_plan) = Self::build_object_query_conditions_with_geo(
                     &plan.filters,
                     None,
                     &plan.geo_filters,
                     plan.geo_order.as_ref(),
                     &mut param_idx,
                 );
+
+                if plan.owner.is_nil() {
+                    where_clause = where_clause.replace("owner = ", "owner > ");
+                }
 
                 let mut sql = format!(
                     r#"

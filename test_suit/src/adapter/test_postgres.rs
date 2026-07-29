@@ -636,6 +636,45 @@ async fn test_count_objects() {
 }
 
 #[tokio::test]
+async fn test_count_objects_wide_query_spans_all_owners() {
+    let (_r, pool) = setup_test_db().await;
+    let adapter = PostgresAdapter::from_pool(pool);
+    adapter.init_schema().await.unwrap();
+    let engine = Engine::new(Box::new(adapter));
+
+    let mut owner_a = User::default();
+    owner_a.username = "wide-owner-a".into();
+    owner_a.email = "wide-a@x.com".into();
+    engine.create_object(&owner_a).await.unwrap();
+
+    let mut owner_b = User::default();
+    owner_b.username = "wide-owner-b".into();
+    owner_b.email = "wide-b@x.com".into();
+    engine.create_object(&owner_b).await.unwrap();
+
+    for (owner, n) in [(owner_a.id(), 2), (owner_b.id(), 3)] {
+        for i in 0..n {
+            let mut p = Post::default();
+            p.set_owner(owner);
+            p.title = format!("wide post {}", i);
+            p.status = PostStatus::Published;
+            engine.create_object(&p).await.unwrap();
+        }
+    }
+
+    let count = engine
+        .count_objects::<Post>(Some(
+            Query::wide().where_eq(&Post::FIELDS.status, PostStatus::Published),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        count, 5,
+        "wide count must span every owner, not just match a nil owner"
+    );
+}
+
+#[tokio::test]
 async fn test_query_all_index_value_variants() {
     let (_r, pool) = setup_test_db().await;
     let adapter = PostgresAdapter::from_pool(pool);
@@ -1333,8 +1372,15 @@ async fn test_update_edge_data_only() {
         .await
         .unwrap()
         .unwrap();
-    assert!(refetched.notification, "update_edge should persist data changes");
-    assert_eq!(refetched.to(), bob.id(), "no retarget requested — `to` unchanged");
+    assert!(
+        refetched.notification,
+        "update_edge should persist data changes"
+    );
+    assert_eq!(
+        refetched.to(),
+        bob.id(),
+        "no retarget requested — `to` unchanged"
+    );
 }
 
 #[tokio::test]
@@ -1436,7 +1482,10 @@ async fn test_delete_object_edge_removes_all_forward_edges() {
         .await
         .unwrap();
 
-    engine.delete_object_edge::<Follow>(alice.id()).await.unwrap();
+    engine
+        .delete_object_edge::<Follow>(alice.id())
+        .await
+        .unwrap();
 
     let alice_edges: Vec<Follow> = engine
         .query_edges(alice.id(), EdgeQuery::default())
@@ -1448,7 +1497,11 @@ async fn test_delete_object_edge_removes_all_forward_edges() {
         .query_edges(dave.id(), EdgeQuery::default())
         .await
         .unwrap();
-    assert_eq!(dave_edges.len(), 1, "delete_object_edge must not touch other owners' edges");
+    assert_eq!(
+        dave_edges.len(),
+        1,
+        "delete_object_edge must not touch other owners' edges"
+    );
 }
 
 // ============================================================
@@ -1833,7 +1886,11 @@ async fn test_query_context_get() {
     alice.email = "qcg_alice@x.com".into();
     engine.create_object(&alice).await.unwrap();
 
-    let found = engine.preload_object::<User>(alice.id()).get().await.unwrap();
+    let found = engine
+        .preload_object::<User>(alice.id())
+        .get()
+        .await
+        .unwrap();
     assert_eq!(found.unwrap().username, "qcg_alice");
 
     let missing = engine
@@ -3926,12 +3983,7 @@ async fn test_count_owned_objects_batch() {
     let absent_owner = uuid::Uuid::now_v7();
 
     let counts = engine
-        .count_owned_objects_batch::<Post>(&[
-            owner1.id(),
-            owner2.id(),
-            owner3.id(),
-            absent_owner,
-        ])
+        .count_owned_objects_batch::<Post>(&[owner1.id(), owner2.id(), owner3.id(), absent_owner])
         .await
         .unwrap();
 
