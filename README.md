@@ -47,14 +47,14 @@ A graph-relational ORM with built-in double-entry ledger for Rust. Zero migratio
 
 Most Rust ORMs give you tables and rows. Ousia gives you a typed graph with money semantics baked in.
 
-|                               | Ousia               | SeaORM / Diesel | SQLx        |
-| ----------------------------- | ------------------- | --------------- | ----------- |
-| Graph edges with properties   | First-class      | Manual joins | Raw SQL  |
-| No migrations                 | Struct IS schema | Required     | Required |
-| Compile-time query validation | `const FIELDS`   | Partial         |           |
-| Owner-based multitenancy      | Built-in         | Manual       | Manual   |
-| Atomic payment splits         | Built-in ledger  | External     | External |
-| View system                   | Derive macro     |              |          |
+|                               | Ousia            | SeaORM / Diesel | SQLx     |
+| ----------------------------- | ---------------- | --------------- | -------- |
+| Graph edges with properties   | First-class      | Manual joins    | Raw SQL  |
+| No migrations                 | Struct IS schema | Required        | Required |
+| Compile-time query validation | `const FIELDS`   | Partial         |          |
+| Owner-based multitenancy      | Built-in         | Manual          | Manual   |
+| Atomic payment splits         | Built-in ledger  | External        | External |
+| View system                   | Derive macro     |                 |          |
 
 ---
 
@@ -338,17 +338,17 @@ Query::wide()
 
 **AND filters** (default operator — all conditions must match):
 
-| Method                  | SQL equivalent              |
-| ----------------------- | --------------------------- |
-| `.where_eq(f, v)`       | `field = v`                 |
-| `.where_ne(f, v)`       | `field != v`                |
-| `.where_gt(f, v)`       | `field > v`                 |
-| `.where_gte(f, v)`      | `field >= v`                |
-| `.where_lt(f, v)`       | `field < v`                 |
-| `.where_lte(f, v)`      | `field <= v`                |
-| `.where_contains(f, v)` | `field @> v` (array/GIN)    |
-| `.where_contains_all(f, v)` | all elements present    |
-| `.where_begins_with(f, v)`  | `field LIKE 'v%'`       |
+| Method                      | SQL equivalent           |
+| --------------------------- | ------------------------ |
+| `.where_eq(f, v)`           | `field = v`              |
+| `.where_ne(f, v)`           | `field != v`             |
+| `.where_gt(f, v)`           | `field > v`              |
+| `.where_gte(f, v)`          | `field >= v`             |
+| `.where_lt(f, v)`           | `field < v`              |
+| `.where_lte(f, v)`          | `field <= v`             |
+| `.where_contains(f, v)`     | `field @> v` (array/GIN) |
+| `.where_contains_all(f, v)` | all elements present     |
+| `.where_begins_with(f, v)`  | `field LIKE 'v%'`        |
 
 **OR filters** (any one condition matches — prefix `or_`):
 
@@ -645,16 +645,16 @@ EdgeQuery::default()
 
 **AND filters:**
 
-| Method                  | Description              |
-| ----------------------- | ------------------------ |
-| `.where_eq(f, v)`       | field = v                |
-| `.where_ne(f, v)`       | field != v               |
-| `.where_gt(f, v)`       | field > v                |
-| `.where_gte(f, v)`      | field >= v               |
-| `.where_lt(f, v)`       | field < v                |
-| `.where_lte(f, v)`      | field <= v               |
-| `.where_contains(f, v)` | array contains v         |
-| `.where_begins_with(f, v)` | prefix match          |
+| Method                     | Description      |
+| -------------------------- | ---------------- |
+| `.where_eq(f, v)`          | field = v        |
+| `.where_ne(f, v)`          | field != v       |
+| `.where_gt(f, v)`          | field > v        |
+| `.where_gte(f, v)`         | field >= v       |
+| `.where_lt(f, v)`          | field < v        |
+| `.where_lte(f, v)`         | field <= v       |
+| `.where_contains(f, v)`    | array contains v |
+| `.where_begins_with(f, v)` | prefix match     |
 
 **OR variants:** `.or_eq`, `.or_ne`, `.or_gt`, `.or_gte`, `.or_lt`, `.or_lte`, `.or_contains`, `.or_begins_with`
 
@@ -731,17 +731,17 @@ engine.preload_object::<User>(alice.id())
 
 **Terminal methods:**
 
-| Method                      | Returns              | Direction      | Includes  |
-| --------------------------- | -------------------- | -------------- | --------- |
-| `.collect()`                | `Vec<O>`             | forward        | objects   |
-| `.collect_reverse()`        | `Vec<O>`             | reverse        | objects   |
-| `.collect_edges()`          | `Vec<E>`             | forward        | edges     |
-| `.collect_reverse_edges()`  | `Vec<E>`             | reverse        | edges     |
-| `.collect_with_target()`    | `Vec<ObjectEdge<E,O>>` | forward      | edge+obj  |
-| `.collect_reverse_with_target()` | `Vec<ObjectEdge<E,O>>` | reverse | edge+obj  |
-| `.collect_both()`           | `(Vec<O>, Vec<O>)`   | both (UNION)   | objects   |
-| `.collect_both_with_target()` | `(Vec<ObjectEdge<E,O>>, Vec<ObjectEdge<E,O>>)` | both | edge+obj |
-| `.collect_both_edges()`     | `(Vec<E>, Vec<E>)`   | both (UNION)   | edges     |
+| Method                           | Returns                                        | Direction    | Includes |
+| -------------------------------- | ---------------------------------------------- | ------------ | -------- |
+| `.collect()`                     | `Vec<O>`                                       | forward      | objects  |
+| `.collect_reverse()`             | `Vec<O>`                                       | reverse      | objects  |
+| `.collect_edges()`               | `Vec<E>`                                       | forward      | edges    |
+| `.collect_reverse_edges()`       | `Vec<E>`                                       | reverse      | edges    |
+| `.collect_with_target()`         | `Vec<ObjectEdge<E,O>>`                         | forward      | edge+obj |
+| `.collect_reverse_with_target()` | `Vec<ObjectEdge<E,O>>`                         | reverse      | edge+obj |
+| `.collect_both()`                | `(Vec<O>, Vec<O>)`                             | both (UNION) | objects  |
+| `.collect_both_with_target()`    | `(Vec<ObjectEdge<E,O>>, Vec<ObjectEdge<E,O>>)` | both         | edge+obj |
+| `.collect_both_edges()`          | `(Vec<E>, Vec<E>)`                             | both (UNION) | edges    |
 
 The `collect_both*` methods issue a single UNION query for both forward and reverse directions simultaneously.
 
@@ -835,16 +835,16 @@ engine.preload_objects::<User>(parent_query)
 
 **Terminal methods (all return `Vec<(P, ...)>`):**
 
-| Method                       | Returns                           | Direction | Includes  |
-| ---------------------------- | --------------------------------- | --------- | --------- |
-| `.collect()`                 | `Vec<(P, Vec<C>)>`               | forward   | objects   |
-| `.collect_reverse()`         | `Vec<(P, Vec<C>)>`               | reverse   | objects   |
-| `.collect_edges()`           | `Vec<(P, Vec<E>)>`               | forward   | edges     |
-| `.collect_reverse_edges()`   | `Vec<(P, Vec<E>)>`               | reverse   | edges     |
-| `.collect_with_target()`     | `Vec<(P, Vec<ObjectEdge<E,C>>)>` | forward   | edge+obj  |
-| `.collect_reverse_with_target()` | `Vec<(P, Vec<ObjectEdge<E,C>>)>` | reverse | edge+obj |
-| `.count()`                   | `Vec<(P, u64)>`                  | forward   | counts    |
-| `.count_reverse()`           | `Vec<(P, u64)>`                  | reverse   | counts    |
+| Method                           | Returns                          | Direction | Includes |
+| -------------------------------- | -------------------------------- | --------- | -------- |
+| `.collect()`                     | `Vec<(P, Vec<C>)>`               | forward   | objects  |
+| `.collect_reverse()`             | `Vec<(P, Vec<C>)>`               | reverse   | objects  |
+| `.collect_edges()`               | `Vec<(P, Vec<E>)>`               | forward   | edges    |
+| `.collect_reverse_edges()`       | `Vec<(P, Vec<E>)>`               | reverse   | edges    |
+| `.collect_with_target()`         | `Vec<(P, Vec<ObjectEdge<E,C>>)>` | forward   | edge+obj |
+| `.collect_reverse_with_target()` | `Vec<(P, Vec<ObjectEdge<E,C>>)>` | reverse   | edge+obj |
+| `.count()`                       | `Vec<(P, u64)>`                  | forward   | counts   |
+| `.count_reverse()`               | `Vec<(P, u64)>`                  | reverse   | counts   |
 
 **Example — load 100 users and their accepted followers in 2 queries:**
 
@@ -897,7 +897,7 @@ Named counters backed by the database. Useful for order numbers, invoice IDs, an
 // Read the current value without incrementing
 let current: u64 = engine.counter_value("order_number".to_string()).await;
 
-// Increment and return the new value
+// Increment and return the new value. Initializes the value on first call and return 1
 let next: u64 = engine.counter_next_value("order_number".to_string()).await;
 ```
 

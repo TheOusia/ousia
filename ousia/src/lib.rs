@@ -168,9 +168,9 @@ pub mod manifest;
 pub mod object;
 pub mod query;
 
-pub use manifest::{ManifestKind, TypeManifestEntry, MANIFEST};
 #[doc(hidden)]
 pub use manifest::{__linkme, __rmp_serde};
+pub use manifest::{MANIFEST, ManifestKind, TypeManifestEntry};
 
 #[cfg(feature = "ledger")]
 pub use ledger;
@@ -398,7 +398,12 @@ impl Engine {
             // need to be UPSERTed. Points whose hash is unchanged are skipped.
             let points_to_upsert: Vec<crate::query::GeoPoint> = new_points
                 .iter()
-                .filter(|p| old_hashes.get(p.field).map(|h| h != &p.hash).unwrap_or(true))
+                .filter(|p| {
+                    old_hashes
+                        .get(p.field)
+                        .map(|h| h != &p.hash)
+                        .unwrap_or(true)
+                })
                 .cloned()
                 .collect();
 
@@ -835,7 +840,7 @@ impl Engine {
     }
 
     // ==================== Sequence ====================
-    pub async fn counter_value(&self, key: String) -> u64 {
+    pub async fn counter_value(&self, key: String) -> Option<u64> {
         self.inner.adapter.sequence_value(key).await
     }
 

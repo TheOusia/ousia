@@ -68,11 +68,7 @@ pub trait GeoAdapter {
     }
 
     /// Delete specific fields for an object (used when geo fields disappear on update).
-    async fn delete_geo_fields(
-        &self,
-        _object_id: Uuid,
-        _fields: Vec<String>,
-    ) -> Result<(), Error> {
+    async fn delete_geo_fields(&self, _object_id: Uuid, _fields: Vec<String>) -> Result<(), Error> {
         Ok(())
     }
 
@@ -424,7 +420,7 @@ pub trait Adapter: UniqueAdapter + GeoAdapter + EdgeTraversal + Send + Sync + 's
     ) -> Result<u64, Error>;
 
     /* ---------------- SEQUENCE ---------------- */
-    async fn sequence_value(&self, sq: String) -> u64;
+    async fn sequence_value(&self, sq: String) -> Option<u64>;
     async fn sequence_next_value(&self, sq: String) -> u64;
 
     /* ---------------- LEDGER ---------------- */

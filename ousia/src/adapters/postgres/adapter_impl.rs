@@ -966,22 +966,21 @@ impl Adapter for PostgresAdapter {
         }
     }
 
-    async fn sequence_value(&self, sq: String) -> u64 {
-        let val: i64 =
-            sqlx::query_scalar("SELECT COALESCE((SELECT value FROM sequences WHERE name = $1), 1)")
-                .bind(&sq)
-                .fetch_one(&self.pool)
-                .await
-                .expect("Failed to fetch sequence value");
-        val as u64
+    async fn sequence_value(&self, sq: String) -> Option<u64> {
+        let val: Option<i64> = sqlx::query_scalar("SELECT value FROM sequences WHERE name = $1")
+            .bind(&sq)
+            .fetch_optional(&self.pool)
+            .await
+            .expect("Failed to fetch sequence value");
+        val.map(|v| v as u64)
     }
 
     async fn sequence_next_value(&self, sq: String) -> u64 {
-        // Upsert: insert with value=2 on first call, otherwise increment.
-        // Convention: first `sequence_value` returns 1, first `sequence_next_value` returns 2.
+        // Upsert: insert with value=1 on first call, otherwise increment.
+        // Matches a normal Postgres sequence: first nextval() returns 1.
         let next_val: i64 = sqlx::query_scalar(
             r#"
-            INSERT INTO sequences (name, value) VALUES ($1, 2)
+            INSERT INTO sequences (name, value) VALUES ($1, 1)
             ON CONFLICT (name) DO UPDATE SET value = sequences.value + 1
             RETURNING value
             "#,

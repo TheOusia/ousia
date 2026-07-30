@@ -2744,20 +2744,26 @@ async fn test_sequence_value_and_next() {
     adapter.init_schema().await.unwrap();
     let engine = Engine::new(Box::new(adapter));
 
-    // Initial value is 1.
-    assert_eq!(engine.counter_value("seq-test".into()).await, 1);
+    // Initial value is None.
+    assert_eq!(engine.counter_value("seq-test".into()).await, None);
 
-    // next → 2.
+    // next → 1.
+    assert_eq!(engine.counter_next_value("seq-test".into()).await, 1);
+
+    // value is now 2.
+    assert_eq!(engine.counter_value("seq-test".into()).await, Some(1));
+
+    // next → 1.
     assert_eq!(engine.counter_next_value("seq-test".into()).await, 2);
 
     // value is now 2.
-    assert_eq!(engine.counter_value("seq-test".into()).await, 2);
+    assert_eq!(engine.counter_value("seq-test".into()).await, Some(2));
 
     // next → 3.
     assert_eq!(engine.counter_next_value("seq-test".into()).await, 3);
 
     // Independent keys don't interfere.
-    assert_eq!(engine.counter_value("other-seq".into()).await, 1);
+    assert_eq!(engine.counter_value("other-seq".into()).await, None);
 }
 
 // ============================================================
