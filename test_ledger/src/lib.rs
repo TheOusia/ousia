@@ -1113,3 +1113,231 @@ async fn test_interleaved_mints_and_spends_balance_integrity() {
     assert_eq!(user_balance.available, expected_user as u64);
     assert_eq!(merchant_balance.available, expected_merchant as u64);
 }
+
+// ── Idempotent mint/burn ──────────────────────────────────────────────────────
+//
+// Regression coverage for a bug where `record_transaction_internal_tx` inserted
+// the `ledger_transaction_idempotency_keys` row (FK -> ledger_transactions.id)
+// before the `ledger_transactions` row it references, so any idempotent
+// mint/burn failed every single time with a foreign-key violation. None of the
+// tests above ever exercised `mint_idempotent`/`burn_idempotent`, which is how
+// this shipped unnoticed.
+
+#[tokio::test]
+async fn test_mint_idempotent_creates_balance() {
+    let (_resource, engine, user) = setup().await;
+    create_usd_asset(&engine.ledger()).await;
+
+    let ctx = engine.ledger_ctx();
+    Money::atomic(&ctx, |tx| async move {
+        tx.mint_idempotent(
+            "USD",
+            user,
+            100_00,
+            "idempotent deposit".to_string(),
+            "order-123".to_string(),
+        )
+        .await?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+
+    let balance = Balance::get("USD", user, &ctx).await.unwrap();
+    assert_eq!(balance.available, 100_00);
+}
+
+#[tokio::test]
+async fn test_mint_idempotent_duplicate_key_rejected_and_not_double_minted() {
+    let (_resource, engine, user) = setup().await;
+    create_usd_asset(&engine.ledger()).await;
+
+    let ctx = engine.ledger_ctx();
+    Money::atomic(&ctx, |tx| async move {
+        tx.mint_idempotent(
+            "USD",
+            user,
+            100_00,
+            "deposit".to_string(),
+            "order-456".to_string(),
+        )
+        .await?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+
+    // A retry with the same idempotency key (e.g. a webhook redelivery) must
+    // be rejected...
+    let result = Money::atomic(&ctx, |tx| async move {
+        tx.mint_idempotent(
+            "USD",
+            user,
+            100_00,
+            "deposit retry".to_string(),
+            "order-456".to_string(),
+        )
+        .await?;
+        Ok(())
+    })
+    .await;
+
+    assert!(matches!(result, Err(MoneyError::DuplicateIdempotencyKey(_))));
+
+    // ...and the balance must reflect exactly ONE mint, not two.
+    let balance = Balance::get("USD", user, &ctx).await.unwrap();
+    assert_eq!(balance.available, 100_00);
+}
+
+#[tokio::test]
+async fn test_burn_idempotent_duplicate_key_rejected_and_not_double_burned() {
+    let (_resource, engine, user) = setup().await;
+    create_usd_asset(&engine.ledger()).await;
+
+    let ctx = engine.ledger_ctx();
+    Money::atomic(&ctx, |tx| async move {
+        tx.mint("USD", user, 100_00, "deposit".to_string()).await?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+
+    Money::atomic(&ctx, |tx| async move {
+        tx.burn_idempotent(
+            "USD",
+            user,
+            30_00,
+            "fee".to_string(),
+            "fee-001".to_string(),
+        )
+        .await?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+
+    let result = Money::atomic(&ctx, |tx| async move {
+        tx.burn_idempotent(
+            "USD",
+            user,
+            30_00,
+            "fee retry".to_string(),
+            "fee-001".to_string(),
+        )
+        .await?;
+        Ok(())
+    })
+    .await;
+
+    assert!(matches!(result, Err(MoneyError::DuplicateIdempotencyKey(_))));
+
+    let balance = Balance::get("USD", user, &ctx).await.unwrap();
+    assert_eq!(
+        balance.available, 70_00,
+        "only the first burn should have taken effect"
+    );
+}
+
+/// The duplicate-key error used to carry the id of the *new* (never-persisted,
+/// about-to-be-rolled-back) transaction instead of the transaction that
+/// actually owns the key — useless for a caller trying to look up what
+/// actually happened with the original request.
+#[tokio::test]
+async fn test_duplicate_idempotency_key_error_references_original_transaction() {
+    let (_resource, engine, user) = setup().await;
+    create_usd_asset(&engine.ledger()).await;
+
+    let ctx = engine.ledger_ctx();
+    Money::atomic(&ctx, |tx| async move {
+        tx.mint_idempotent(
+            "USD",
+            user,
+            50_00,
+            "deposit".to_string(),
+            "order-789".to_string(),
+        )
+        .await?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+
+    let original = engine
+        .ledger()
+        .get_transaction_by_idempotency_key("order-789")
+        .await
+        .unwrap();
+
+    let result = Money::atomic(&ctx, |tx| async move {
+        tx.mint_idempotent(
+            "USD",
+            user,
+            50_00,
+            "deposit retry".to_string(),
+            "order-789".to_string(),
+        )
+        .await?;
+        Ok(())
+    })
+    .await;
+
+    match result {
+        Err(MoneyError::DuplicateIdempotencyKey(id)) => {
+            assert_eq!(
+                id, original.id,
+                "error should reference the original transaction, not a phantom one"
+            );
+        }
+        other => panic!("expected DuplicateIdempotencyKey, got {other:?}"),
+    }
+}
+
+/// `get_transaction(id)` used to query a `assets` table that doesn't exist
+/// (should have been `ledger_assets`, as every other query in the adapter
+/// correctly uses) — it failed unconditionally. Never previously covered;
+/// only `get_transactions_for_owner` had a test.
+#[tokio::test]
+async fn test_get_transaction_by_id() {
+    let (_resource, engine, user) = setup().await;
+    create_usd_asset(&engine.ledger()).await;
+
+    let ctx = engine.ledger_ctx();
+    Money::atomic(&ctx, |tx| async move {
+        tx.mint_idempotent(
+            "USD",
+            user,
+            25_00,
+            "deposit".to_string(),
+            "lookup-1".to_string(),
+        )
+        .await?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+
+    let by_key = engine
+        .ledger()
+        .get_transaction_by_idempotency_key("lookup-1")
+        .await
+        .unwrap();
+
+    let by_id = engine.ledger().get_transaction(by_key.id).await.unwrap();
+    assert_eq!(by_id.id, by_key.id);
+    assert_eq!(by_id.code, "USD");
+    assert_eq!(by_id.minted_amount, 25_00);
+}
+
+// ── Asset decimal conversion ──────────────────────────────────────────────────
+
+/// `to_internal` used to truncate `display_amount * 10^decimals` straight to
+/// `u64` — for values where that multiplication isn't exactly representable in
+/// f64 (e.g. `19.99 * 100 == 1998.9999999999998`), truncation silently lost a
+/// cent. It must round to the nearest integer instead.
+#[tokio::test]
+async fn test_asset_to_internal_rounds_against_float_error() {
+    let usd = Asset::new("USD", 10_00, 2);
+    assert_eq!(usd.to_internal(19.99), 1999);
+    assert_eq!(usd.to_internal(0.29), 29);
+    assert_eq!(usd.to_internal(100.50), 10050);
+}
