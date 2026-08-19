@@ -755,6 +755,35 @@ impl PostgresAdapter {
         query
     }
 
+    /// Resolves the effective sort column for an edge query: an explicit `sort_asc`/
+    /// `sort_desc` filter wins, otherwise defaults to `created_at` descending
+    /// (newest first) — matching `idx_object_edges_{from,to}_covering`, which are
+    /// keyed exactly `({from,to}, type, created_at DESC)`, so this is servable
+    /// straight from an index without a separate sort step.
+    ///
+    /// Returns `(alias-qualified expr for the outer "e" table, bare expr for a
+    /// same-table subquery with no alias, ascending)`. Only the first sort filter
+    /// is honored — multi-column edge sort isn't supported, since the cursor
+    /// row-comparison below only keys on one sort column plus the from/to tiebreak.
+    fn resolve_edge_sort(filters: &[QueryFilter]) -> (String, String, bool) {
+        match filters.iter().find(|f| f.mode.as_sort().is_some()) {
+            Some(f) if matches!(f.field.name, "created_at" | "updated_at") => (
+                format!("e.{}", f.field.name),
+                f.field.name.to_string(),
+                f.mode.as_sort().unwrap().ascending,
+            ),
+            Some(f) => {
+                let t = Self::index_type_str(&f.value);
+                (
+                    format!("(e.index_meta->>'{}')::{}", f.field.name, t),
+                    format!("(index_meta->>'{}')::{}", f.field.name, t),
+                    f.mode.as_sort().unwrap().ascending,
+                )
+            }
+            None => ("e.created_at".to_string(), "created_at".to_string(), false),
+        }
+    }
+
     pub(super) fn build_edge_query_conditions(
         filters: &[QueryFilter],
         cursor: Option<Cursor>,
@@ -765,9 +794,9 @@ impl PostgresAdapter {
             TraversalDirection::Forward => r#"e."from""#,
             TraversalDirection::Reverse => r#"e."to""#,
         };
-        let cursor_col = match direction {
-            TraversalDirection::Forward => r#"e."to""#,
-            TraversalDirection::Reverse => r#"e."from""#,
+        let (cursor_col, cursor_col_bare, anchor_col_bare) = match direction {
+            TraversalDirection::Forward => (r#"e."to""#, r#""to""#, r#""from""#),
+            TraversalDirection::Reverse => (r#"e."from""#, r#""from""#, r#""to""#),
         };
 
         let mut conditions: Vec<(String, &str)> = vec![
@@ -777,7 +806,22 @@ impl PostgresAdapter {
         let mut param_idx = 3;
 
         if cursor.is_some() {
-            conditions.push((format!("{} < ${}", cursor_col, param_idx), "AND"));
+            // Keyset boundary tied to whatever `resolve_edge_sort` will also use for
+            // the ORDER BY (built separately by the caller, e.g. `query_edges_internal`)
+            // — `from`/`to` alone isn't ordered by anything meaningful, so comparing
+            // only that column (the old behavior) let Postgres return rows in whatever
+            // order it liked, which could replay rows an earlier page already returned.
+            // `Cursor` only carries the edge's `from`/`to` id, not its sort-column
+            // value, so that value is looked up here via a same-table subquery — cheap,
+            // since `(type, from, to)` is the table's primary key.
+            let (sort_outer, sort_inner, ascending) = Self::resolve_edge_sort(filters);
+            let cmp = if ascending { ">" } else { "<" };
+            conditions.push((
+                format!(
+                    "({sort_outer}, {cursor_col}) {cmp} (SELECT {sort_inner}, {cursor_col_bare} FROM object_edges WHERE type = $1 AND {anchor_col_bare} = $2 AND {cursor_col_bare} = ${param_idx})"
+                ),
+                "AND",
+            ));
             param_idx += 1;
         }
 
@@ -795,7 +839,9 @@ impl PostgresAdapter {
     }
 
     pub(super) fn build_edge_order_clause(filters: &[QueryFilter]) -> String {
-        Self::build_order_clause_aliased(filters, "e", true)
+        let (sort_outer, _, ascending) = Self::resolve_edge_sort(filters);
+        let dir = if ascending { "ASC" } else { "DESC" };
+        format!("ORDER BY {sort_outer} {dir}")
     }
 
     pub(super) fn build_order_clause_aliased(
@@ -1323,8 +1369,23 @@ impl PostgresAdapter {
         plan: EdgeQuery,
         direction: TraversalDirection,
     ) -> Result<Vec<EdgeRecord>, Error> {
-        let where_clause = Self::build_edge_query_conditions(&plan.filters, plan.cursor, direction);
-        let order_clause = Self::build_edge_order_clause(&plan.filters);
+        let where_clause =
+            Self::build_edge_query_conditions(&plan.filters, plan.cursor, direction.clone());
+
+        // Tie-break on the edge's own identity column (`from`/`to`, unique within
+        // this pivot's edge set once type + anchor are fixed) so ties in the sort
+        // column — e.g. several edges created in the same transaction — still
+        // produce a total order matching the cursor row-comparison built by
+        // `build_edge_query_conditions` above. `build_edge_order_clause` doesn't
+        // add this tiebreak since it's shared by batch/traversal call sites that
+        // never paginate a single pivot with a cursor.
+        let (sort_outer, _, ascending) = Self::resolve_edge_sort(&plan.filters);
+        let cursor_col = match direction {
+            TraversalDirection::Forward => r#"e."to""#,
+            TraversalDirection::Reverse => r#"e."from""#,
+        };
+        let dir = if ascending { "ASC" } else { "DESC" };
+        let order_clause = format!("ORDER BY {sort_outer} {dir}, {cursor_col} {dir}");
 
         let mut sql = format!(
             r#"

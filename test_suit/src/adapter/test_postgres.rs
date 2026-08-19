@@ -1722,6 +1722,85 @@ async fn test_query_edges_forward_and_reverse() {
     );
 }
 
+/// Regression test for a bug where `EdgeQuery::with_cursor` filtered on the raw
+/// `from`/`to` column with no `ORDER BY` tying the two together, so pagination
+/// order was whatever Postgres felt like returning — which, for a freshly
+/// inserted small table, ordinarily lines up with insertion (`created_at`)
+/// order by coincidence, silently masking the bug in exactly this kind of
+/// test. This one deliberately breaks that coincidence: the follower with the
+/// numerically largest id gets its edge created *first* (so it's
+/// chronologically oldest despite having the largest id), which fails under
+/// the old id-based cursor and passes under the fixed created_at-based one.
+#[tokio::test]
+async fn test_query_reverse_edges_cursor_orders_by_created_at_not_by_id() {
+    let (_r, pool) = setup_test_db().await;
+    let adapter = PostgresAdapter::from_pool(pool);
+    adapter.init_schema().await.unwrap();
+    let engine = Engine::new(Box::new(adapter));
+
+    let mut target = User::default();
+    target.username = "cursor_order_target".into();
+    target.email = "cursor_order_target@x.com".into();
+    engine.create_object(&target).await.unwrap();
+
+    let mut followers = Vec::new();
+    for i in 0..3 {
+        let mut u = User::default();
+        u.username = format!("cursor_order_follower{i}");
+        u.email = format!("cursor_order_follower{i}@x.com");
+        engine.create_object(&u).await.unwrap();
+        followers.push(u.id());
+    }
+
+    let max_id_follower = *followers.iter().max().unwrap();
+    let mut creation_order = vec![max_id_follower];
+    creation_order.extend(followers.iter().copied().filter(|id| *id != max_id_follower));
+
+    for follower_id in &creation_order {
+        engine
+            .create_edge(&Follow {
+                _meta: EdgeMeta::new(*follower_id, target.id()),
+                notification: true,
+            })
+            .await
+            .unwrap();
+    }
+
+    // Walk every page (limit 1, so each page boundary exercises the cursor)
+    // and record `from` in the order returned.
+    let mut visited = Vec::new();
+    let mut cursor: Option<uuid::Uuid> = None;
+    loop {
+        let mut q = EdgeQuery::default().with_limit(1);
+        if let Some(c) = cursor {
+            q = q.with_cursor(c);
+        }
+        let page: Vec<Follow> = engine.query_reverse_edges(target.id(), q).await.unwrap();
+        let Some(edge) = page.into_iter().next() else {
+            break;
+        };
+        let from = edge.from();
+        assert!(
+            !visited.contains(&from),
+            "follower {from:?} was returned on more than one page"
+        );
+        visited.push(from);
+        cursor = Some(from);
+        assert!(
+            visited.len() <= 3,
+            "pagination did not terminate after visiting every follower"
+        );
+    }
+
+    let mut expected_newest_first = creation_order.clone();
+    expected_newest_first.reverse();
+    assert_eq!(
+        visited, expected_newest_first,
+        "default (no explicit sort) cursor pagination should walk edges newest-created-first, \
+         not in id order"
+    );
+}
+
 #[tokio::test]
 async fn test_edge_filter_on_edge_query_context() {
     let (_r, pool) = setup_test_db().await;
