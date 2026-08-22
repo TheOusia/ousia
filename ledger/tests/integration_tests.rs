@@ -1294,3 +1294,289 @@ async fn test_asset_to_internal_rounds_against_float_error() {
     assert_eq!(usd.to_internal(19.99), 1999);
     assert_eq!(usd.to_internal(0.29), 29);
 }
+
+// ── Account registry ─────────────────────────────────────────────────────
+
+mod account_registry {
+    use super::{create_usd_asset, setup};
+    use ousia_ledger::{Account, AccountQuery, Money};
+    use uuid::Uuid;
+
+    /// The registry is descriptive, not a gate. Money must move for an
+    /// owner nobody ever registered — every balance that existed before
+    /// the registry did depends on this.
+    #[tokio::test]
+    async fn an_unregistered_owner_still_holds_and_moves_money() {
+        let (system, ctx, user) = setup();
+        let _ = create_usd_asset(&system).await;
+
+        Money::atomic(&ctx, |tx| async move {
+            tx.mint("USD", user, 100_00, "deposit".to_string()).await
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(ctx.balance("USD", user).await.unwrap().available, 100_00);
+        assert!(
+            ctx.account(user).await.unwrap().is_none(),
+            "an unregistered owner simply has no description"
+        );
+    }
+
+    #[tokio::test]
+    async fn register_then_resolve_by_owner_and_by_key() {
+        let (_system, ctx, _user) = setup();
+        let owner = Uuid::now_v7();
+
+        let registered = ctx
+            .register_account(&Account::new(
+                owner,
+                "partner:fastlink",
+                "Fast Link",
+                "partner",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(registered.owner, owner);
+        assert!(!registered.is_archived());
+
+        assert_eq!(ctx.account(owner).await.unwrap().unwrap().key, "partner:fastlink");
+        assert_eq!(
+            ctx.account_by_key("partner:fastlink")
+                .await
+                .unwrap()
+                .unwrap()
+                .owner,
+            owner
+        );
+        assert!(ctx.account_by_key("partner:nobody").await.unwrap().is_none());
+    }
+
+    /// Registration runs at every application start, so it has to be a
+    /// true upsert — and must not keep resetting the account's age.
+    #[tokio::test]
+    async fn re_registering_updates_in_place_and_keeps_created_at() {
+        let (_system, ctx, _user) = setup();
+        let owner = Uuid::now_v7();
+
+        let first = ctx
+            .register_account(&Account::new(owner, "partner:fastlink", "Fastlink", "partner"))
+            .await
+            .unwrap();
+
+        let second = ctx
+            .register_account(
+                &Account::new(owner, "partner:fastlink", "Fast Link NG", "partner")
+                    .with_metadata(serde_json::json!({ "account_ref": "MG-4471" })),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(second.label, "Fast Link NG");
+        assert_eq!(second.metadata["account_ref"], "MG-4471");
+        assert_eq!(second.created_at, first.created_at);
+        assert_eq!(ctx.accounts(&AccountQuery::new()).await.unwrap().len(), 1);
+    }
+
+    /// One key, one account, for the life of the ledger — otherwise the
+    /// key is worthless as a durable identity.
+    #[tokio::test]
+    async fn a_key_cannot_be_stolen_by_another_owner() {
+        let (_system, ctx, _user) = setup();
+
+        ctx.register_account(&Account::new(
+            Uuid::now_v7(),
+            "mealgro-platform",
+            "Platform",
+            "system",
+        ))
+        .await
+        .unwrap();
+
+        let clash = ctx
+            .register_account(&Account::new(
+                Uuid::now_v7(),
+                "mealgro-platform",
+                "Platform (copy)",
+                "system",
+            ))
+            .await;
+
+        assert!(clash.is_err(), "a second owner must not claim a live key");
+    }
+
+    #[tokio::test]
+    async fn listing_filters_by_kind_and_hides_archived_by_default() {
+        let (_system, ctx, _user) = setup();
+        let platform = Uuid::now_v7();
+        let partner_a = Uuid::now_v7();
+        let partner_b = Uuid::now_v7();
+
+        ctx.register_account(&Account::new(platform, "mealgro-platform", "Platform", "system"))
+            .await
+            .unwrap();
+        ctx.register_account(&Account::new(partner_a, "partner:a", "A", "partner"))
+            .await
+            .unwrap();
+        ctx.register_account(&Account::new(partner_b, "partner:b", "B", "partner"))
+            .await
+            .unwrap();
+
+        assert_eq!(ctx.accounts(&AccountQuery::new()).await.unwrap().len(), 3);
+        assert_eq!(
+            ctx.accounts(&AccountQuery::new().of_kind("partner"))
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
+
+        ctx.archive_account(partner_b).await.unwrap();
+        assert_eq!(
+            ctx.accounts(&AccountQuery::new().of_kind("partner"))
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            ctx.accounts(&AccountQuery::new().of_kind("partner").including_archived())
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
+
+        // Archiving never hides an account from a direct lookup — a
+        // retired account's money still has to be explainable.
+        assert!(ctx.account(partner_b).await.unwrap().unwrap().is_archived());
+        assert!(ctx.account_by_key("partner:b").await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn archive_and_unarchive_are_idempotent() {
+        let (_system, ctx, _user) = setup();
+        let owner = Uuid::now_v7();
+        ctx.register_account(&Account::new(owner, "partner:a", "A", "partner"))
+            .await
+            .unwrap();
+
+        ctx.archive_account(owner).await.unwrap();
+        let first = ctx.account(owner).await.unwrap().unwrap().archived_at;
+        ctx.archive_account(owner).await.unwrap();
+        assert_eq!(
+            ctx.account(owner).await.unwrap().unwrap().archived_at,
+            first,
+            "re-archiving must not move the retirement date"
+        );
+
+        ctx.unarchive_account(owner).await.unwrap();
+        ctx.unarchive_account(owner).await.unwrap();
+        assert!(!ctx.account(owner).await.unwrap().unwrap().is_archived());
+    }
+
+    /// A boot-time re-register must not silently resurrect an account
+    /// someone deliberately retired.
+    #[tokio::test]
+    async fn re_registering_does_not_resurrect_an_archived_account() {
+        let (_system, ctx, _user) = setup();
+        let owner = Uuid::now_v7();
+        ctx.register_account(&Account::new(owner, "partner:a", "A", "partner"))
+            .await
+            .unwrap();
+        ctx.archive_account(owner).await.unwrap();
+
+        ctx.register_account(&Account::new(owner, "partner:a", "A", "partner"))
+            .await
+            .unwrap();
+
+        assert!(ctx.account(owner).await.unwrap().unwrap().is_archived());
+    }
+
+    /// The listing this whole type exists for: every internal account and
+    /// what it holds, in one call. Impossible before — every ledger read
+    /// was keyed *by* owner, so there was no way to enumerate owners.
+    #[tokio::test]
+    async fn account_balances_lists_accounts_with_their_money() {
+        let (system, ctx, _user) = setup();
+        let _ = create_usd_asset(&system).await;
+
+        let partner_a = Uuid::now_v7();
+        let partner_b = Uuid::now_v7();
+        ctx.register_account(&Account::new(partner_a, "partner:a", "A", "partner"))
+            .await
+            .unwrap();
+        ctx.register_account(&Account::new(partner_b, "partner:b", "B", "partner"))
+            .await
+            .unwrap();
+
+        Money::atomic(&ctx, |tx| async move {
+            tx.mint("USD", partner_a, 700_00, "owed".to_string()).await
+        })
+        .await
+        .unwrap();
+
+        let listed = ctx
+            .account_balances("USD", &AccountQuery::new().of_kind("partner"))
+            .await
+            .unwrap();
+
+        assert_eq!(listed.len(), 2, "an account with no money is still an account");
+
+        let a = listed.iter().find(|r| r.account.owner == partner_a).unwrap();
+        let b = listed.iter().find(|r| r.account.owner == partner_b).unwrap();
+        assert_eq!(a.balance.available, 700_00);
+        assert_eq!(b.balance.available, 0);
+    }
+
+    #[tokio::test]
+    async fn account_balances_reports_reserved_separately() {
+        let (system, ctx, _user) = setup();
+        let _ = create_usd_asset(&system).await;
+        let partner = Uuid::now_v7();
+        let payout = Uuid::now_v7();
+        ctx.register_account(&Account::new(partner, "partner:a", "A", "partner"))
+            .await
+            .unwrap();
+
+        Money::atomic(&ctx, |tx| async move {
+            tx.mint("USD", partner, 700_00, "owed".to_string()).await?;
+            tx.reserve("USD", partner, payout, 200_00, "payout".to_string())
+                .await
+        })
+        .await
+        .unwrap();
+
+        let listed = ctx
+            .account_balances("USD", &AccountQuery::new().of_kind("partner"))
+            .await
+            .unwrap();
+        let a = &listed[0];
+        assert_eq!(a.balance.available, 500_00);
+        assert_eq!(a.balance.total, 500_00);
+    }
+
+    #[tokio::test]
+    async fn listing_paginates() {
+        let (_system, ctx, _user) = setup();
+        for i in 0..5 {
+            ctx.register_account(&Account::new(
+                Uuid::now_v7(),
+                format!("partner:{i}"),
+                format!("Partner {i}"),
+                "partner",
+            ))
+            .await
+            .unwrap();
+        }
+
+        assert_eq!(ctx.accounts(&AccountQuery::new().limit(2)).await.unwrap().len(), 2);
+        assert_eq!(
+            ctx.accounts(&AccountQuery::new().limit(2).offset(4))
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+}

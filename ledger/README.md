@@ -18,6 +18,7 @@ Designed to be used standalone or embedded in [Ousia](../README.md) via the `led
 - [Payment Splits](#payment-splits)
 - [Reserve (Escrow)](#reserve-escrow)
 - [Balances](#balances)
+- [Accounts](#accounts)
 - [Transactions](#transactions)
 - [Value Objects and Fragmentation](#value-objects-and-fragmentation)
 - [Error Handling](#error-handling)
@@ -298,6 +299,72 @@ Money::atomic(&ctx, |tx| async move {
     Ok(())
 }).await?;
 ```
+
+---
+
+## Accounts
+
+A balance here is an aggregate over value objects grouped by `owner` — no
+row anywhere *is* an account. That works while every owner id is a row in
+some table you can look up, and stops working the moment you need to:
+
+- **list** internal accounts and their balances — every other read is keyed
+  *by* owner, so there is no way to enumerate owners at all;
+- explain an owner id you found in a transaction log;
+- track balances for accounts created dynamically (one per partner,
+  per tenant, per fee bucket) rather than a fixed hard-coded set.
+
+`Account` is a **descriptive** record for an owner id. It is optional:
+registration is not required to hold or move money, there is no foreign key
+from value objects to it, and every balance that existed before this table
+keeps working untouched.
+
+```rust
+use ousia_ledger::{Account, AccountQuery};
+
+// Idempotent — call it at start-up, next to asset registration.
+ctx.register_account(
+    &Account::new(partner_id, "partner:fastlink", "Fast Link", "partner")
+        .with_metadata(serde_json::json!({ "account_ref": "MG-4471" })),
+).await?;
+
+// Resolve either way.
+let a = ctx.account(partner_id).await?;
+let b = ctx.account_by_key("partner:fastlink").await?;
+
+// Enumerate — impossible before this table existed.
+let partners = ctx.accounts(&AccountQuery::new().of_kind("partner")).await?;
+
+// Accounts *with* their balances, one round trip. An account holding
+// nothing still appears, with zero.
+for row in ctx.account_balances("USD", &AccountQuery::new().of_kind("partner")).await? {
+    println!("{:<24} {}", row.account.label, row.balance.available);
+}
+```
+
+**`key` is the durable identity.** `owner` is usually another table's
+primary key; if that row is lost, the uuid alone says nothing and the
+balance is unattributable. `key` is a stable, human-meaningful string that
+identifies the account independently of any other table. Pick it from
+something that does not change.
+
+**Nothing is ever deleted.** An account that is finished is archived, not
+removed — a row that has ever held money stays readable forever, because
+the point is to still be able to explain a balance long after whatever
+created it is gone. Archived accounts drop out of `accounts()` unless you
+ask for them, and always resolve through a direct lookup.
+
+```rust
+ctx.archive_account(partner_id).await?;
+ctx.accounts(&AccountQuery::new().including_archived()).await?;
+ctx.unarchive_account(partner_id).await?;
+```
+
+`kind` is free-form and the ledger never interprets it; it exists so
+listings can be filtered. Registering *every* owner is usually the wrong
+instinct — users and other first-class entities already have tables
+describing them. The registry earns its keep for accounts that have no
+other home.
 
 ---
 

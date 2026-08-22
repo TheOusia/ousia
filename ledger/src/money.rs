@@ -1,5 +1,8 @@
 // ledger/src/money.rs
-use super::{Balance, Holding, LedgerAdapter, MoneyError, Transaction};
+use super::{
+    Account, AccountBalance, AccountQuery, Balance, Holding, LedgerAdapter, MoneyError,
+    Transaction,
+};
 use chrono::{DateTime, Utc};
 use metrics::{counter, histogram};
 use std::sync::{Arc, Mutex};
@@ -150,6 +153,55 @@ impl LedgerContext {
     ) -> Result<Vec<Transaction>, MoneyError> {
         let asset = self.adapter.get_asset(asset_code).await?;
         self.adapter.get_transactions_for_asset(asset.id, timespan).await
+    }
+
+    // ------------------------------------------------------------------ //
+    //  Account registry                                                   //
+    // ------------------------------------------------------------------ //
+
+    /// Describe a ledger owner id — see [`Account`]. Idempotent, so the
+    /// natural place to call this is application start-up, next to asset
+    /// registration.
+    ///
+    /// Registration is optional and purely descriptive: an unregistered
+    /// owner holds and moves money exactly the same way. What it buys is
+    /// the ability to *find* an account without already knowing its uuid.
+    pub async fn register_account(&self, account: &Account) -> Result<Account, MoneyError> {
+        self.adapter.register_account(account).await
+    }
+
+    pub async fn account(&self, owner: Uuid) -> Result<Option<Account>, MoneyError> {
+        self.adapter.get_account(owner).await
+    }
+
+    /// Resolve by stable key. The lookup that still works after whatever
+    /// table `owner` came from is gone.
+    pub async fn account_by_key(&self, key: &str) -> Result<Option<Account>, MoneyError> {
+        self.adapter.get_account_by_key(key).await
+    }
+
+    pub async fn accounts(&self, query: &AccountQuery) -> Result<Vec<Account>, MoneyError> {
+        self.adapter.list_accounts(query).await
+    }
+
+    /// Registered accounts with their balance in `asset_code`, in one
+    /// round trip — the internal-accounts listing.
+    pub async fn account_balances(
+        &self,
+        asset_code: &str,
+        query: &AccountQuery,
+    ) -> Result<Vec<AccountBalance>, MoneyError> {
+        let asset = self.adapter.get_asset(asset_code).await?;
+        self.adapter.list_account_balances(asset.id, query).await
+    }
+
+    /// Retire an account. There is no delete — see [`Account`].
+    pub async fn archive_account(&self, owner: Uuid) -> Result<(), MoneyError> {
+        self.adapter.archive_account(owner).await
+    }
+
+    pub async fn unarchive_account(&self, owner: Uuid) -> Result<(), MoneyError> {
+        self.adapter.unarchive_account(owner).await
     }
 }
 

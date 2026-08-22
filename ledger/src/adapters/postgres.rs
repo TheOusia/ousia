@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
 use crate::{
-    Asset, Balance, ExecutionPlan, Holding, LedgerAdapter, MoneyError, Operation, Transaction,
-    ValueObject,
+    Account, AccountBalance, AccountQuery, Asset, Balance, ExecutionPlan, Holding, LedgerAdapter,
+    MoneyError, Operation, Transaction, ValueObject,
 };
 use chrono::{DateTime, Utc};
 use sqlx::Row;
@@ -38,6 +38,69 @@ where
             .begin()
             .await
             .map_err(|e| MoneyError::Storage(e.to_string()))?;
+
+        // Which schema the ledger's tables live in is a deployment
+        // decision, read off the connection's own `search_path` rather
+        // than passed in — see `resolve_target_schema`. Created here so a
+        // deployment pointing at a fresh schema works on first boot.
+        let schema = resolve_target_schema(&mut tx).await?;
+        sqlx::query(&format!(
+            r#"CREATE SCHEMA IF NOT EXISTS "{}""#,
+            quote_ident(&schema)
+        ))
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| MoneyError::Storage(e.to_string()))?;
+
+        // Unqualified DDL below lands in `schema`: Postgres creates into
+        // the first entry on the path regardless of what exists further
+        // along it. `public` stays behind it so extensions installed
+        // there keep resolving.
+        sqlx::query(&format!(
+            r#"SET LOCAL search_path TO "{}", public"#,
+            quote_ident(&schema)
+        ))
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| MoneyError::Storage(e.to_string()))?;
+
+        // Accounts registry — descriptive metadata for ledger owner ids.
+        // Deliberately *not* referenced by a foreign key from
+        // `ledger_value_objects`: registration is optional and every
+        // balance that predates this table must keep working. See
+        // `crate::account::Account`.
+        //
+        // `key` is UNIQUE because it is the account's durable identity —
+        // the handle that still resolves when whatever row `owner` came
+        // from has been lost. There is no DELETE path; `archived_at`
+        // retires an account while keeping it readable forever.
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS ledger_accounts (
+                owner       UUID PRIMARY KEY,
+                key         TEXT NOT NULL UNIQUE,
+                label       TEXT NOT NULL,
+                kind        TEXT NOT NULL,
+                metadata    JSONB NOT NULL DEFAULT '{}'::jsonb,
+                created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                archived_at TIMESTAMPTZ
+            )
+            "#,
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| MoneyError::Storage(e.to_string()))?;
+
+        sqlx::query(
+            r#"
+            CREATE INDEX IF NOT EXISTS idx_ledger_accounts_kind
+            ON ledger_accounts(kind, created_at DESC)
+            "#,
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| MoneyError::Storage(e.to_string()))?;
 
         // Assets table
         sqlx::query(
@@ -1171,5 +1234,305 @@ where
         }
 
         Ok(transactions)
+    }
+
+    // ------------------------------------------------------------------ //
+    //  Account registry                                                   //
+    // ------------------------------------------------------------------ //
+
+    async fn register_account(&self, account: &Account) -> Result<Account, MoneyError> {
+        // Upsert on `owner`. `created_at` is taken from the existing row on
+        // conflict so re-registering on every boot doesn't keep resetting
+        // an account's age. The `key` UNIQUE constraint does the rest: if
+        // this key already belongs to a *different* owner the insert fails,
+        // which is the intended outcome — one key, one account, forever.
+        let row = sqlx::query(
+            r#"
+            INSERT INTO ledger_accounts (owner, key, label, kind, metadata, created_at, updated_at, archived_at)
+            VALUES ($1, $2, $3, $4, $5, NOW(), NOW(), NULL)
+            ON CONFLICT (owner) DO UPDATE SET
+                key        = EXCLUDED.key,
+                label      = EXCLUDED.label,
+                kind       = EXCLUDED.kind,
+                metadata   = EXCLUDED.metadata,
+                updated_at = NOW()
+            RETURNING owner, key, label, kind, metadata, created_at, updated_at, archived_at
+            "#,
+        )
+        .bind(account.owner)
+        .bind(&account.key)
+        .bind(&account.label)
+        .bind(&account.kind)
+        .bind(&account.metadata)
+        .fetch_one(&self.get_pool())
+        .await
+        .map_err(|e| MoneyError::Storage(e.to_string()))?;
+
+        account_from_row(&row)
+    }
+
+    async fn get_account(&self, owner: Uuid) -> Result<Option<Account>, MoneyError> {
+        let row = sqlx::query(
+            r#"
+            SELECT owner, key, label, kind, metadata, created_at, updated_at, archived_at
+            FROM ledger_accounts WHERE owner = $1
+            "#,
+        )
+        .bind(owner)
+        .fetch_optional(&self.get_pool())
+        .await
+        .map_err(|e| MoneyError::Storage(e.to_string()))?;
+
+        row.as_ref().map(account_from_row).transpose()
+    }
+
+    async fn get_account_by_key(&self, key: &str) -> Result<Option<Account>, MoneyError> {
+        let row = sqlx::query(
+            r#"
+            SELECT owner, key, label, kind, metadata, created_at, updated_at, archived_at
+            FROM ledger_accounts WHERE key = $1
+            "#,
+        )
+        .bind(key)
+        .fetch_optional(&self.get_pool())
+        .await
+        .map_err(|e| MoneyError::Storage(e.to_string()))?;
+
+        row.as_ref().map(account_from_row).transpose()
+    }
+
+    async fn list_accounts(&self, query: &AccountQuery) -> Result<Vec<Account>, MoneyError> {
+        // `$1 IS NULL OR kind = $1` keeps this one prepared statement
+        // instead of concatenating a WHERE clause per filter combination.
+        let rows = sqlx::query(
+            r#"
+            SELECT owner, key, label, kind, metadata, created_at, updated_at, archived_at
+            FROM ledger_accounts
+            WHERE ($1::TEXT IS NULL OR kind = $1)
+              AND ($2::BOOL OR archived_at IS NULL)
+            ORDER BY created_at DESC, owner
+            LIMIT $3 OFFSET $4
+            "#,
+        )
+        .bind(query.kind.as_deref())
+        .bind(query.include_archived)
+        .bind(query.effective_limit())
+        .bind(query.effective_offset())
+        .fetch_all(&self.get_pool())
+        .await
+        .map_err(|e| MoneyError::Storage(e.to_string()))?;
+
+        rows.iter().map(account_from_row).collect()
+    }
+
+    async fn list_account_balances(
+        &self,
+        asset_id: Uuid,
+        query: &AccountQuery,
+    ) -> Result<Vec<AccountBalance>, MoneyError> {
+        // LEFT JOIN, not JOIN: a registered account with no value objects
+        // yet is a real account with a zero balance, and dropping it from
+        // an internal-accounts listing would be the wrong answer.
+        let rows = sqlx::query(
+            r#"
+            SELECT
+                a.owner, a.key, a.label, a.kind, a.metadata,
+                a.created_at, a.updated_at, a.archived_at,
+                COALESCE(SUM(vo.amount) FILTER (WHERE vo.state = 'alive'), 0)::BIGINT    AS alive_sum,
+                COALESCE(SUM(vo.amount) FILTER (WHERE vo.state = 'reserved'), 0)::BIGINT AS reserved_sum
+            FROM ledger_accounts a
+            LEFT JOIN ledger_value_objects vo
+                   ON vo.owner = a.owner AND vo.asset = $1
+            WHERE ($2::TEXT IS NULL OR a.kind = $2)
+              AND ($3::BOOL OR a.archived_at IS NULL)
+            GROUP BY a.owner, a.key, a.label, a.kind, a.metadata,
+                     a.created_at, a.updated_at, a.archived_at
+            ORDER BY a.created_at DESC, a.owner
+            LIMIT $4 OFFSET $5
+            "#,
+        )
+        .bind(asset_id)
+        .bind(query.kind.as_deref())
+        .bind(query.include_archived)
+        .bind(query.effective_limit())
+        .bind(query.effective_offset())
+        .fetch_all(&self.get_pool())
+        .await
+        .map_err(|e| MoneyError::Storage(e.to_string()))?;
+
+        let mut out = Vec::with_capacity(rows.len());
+        for row in &rows {
+            let account = account_from_row(row)?;
+            let alive = row
+                .try_get::<i64, _>("alive_sum")
+                .map_err(|e| MoneyError::Storage(e.to_string()))? as u64;
+            let reserved = row
+                .try_get::<i64, _>("reserved_sum")
+                .map_err(|e| MoneyError::Storage(e.to_string()))? as u64;
+            let balance = Balance::from_value_objects(account.owner, asset_id, alive, reserved);
+            out.push(AccountBalance { account, balance });
+        }
+
+        Ok(out)
+    }
+
+    async fn archive_account(&self, owner: Uuid) -> Result<(), MoneyError> {
+        // `WHERE archived_at IS NULL` makes a repeat call a no-op rather
+        // than moving the retirement date forward.
+        sqlx::query(
+            "UPDATE ledger_accounts SET archived_at = NOW(), updated_at = NOW() \
+             WHERE owner = $1 AND archived_at IS NULL",
+        )
+        .bind(owner)
+        .execute(&self.get_pool())
+        .await
+        .map_err(|e| MoneyError::Storage(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn unarchive_account(&self, owner: Uuid) -> Result<(), MoneyError> {
+        sqlx::query(
+            "UPDATE ledger_accounts SET archived_at = NULL, updated_at = NOW() \
+             WHERE owner = $1 AND archived_at IS NOT NULL",
+        )
+        .bind(owner)
+        .execute(&self.get_pool())
+        .await
+        .map_err(|e| MoneyError::Storage(e.to_string()))?;
+        Ok(())
+    }
+}
+
+fn account_from_row(row: &sqlx::postgres::PgRow) -> Result<Account, MoneyError> {
+    Ok(Account {
+        owner: row
+            .try_get("owner")
+            .map_err(|e| MoneyError::Storage(e.to_string()))?,
+        key: row
+            .try_get("key")
+            .map_err(|e| MoneyError::Storage(e.to_string()))?,
+        label: row
+            .try_get("label")
+            .map_err(|e| MoneyError::Storage(e.to_string()))?,
+        kind: row
+            .try_get("kind")
+            .map_err(|e| MoneyError::Storage(e.to_string()))?,
+        metadata: row
+            .try_get("metadata")
+            .map_err(|e| MoneyError::Storage(e.to_string()))?,
+        created_at: row
+            .try_get("created_at")
+            .map_err(|e| MoneyError::Storage(e.to_string()))?,
+        updated_at: row
+            .try_get("updated_at")
+            .map_err(|e| MoneyError::Storage(e.to_string()))?,
+        archived_at: row
+            .try_get("archived_at")
+            .map_err(|e| MoneyError::Storage(e.to_string()))?,
+    })
+}
+
+// ---------------------------------------------------------------------- //
+//  Schema resolution                                                      //
+// ---------------------------------------------------------------------- //
+
+/// Escape a Postgres identifier's embedded double quotes. The caller wraps
+/// the result in quotes itself.
+fn quote_ident(raw: &str) -> String {
+    raw.replace('"', "\"\"")
+}
+
+/// The schema this deployment's ledger tables belong in.
+///
+/// Read from the live connection's `search_path` rather than from an
+/// argument, so it is configured in the same place as the rest of the
+/// connection — the database URL. With libpq that is the `options`
+/// parameter:
+///
+/// ```text
+/// postgres://user:pw@host/db?options=-csearch_path%3Dmealgro
+/// ```
+///
+/// The first entry wins; `"$user"` is skipped (a per-role default, not a
+/// deployment's choice); an empty or unset path falls back to `public`, so
+/// a deployment that configures nothing keeps its tables exactly where
+/// they already are.
+///
+/// `current_schema()` is deliberately not used — it resolves to the first
+/// schema that already **exists**, which on a first boot is never the one
+/// about to be created.
+async fn resolve_target_schema(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+) -> Result<String, MoneyError> {
+    let raw: String = sqlx::query_scalar("SHOW search_path")
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(|e| MoneyError::Storage(e.to_string()))?;
+
+    Ok(first_search_path_entry(&raw).unwrap_or_else(|| "public".to_string()))
+}
+
+/// First usable schema name in a `SHOW search_path` result.
+///
+/// Postgres renders the path as a comma-separated list whose entries may
+/// be quoted (`"my schema"`, with `""` as an embedded quote). `$user` is
+/// skipped. `None` means nothing usable, which the caller reads as
+/// `public`.
+fn first_search_path_entry(raw: &str) -> Option<String> {
+    raw.split(',')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .map(|entry| {
+            match entry
+                .strip_prefix('"')
+                .and_then(|rest| rest.strip_suffix('"'))
+            {
+                Some(inner) => inner.replace("\"\"", "\""),
+                None => entry.to_string(),
+            }
+        })
+        .find(|entry| !entry.is_empty() && entry != "$user")
+}
+
+#[cfg(test)]
+mod schema_resolution_tests {
+    use super::first_search_path_entry;
+
+    #[test]
+    fn unset_path_falls_back_to_public_at_the_call_site() {
+        assert_eq!(first_search_path_entry(""), None);
+        assert_eq!(first_search_path_entry("\"$user\""), None);
+    }
+
+    #[test]
+    fn skips_the_per_role_placeholder() {
+        assert_eq!(
+            first_search_path_entry("\"$user\", public").as_deref(),
+            Some("public")
+        );
+    }
+
+    #[test]
+    fn takes_the_first_real_entry() {
+        assert_eq!(
+            first_search_path_entry("mealgro, public").as_deref(),
+            Some("mealgro")
+        );
+        assert_eq!(
+            first_search_path_entry("  tenant_a ,public").as_deref(),
+            Some("tenant_a")
+        );
+    }
+
+    #[test]
+    fn unquotes_and_unescapes() {
+        assert_eq!(
+            first_search_path_entry("\"my schema\", public").as_deref(),
+            Some("my schema")
+        );
+        assert_eq!(
+            first_search_path_entry("\"odd\"\"name\"").as_deref(),
+            Some("odd\"name")
+        );
     }
 }

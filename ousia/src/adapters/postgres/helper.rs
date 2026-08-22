@@ -498,7 +498,7 @@ impl PostgresAdapter {
         for (i, gf) in geo_filters.iter().enumerate() {
             let alias = format!("g{}", i);
             joins.push_str(&format!(
-                "JOIN public.object_geo {alias} ON {alias}.object_id = o.id\n",
+                "JOIN object_geo {alias} ON {alias}.object_id = o.id\n",
                 alias = alias
             ));
             plan.aliases.push((gf.field().to_string(), alias));
@@ -516,7 +516,7 @@ impl PostgresAdapter {
                 None => {
                     let a = "g_ord".to_string();
                     joins.push_str(&format!(
-                        "JOIN public.object_geo {alias} ON {alias}.object_id = o.id\n",
+                        "JOIN object_geo {alias} ON {alias}.object_id = o.id\n",
                         alias = a
                     ));
                     plan.order_alias = Some(a);

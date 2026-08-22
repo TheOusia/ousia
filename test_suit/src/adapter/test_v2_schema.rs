@@ -602,3 +602,295 @@ async fn v2_ledger_init_creates_per_asset_partitions() {
     let parts = relations_under(&pool, "ledger_value_objects").await;
     assert!(parts.contains(&"ledger_value_objects_eur".to_string()));
 }
+
+// ─────────────────────────────────────────────────────────────────────
+// Custom schema (search_path from the connection string)
+// ─────────────────────────────────────────────────────────────────────
+
+/// Boot a container and connect with `options=-csearch_path=<schema>` —
+/// the deployment-configured schema, expressed exactly the way a real
+/// `DATABASE_URL` would express it. The schema deliberately does **not**
+/// exist yet: creating it is what `init_schema` is being asked to do.
+async fn setup_test_db_with_schema(
+    schema: &str,
+) -> (testcontainers::ContainerAsync<Postgres>, sqlx::PgPool) {
+    use sqlx::postgres::PgPoolOptions;
+    use testcontainers::{ImageExt, runners::AsyncRunner as _};
+
+    let postgres = Postgres::default()
+        .with_password("postgres")
+        .with_user("postgres")
+        .with_db_name("postgres")
+        .with_name("imresamu/postgis")
+        .with_tag("16-3.6-alpine")
+        .start()
+        .await
+        .expect("Failed to start Postgres");
+
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+
+    let port = postgres.get_host_port_ipv4(5432).await.unwrap();
+    // `%3D` is the URL-encoded `=` libpq expects inside `options`.
+    let db_url = format!(
+        "postgres://postgres:postgres@localhost:{port}/postgres?options=-csearch_path%3D{schema}",
+    );
+
+    let pool = PgPoolOptions::new()
+        .max_connections(5)
+        .connect(&db_url)
+        .await
+        .expect("Failed to connect to Postgres");
+
+    (postgres, pool)
+}
+
+async fn relations_in_schema(pool: &sqlx::PgPool, schema: &str) -> Vec<String> {
+    sqlx::query_scalar::<_, String>(
+        "SELECT tablename FROM pg_tables WHERE schemaname = $1 ORDER BY tablename",
+    )
+    .bind(schema)
+    .fetch_all(pool)
+    .await
+    .unwrap()
+}
+
+/// The schema named on the connection string is created if missing, and
+/// every table lands in it rather than in `public`.
+#[tokio::test]
+async fn init_schema_creates_and_uses_the_connection_schema() {
+    let (_r, pool) = setup_test_db_with_schema("mealgro").await;
+    let adapter = PostgresAdapter::from_pool(pool.clone());
+    adapter.init_schema().await.unwrap();
+
+    let tables = relations_in_schema(&pool, "mealgro").await;
+    for expected in ["objects", "object_edges", "object_constraints", "object_geo", "sequences", "ousia_meta"] {
+        assert!(
+            tables.contains(&expected.to_string()),
+            "{expected} missing from the `mealgro` schema; got {tables:?}"
+        );
+    }
+
+    // And nothing of ours leaked into `public` — only PostGIS lives there.
+    let public_tables = relations_in_schema(&pool, "public").await;
+    assert!(
+        !public_tables.contains(&"objects".to_string()),
+        "objects must not be created in public when a schema is configured; got {public_tables:?}"
+    );
+}
+
+/// PostGIS installs into `public`, so a custom schema must not break geo
+/// columns — the `geography` type has to keep resolving.
+#[tokio::test]
+async fn custom_schema_still_resolves_postgis_types() {
+    let (_r, pool) = setup_test_db_with_schema("tenant_a").await;
+    let adapter = PostgresAdapter::from_pool(pool.clone());
+    adapter.init_schema().await.unwrap();
+
+    let tables = relations_in_schema(&pool, "tenant_a").await;
+    assert!(
+        tables.contains(&"object_geo".to_string()),
+        "object_geo (geography column) missing; got {tables:?}"
+    );
+}
+
+/// Round-trip through the engine on a custom schema — unqualified reads
+/// and writes must resolve to the configured schema, not to `public`.
+#[tokio::test]
+async fn objects_round_trip_on_a_custom_schema() {
+    use ousia::adapters::{Adapter as _, ObjectRecord};
+
+    let (_r, pool) = setup_test_db_with_schema("tenant_b").await;
+    let adapter = PostgresAdapter::from_pool(pool.clone());
+    adapter.init_schema().await.unwrap();
+
+    let mut user = User::default();
+    user.username = "schema-scoped".into();
+    user.email = "scoped@example.com".into();
+    adapter
+        .insert_object(ObjectRecord::from_object(&user))
+        .await
+        .unwrap();
+
+    let fetched = adapter.fetch_object(User::TYPE, user.id()).await.unwrap();
+    assert!(fetched.is_some(), "object written on a custom schema must read back");
+
+    let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tenant_b.objects")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(rows, 1, "the row must physically live in tenant_b");
+}
+
+/// A deployment that configures nothing keeps its tables exactly where
+/// they have always been.
+#[tokio::test]
+async fn no_configured_schema_still_means_public() {
+    let (_r, pool) = setup_test_db().await;
+    let adapter = PostgresAdapter::from_pool(pool.clone());
+    adapter.init_schema().await.unwrap();
+
+    let tables = relations_in_schema(&pool, "public").await;
+    assert!(
+        tables.contains(&"objects".to_string()),
+        "default deployments must keep using public; got {tables:?}"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Ledger account registry (real Postgres — the memory adapter cannot
+// validate the SQL, and every statement here is hand-written)
+// ─────────────────────────────────────────────────────────────────────
+
+/// Full registry round trip against Postgres: register, resolve both
+/// ways, re-register as an upsert, list with filters, and list with
+/// balances joined.
+#[tokio::test]
+async fn ledger_account_registry_round_trip_on_postgres() {
+    use ousia::ledger::adapters::postgres::PostgresSchemaLedgerAdapter;
+    use ousia::ledger::{Account, AccountQuery, Asset, Money};
+
+    let (_r, pool) = setup_test_db().await;
+    let adapter = PostgresAdapter::from_pool(pool.clone());
+    adapter.init_schema().await.unwrap();
+    adapter.init_ledger_schema(&["NGN"]).await.unwrap();
+
+    let engine = Engine::new(Box::new(adapter));
+    let ctx = engine.ledger_ctx();
+
+    engine
+        .ledger()
+        .create_asset(Asset::new("NGN", 100, 2))
+        .await
+        .unwrap();
+
+    let platform = uuid::Uuid::now_v7();
+    let partner_a = uuid::Uuid::now_v7();
+    let partner_b = uuid::Uuid::now_v7();
+
+    ctx.register_account(&Account::new(
+        platform,
+        "mealgro-platform",
+        "Mealgro Platform",
+        "system",
+    ))
+    .await
+    .unwrap();
+    ctx.register_account(
+        &Account::new(partner_a, "partner:fastlink", "Fast Link", "partner")
+            .with_metadata(serde_json::json!({ "account_ref": "MG-4471" })),
+    )
+    .await
+    .unwrap();
+    ctx.register_account(&Account::new(partner_b, "partner:swift", "Swift", "partner"))
+        .await
+        .unwrap();
+
+    // Resolve by owner and by the durable key.
+    assert_eq!(
+        ctx.account(partner_a).await.unwrap().unwrap().label,
+        "Fast Link"
+    );
+    let by_key = ctx.account_by_key("partner:fastlink").await.unwrap().unwrap();
+    assert_eq!(by_key.owner, partner_a);
+    assert_eq!(by_key.metadata["account_ref"], "MG-4471");
+    assert!(ctx.account_by_key("partner:nope").await.unwrap().is_none());
+
+    // Upsert, not a duplicate row.
+    let updated = ctx
+        .register_account(&Account::new(
+            partner_a,
+            "partner:fastlink",
+            "Fast Link Nigeria",
+            "partner",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(updated.label, "Fast Link Nigeria");
+    assert_eq!(updated.created_at, by_key.created_at);
+
+    // A live key belongs to exactly one owner.
+    assert!(
+        ctx.register_account(&Account::new(
+            uuid::Uuid::now_v7(),
+            "partner:fastlink",
+            "Impostor",
+            "partner",
+        ))
+        .await
+        .is_err(),
+        "a second owner must not be able to claim a live key"
+    );
+
+    // Filtered enumeration — the capability that did not exist at all
+    // before this table: every read was keyed *by* owner.
+    let partners = ctx
+        .accounts(&AccountQuery::new().of_kind("partner"))
+        .await
+        .unwrap();
+    assert_eq!(partners.len(), 2);
+    assert_eq!(ctx.accounts(&AccountQuery::new()).await.unwrap().len(), 3);
+
+    // Balances joined in one round trip; an account with no money still
+    // appears, with zero.
+    Money::atomic(&ctx, |tx| async move {
+        tx.mint("NGN", partner_a, 700_00, "owed".to_string()).await
+    })
+    .await
+    .unwrap();
+
+    let listed = ctx
+        .account_balances("NGN", &AccountQuery::new().of_kind("partner"))
+        .await
+        .unwrap();
+    assert_eq!(listed.len(), 2);
+    let a = listed.iter().find(|r| r.account.owner == partner_a).unwrap();
+    let b = listed.iter().find(|r| r.account.owner == partner_b).unwrap();
+    assert_eq!(a.balance.available, 700_00);
+    assert_eq!(b.balance.available, 0);
+
+    // Archiving hides an account from listings but never from lookup —
+    // a retired account's money still has to be explainable.
+    ctx.archive_account(partner_b).await.unwrap();
+    assert_eq!(
+        ctx.accounts(&AccountQuery::new().of_kind("partner"))
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert!(ctx.account(partner_b).await.unwrap().unwrap().is_archived());
+    ctx.unarchive_account(partner_b).await.unwrap();
+    assert!(!ctx.account(partner_b).await.unwrap().unwrap().is_archived());
+
+}
+
+/// Registration is descriptive, never a gate: money must move for an
+/// owner nobody registered, or every balance predating this table breaks.
+#[tokio::test]
+async fn ledger_money_moves_for_an_unregistered_owner_on_postgres() {
+    use ousia::ledger::adapters::postgres::PostgresSchemaLedgerAdapter;
+    use ousia::ledger::{Asset, Money};
+
+    let (_r, pool) = setup_test_db().await;
+    let adapter = PostgresAdapter::from_pool(pool.clone());
+    adapter.init_schema().await.unwrap();
+    adapter.init_ledger_schema(&["NGN"]).await.unwrap();
+
+    let engine = Engine::new(Box::new(adapter));
+    let ctx = engine.ledger_ctx();
+    engine
+        .ledger()
+        .create_asset(Asset::new("NGN", 100, 2))
+        .await
+        .unwrap();
+
+    let stranger = uuid::Uuid::now_v7();
+    Money::atomic(&ctx, |tx| async move {
+        tx.mint("NGN", stranger, 500_00, "deposit".to_string()).await
+    })
+    .await
+    .unwrap();
+
+    assert_eq!(ctx.balance("NGN", stranger).await.unwrap().available, 500_00);
+    assert!(ctx.account(stranger).await.unwrap().is_none());
+}

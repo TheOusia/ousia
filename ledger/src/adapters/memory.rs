@@ -1,7 +1,7 @@
 // ledger/src/adapters/memory.rs
 use crate::{
-    Asset, Balance, ExecutionPlan, Holding, LedgerAdapter, MoneyError, Operation, Transaction,
-    ValueObject, ValueObjectState,
+    Account, AccountBalance, AccountQuery, Asset, Balance, ExecutionPlan, Holding, LedgerAdapter,
+    MoneyError, Operation, Transaction, ValueObject, ValueObjectState,
 };
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -15,6 +15,7 @@ struct MemoryStore {
     value_objects: Arc<Mutex<HashMap<Uuid, ValueObject>>>,
     transactions: Arc<Mutex<HashMap<Uuid, Transaction>>>,
     idempotency_keys: Arc<Mutex<HashMap<String, Uuid>>>, // hash -> transaction_id
+    accounts: Arc<Mutex<HashMap<Uuid, Account>>>,        // owner -> account
 }
 
 impl MemoryStore {
@@ -24,6 +25,7 @@ impl MemoryStore {
             value_objects: Arc::new(Mutex::new(HashMap::new())),
             transactions: Arc::new(Mutex::new(HashMap::new())),
             idempotency_keys: Arc::new(Mutex::new(HashMap::new())),
+            accounts: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
@@ -474,6 +476,133 @@ impl LedgerAdapter for MemoryAdapter {
             })
             .cloned()
             .collect())
+    }
+
+    // ------------------------------------------------------------------ //
+    //  Account registry                                                   //
+    // ------------------------------------------------------------------ //
+
+    async fn register_account(&self, account: &Account) -> Result<Account, MoneyError> {
+        let mut accounts = self.store.accounts.lock().unwrap();
+
+        // Mirror the Postgres UNIQUE on `key`: one key belongs to exactly
+        // one owner for the life of the ledger.
+        if accounts
+            .values()
+            .any(|existing| existing.key == account.key && existing.owner != account.owner)
+        {
+            return Err(MoneyError::Storage(format!(
+                "account key '{}' is already registered to a different owner",
+                account.key
+            )));
+        }
+
+        let now = Utc::now();
+        let stored = Account {
+            // Preserve the original registration time on re-register.
+            created_at: accounts
+                .get(&account.owner)
+                .map(|existing| existing.created_at)
+                .unwrap_or(now),
+            updated_at: now,
+            // An upsert never resurrects an archived account — that is
+            // `unarchive_account`'s job, and silently un-retiring one on a
+            // boot-time re-register would be a surprise.
+            archived_at: accounts
+                .get(&account.owner)
+                .and_then(|existing| existing.archived_at),
+            ..account.clone()
+        };
+        accounts.insert(account.owner, stored.clone());
+        Ok(stored)
+    }
+
+    async fn get_account(&self, owner: Uuid) -> Result<Option<Account>, MoneyError> {
+        Ok(self.store.accounts.lock().unwrap().get(&owner).cloned())
+    }
+
+    async fn get_account_by_key(&self, key: &str) -> Result<Option<Account>, MoneyError> {
+        Ok(self
+            .store
+            .accounts
+            .lock()
+            .unwrap()
+            .values()
+            .find(|account| account.key == key)
+            .cloned())
+    }
+
+    async fn list_accounts(&self, query: &AccountQuery) -> Result<Vec<Account>, MoneyError> {
+        let accounts = self.store.accounts.lock().unwrap();
+        let mut matched: Vec<Account> = accounts
+            .values()
+            .filter(|account| match &query.kind {
+                Some(kind) => &account.kind == kind,
+                None => true,
+            })
+            .filter(|account| query.include_archived || !account.is_archived())
+            .cloned()
+            .collect();
+
+        matched.sort_by(|a, b| {
+            b.created_at
+                .cmp(&a.created_at)
+                .then_with(|| a.owner.cmp(&b.owner))
+        });
+
+        Ok(matched
+            .into_iter()
+            .skip(query.effective_offset() as usize)
+            .take(query.effective_limit() as usize)
+            .collect())
+    }
+
+    async fn list_account_balances(
+        &self,
+        asset_id: Uuid,
+        query: &AccountQuery,
+    ) -> Result<Vec<AccountBalance>, MoneyError> {
+        let matched = self.list_accounts(query).await?;
+        let value_objects = self.store.value_objects.lock().unwrap();
+
+        Ok(matched
+            .into_iter()
+            .map(|account| {
+                let (alive, reserved) = value_objects
+                    .values()
+                    .filter(|vo| vo.owner == account.owner && vo.asset == asset_id)
+                    .fold((0u64, 0u64), |(alive, reserved), vo| match vo.state {
+                        ValueObjectState::Alive => (alive + vo.amount, reserved),
+                        ValueObjectState::Reserved => (alive, reserved + vo.amount),
+                        ValueObjectState::Burned => (alive, reserved),
+                    });
+                let balance =
+                    Balance::from_value_objects(account.owner, asset_id, alive, reserved);
+                AccountBalance { account, balance }
+            })
+            .collect())
+    }
+
+    async fn archive_account(&self, owner: Uuid) -> Result<(), MoneyError> {
+        let mut accounts = self.store.accounts.lock().unwrap();
+        if let Some(account) = accounts.get_mut(&owner) {
+            if account.archived_at.is_none() {
+                account.archived_at = Some(Utc::now());
+                account.updated_at = Utc::now();
+            }
+        }
+        Ok(())
+    }
+
+    async fn unarchive_account(&self, owner: Uuid) -> Result<(), MoneyError> {
+        let mut accounts = self.store.accounts.lock().unwrap();
+        if let Some(account) = accounts.get_mut(&owner) {
+            if account.archived_at.is_some() {
+                account.archived_at = None;
+                account.updated_at = Utc::now();
+            }
+        }
+        Ok(())
     }
 }
 

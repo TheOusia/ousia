@@ -26,7 +26,7 @@ impl GeoAdapter for PostgresAdapter {
 
         sqlx::query(
             r#"
-            INSERT INTO public.object_geo (object_id, type, field, location, hash)
+            INSERT INTO object_geo (object_id, type, field, location, hash)
             SELECT $1, $2,
                    f.field,
                    ST_SetSRID(ST_MakePoint(f.lon, f.lat), 4326)::geography,
@@ -56,7 +56,7 @@ impl GeoAdapter for PostgresAdapter {
     async fn get_geo_hashes(&self, object_id: Uuid) -> Result<Vec<(String, String)>, Error> {
         let rows = sqlx::query(
             r#"
-            SELECT field, hash FROM public.object_geo WHERE object_id = $1
+            SELECT field, hash FROM object_geo WHERE object_id = $1
             "#,
         )
         .bind(object_id)
@@ -80,7 +80,7 @@ impl GeoAdapter for PostgresAdapter {
         }
         sqlx::query(
             r#"
-            DELETE FROM public.object_geo WHERE object_id = $1 AND field = ANY($2)
+            DELETE FROM object_geo WHERE object_id = $1 AND field = ANY($2)
             "#,
         )
         .bind(object_id)
@@ -94,7 +94,7 @@ impl GeoAdapter for PostgresAdapter {
     async fn delete_geo_for_object(&self, object_id: Uuid) -> Result<(), Error> {
         sqlx::query(
             r#"
-            DELETE FROM public.object_geo WHERE object_id = $1
+            DELETE FROM object_geo WHERE object_id = $1
             "#,
         )
         .bind(object_id)

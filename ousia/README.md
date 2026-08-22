@@ -18,6 +18,7 @@ A graph-relational ORM with built-in double-entry ledger for Rust. Zero migratio
 - [Architecture Overview](#architecture-overview)
 - [Installation](#installation)
 - [Quickstart](#quickstart)
+- [Database Schema](#database-schema)
 - [Objects](#objects)
   - [Defining Objects](#defining-objects)
   - [CRUD Operations](#crud-operations)
@@ -136,6 +137,45 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 ```
+
+---
+
+## Database Schema
+
+`init_schema()` creates everything Ousia needs, including the Postgres
+schema itself. Which schema that is comes from the **connection string**,
+not from an argument — the same place the rest of the connection is
+configured. With libpq that is the `options` parameter:
+
+```
+postgres://user:pw@host/db?options=-csearch_path%3Dmyapp
+```
+
+(`%3D` is a URL-encoded `=`.)
+
+```rust
+let adapter = PostgresAdapter::from_url(&database_url).await?;
+adapter.init_schema().await?;   // CREATE SCHEMA IF NOT EXISTS "myapp", then all tables
+```
+
+The first entry on `search_path` wins; `"$user"` is skipped; an unset path
+falls back to `public`. **A deployment that configures nothing keeps its
+tables exactly where they have always been** — this is backwards
+compatible.
+
+No table name is schema-qualified in any query, so reads and writes follow
+whatever `search_path` the pool's connections carry. That is what makes a
+schema per tenant, per environment, or per service a deployment concern
+rather than a code change.
+
+PostGIS is left where it installs (`public`) and stays on the search path
+behind your schema, so `geography` and the `ST_*` functions keep resolving.
+
+> **Migrating an existing database into a schema**: `CREATE TABLE IF NOT
+> EXISTS` resolves through `search_path`, so if `objects` already exists in
+> `public` and `public` is still on the path, it is found and creation is
+> skipped. Move the tables deliberately (`ALTER TABLE ... SET SCHEMA`)
+> rather than expecting `init_schema` to relocate them.
 
 ---
 

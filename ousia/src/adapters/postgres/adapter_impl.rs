@@ -26,7 +26,7 @@ impl Adapter for PostgresAdapter {
         } = record;
         let _ = sqlx::query(
             r#"
-            INSERT INTO public.objects (id, type, owner, created_at, updated_at, data, index_meta)
+            INSERT INTO objects (id, type, owner, created_at, updated_at, data, index_meta)
             VALUES ($1, $2, $3, $4, $5, $6, $7)
             "#,
         )

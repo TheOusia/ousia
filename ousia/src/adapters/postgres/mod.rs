@@ -80,6 +80,25 @@ impl PostgresAdapter {
             .await
             .map_err(|e| Error::Storage(e.to_string()))?;
 
+        // Target schema comes from the connection, not from an argument —
+        // see `resolve_target_schema`. Created before anything else so a
+        // deployment pointing at a fresh schema works on first boot.
+        let schema = Self::resolve_target_schema(&mut tx).await?;
+        Self::create_schema(&mut tx, &schema).await?;
+
+        // PostGIS installs into `public`, so it stays on the search path
+        // behind the target schema — otherwise `geography` and every
+        // `ST_*` function stop resolving the moment a custom schema is
+        // used. Unqualified DDL below still lands in `schema`: Postgres
+        // creates into the *first* entry regardless of what exists later.
+        sqlx::query(&format!(
+            r#"SET LOCAL search_path TO "{}", public"#,
+            schema.replace('"', "\"\"")
+        ))
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| Error::Storage(e.to_string()))?;
+
         sqlx::query("CREATE EXTENSION IF NOT EXISTS postgis")
             .execute(&mut *tx)
             .await
@@ -476,6 +495,51 @@ impl PostgresAdapter {
     //  Private schema builders                                            //
     // ------------------------------------------------------------------ //
 
+    /// The schema this deployment's tables belong in.
+    ///
+    /// Read from the live connection's `search_path` rather than from a
+    /// parameter, so it is configured exactly where the rest of the
+    /// connection is — the database URL. With libpq that is the `options`
+    /// parameter:
+    ///
+    /// ```text
+    /// postgres://user:pw@host/db?options=-csearch_path%3Dmealgro
+    /// ```
+    ///
+    /// The first entry on the path wins. `"$user"` is skipped (it is a
+    /// per-role default, not a deployment choice), and an empty or
+    /// unset path falls back to `public` — the historical behavior, so
+    /// an existing deployment that sets nothing keeps its tables exactly
+    /// where they are.
+    ///
+    /// Note `current_schema()` is deliberately *not* used: it resolves to
+    /// the first schema that already **exists**, which is never the one
+    /// being created here on a first boot.
+    async fn resolve_target_schema(tx: &mut Transaction<'_, Postgres>) -> Result<String, Error> {
+        let raw: String = sqlx::query_scalar("SHOW search_path")
+            .fetch_one(&mut **tx)
+            .await
+            .map_err(|e| Error::Storage(e.to_string()))?;
+
+        Ok(first_search_path_entry(&raw).unwrap_or_else(|| "public".to_string()))
+    }
+
+    async fn create_schema(
+        tx: &mut Transaction<'_, Postgres>,
+        schema: &str,
+    ) -> Result<(), Error> {
+        // Identifier, not a bind parameter — quoted so a schema name that
+        // needs escaping (or shadows a keyword) still works.
+        sqlx::query(&format!(
+            r#"CREATE SCHEMA IF NOT EXISTS "{}""#,
+            schema.replace('"', "\"\"")
+        ))
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| Error::Storage(e.to_string()))?;
+        Ok(())
+    }
+
     async fn create_bookkeeping_tables(tx: &mut Transaction<'_, Postgres>) -> Result<(), Error> {
         sqlx::query(
             r#"
@@ -511,7 +575,7 @@ impl PostgresAdapter {
         // geo can reference it.
         sqlx::query(
             r#"
-            CREATE TABLE IF NOT EXISTS public.objects (
+            CREATE TABLE IF NOT EXISTS objects (
                 id         UUID        NOT NULL,
                 type       TEXT        NOT NULL,
                 owner      UUID        NOT NULL,
@@ -531,19 +595,19 @@ impl PostgresAdapter {
         // present and future partition automatically.
         for sql in [
             r#"CREATE INDEX IF NOT EXISTS idx_objects_owner_created
-                ON public.objects(type, owner, created_at DESC)
+                ON objects(type, owner, created_at DESC)
                 INCLUDE (id, updated_at)"#,
             r#"CREATE INDEX IF NOT EXISTS idx_objects_owner_updated
-                ON public.objects(type, owner, updated_at DESC)
+                ON objects(type, owner, updated_at DESC)
                 INCLUDE (id, created_at)"#,
             r#"CREATE INDEX IF NOT EXISTS idx_objects_type_created
-                ON public.objects(type, created_at DESC)
+                ON objects(type, created_at DESC)
                 INCLUDE (owner, id)"#,
             r#"CREATE INDEX IF NOT EXISTS idx_objects_type_updated
-                ON public.objects(type, updated_at DESC)
+                ON objects(type, updated_at DESC)
                 INCLUDE (owner, id)"#,
             r#"CREATE INDEX IF NOT EXISTS idx_objects_index_meta
-                ON public.objects USING GIN (index_meta jsonb_path_ops)"#,
+                ON objects USING GIN (index_meta jsonb_path_ops)"#,
         ] {
             sqlx::query(sql)
                 .execute(&mut **tx)
@@ -557,7 +621,7 @@ impl PostgresAdapter {
     async fn create_parent_object_edges(tx: &mut Transaction<'_, Postgres>) -> Result<(), Error> {
         sqlx::query(
             r#"
-            CREATE TABLE IF NOT EXISTS public.object_edges (
+            CREATE TABLE IF NOT EXISTS object_edges (
                 "from"     UUID        NOT NULL,
                 "to"       UUID        NOT NULL,
                 type       TEXT        NOT NULL,
@@ -575,13 +639,13 @@ impl PostgresAdapter {
 
         for sql in [
             r#"CREATE INDEX IF NOT EXISTS idx_object_edges_from_covering
-                ON public.object_edges("from", type, created_at DESC)
+                ON object_edges("from", type, created_at DESC)
                 INCLUDE ("to", data, index_meta)"#,
             r#"CREATE INDEX IF NOT EXISTS idx_object_edges_to_covering
-                ON public.object_edges("to", type, created_at DESC)
+                ON object_edges("to", type, created_at DESC)
                 INCLUDE ("from", data, index_meta)"#,
             r#"CREATE INDEX IF NOT EXISTS idx_object_edges_index_meta
-                ON public.object_edges USING GIN (index_meta jsonb_path_ops)"#,
+                ON object_edges USING GIN (index_meta jsonb_path_ops)"#,
         ] {
             sqlx::query(sql)
                 .execute(&mut **tx)
@@ -597,7 +661,7 @@ impl PostgresAdapter {
     ) -> Result<(), Error> {
         sqlx::query(
             r#"
-            CREATE TABLE IF NOT EXISTS public.object_constraints (
+            CREATE TABLE IF NOT EXISTS object_constraints (
                 id    UUID NOT NULL,
                 type  TEXT NOT NULL,
                 key   TEXT NOT NULL,
@@ -612,7 +676,7 @@ impl PostgresAdapter {
 
         sqlx::query(
             r#"CREATE INDEX IF NOT EXISTS idx_object_constraints_id
-                ON public.object_constraints(id)"#,
+                ON object_constraints(id)"#,
         )
         .execute(&mut **tx)
         .await
@@ -624,7 +688,7 @@ impl PostgresAdapter {
     async fn create_parent_object_geo(tx: &mut Transaction<'_, Postgres>) -> Result<(), Error> {
         sqlx::query(
             r#"
-            CREATE TABLE IF NOT EXISTS public.object_geo (
+            CREATE TABLE IF NOT EXISTS object_geo (
                 object_id UUID NOT NULL,
                 type      TEXT NOT NULL,
                 field     TEXT NOT NULL,
@@ -640,9 +704,9 @@ impl PostgresAdapter {
 
         for sql in [
             r#"CREATE INDEX IF NOT EXISTS idx_object_geo_gist
-                ON public.object_geo USING GIST (location)"#,
+                ON object_geo USING GIST (location)"#,
             r#"CREATE INDEX IF NOT EXISTS idx_object_geo_type_field
-                ON public.object_geo (type, field)"#,
+                ON object_geo (type, field)"#,
         ] {
             sqlx::query(sql)
                 .execute(&mut **tx)
@@ -665,7 +729,7 @@ impl PostgresAdapter {
         let safe = partition_name_segment(type_name);
         let sql = format!(
             "CREATE TABLE IF NOT EXISTS objects_{safe} \
-             PARTITION OF public.objects FOR VALUES IN ('{type_name}')"
+             PARTITION OF objects FOR VALUES IN ('{type_name}')"
         );
         sqlx::query(&sql)
             .execute(&mut **tx)
@@ -694,7 +758,7 @@ impl PostgresAdapter {
         let safe = partition_name_segment(type_name);
         let sql = format!(
             "CREATE TABLE IF NOT EXISTS object_constraints_{safe} \
-             PARTITION OF public.object_constraints FOR VALUES IN ('{type_name}')"
+             PARTITION OF object_constraints FOR VALUES IN ('{type_name}')"
         );
         sqlx::query(&sql)
             .execute(&mut **tx)
@@ -722,7 +786,7 @@ impl PostgresAdapter {
         let safe = partition_name_segment(type_name);
         let sql = format!(
             "CREATE TABLE IF NOT EXISTS object_geo_{safe} \
-             PARTITION OF public.object_geo FOR VALUES IN ('{type_name}')"
+             PARTITION OF object_geo FOR VALUES IN ('{type_name}')"
         );
         sqlx::query(&sql)
             .execute(&mut **tx)
@@ -759,7 +823,7 @@ impl PostgresAdapter {
         let safe = partition_name_segment(type_name);
         let sql = format!(
             "CREATE TABLE IF NOT EXISTS object_edges_{safe} \
-             PARTITION OF public.object_edges FOR VALUES IN ('{type_name}')"
+             PARTITION OF object_edges FOR VALUES IN ('{type_name}')"
         );
         sqlx::query(&sql)
             .execute(&mut **tx)
@@ -1007,4 +1071,71 @@ async fn object_partition_exists(
     .await
     .map_err(|e| Error::Storage(e.to_string()))?;
     Ok(exists)
+}
+
+/// First usable schema name in a `SHOW search_path` result.
+///
+/// Postgres renders the path as a comma-separated list where entries may
+/// be quoted (`"my schema"`, with `""` as an embedded quote). `$user` is
+/// skipped — it resolves per-role at runtime and is a default, not a
+/// deployment's choice of schema. Returns `None` when nothing usable is
+/// left, which the caller reads as `public`.
+pub(crate) fn first_search_path_entry(raw: &str) -> Option<String> {
+    raw.split(',')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .map(|entry| {
+            let unquoted = entry
+                .strip_prefix('"')
+                .and_then(|rest| rest.strip_suffix('"'));
+            match unquoted {
+                Some(inner) => inner.replace("\"\"", "\""),
+                None => entry.to_string(),
+            }
+        })
+        .find(|entry| !entry.is_empty() && entry != "$user")
+}
+
+#[cfg(test)]
+mod search_path_tests {
+    use super::first_search_path_entry;
+
+    #[test]
+    fn defaults_to_nothing_so_the_caller_can_pick_public() {
+        assert_eq!(first_search_path_entry(""), None);
+        assert_eq!(first_search_path_entry("\"$user\""), None);
+    }
+
+    #[test]
+    fn skips_the_per_role_placeholder() {
+        // Postgres' out-of-the-box default.
+        assert_eq!(
+            first_search_path_entry("\"$user\", public").as_deref(),
+            Some("public")
+        );
+    }
+
+    #[test]
+    fn takes_the_first_real_entry() {
+        assert_eq!(
+            first_search_path_entry("mealgro, public").as_deref(),
+            Some("mealgro")
+        );
+        assert_eq!(
+            first_search_path_entry("  tenant_a ,public").as_deref(),
+            Some("tenant_a")
+        );
+    }
+
+    #[test]
+    fn unquotes_and_unescapes() {
+        assert_eq!(
+            first_search_path_entry("\"my schema\", public").as_deref(),
+            Some("my schema")
+        );
+        assert_eq!(
+            first_search_path_entry("\"odd\"\"name\"").as_deref(),
+            Some("odd\"name")
+        );
+    }
 }
