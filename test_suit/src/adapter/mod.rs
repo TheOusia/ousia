@@ -239,3 +239,12 @@ pub struct Delivery {
     pub dropoff_lat: f64,
     pub dropoff_lon: f64,
 }
+
+/// At most one per owner — exercises unique constraints keyed on `owner`.
+#[derive(OusiaObject, OusiaDefault, Debug)]
+#[ousia(type_name = "Slot", unique = "owner")]
+pub struct Slot {
+    _meta: Meta,
+
+    pub label: String,
+}

@@ -468,18 +468,72 @@ impl Engine {
         Ok(record)
     }
 
-    /// Transfer ownership of an object
+    /// Transfer ownership of an object. Unique constraints that include
+    /// `owner` are re-keyed the same way `update_object` handles them.
     pub async fn transfer_object<T: Object>(
         &self,
         id: Uuid,
         from_owner: Uuid,
         to_owner: Uuid,
     ) -> Result<T, Error> {
-        let record = self
+        if !T::HAS_UNIQUE_FIELDS {
+            let record = self
+                .inner
+                .adapter
+                .transfer_object(T::TYPE, id, from_owner, to_owner)
+                .await?;
+            return record.to_object();
+        }
+
+        let mut obj: T = match self.inner.adapter.fetch_object(T::TYPE, id).await? {
+            Some(record) if record.owner == from_owner => record.to_object()?,
+            _ => return Err(Error::NotFound),
+        };
+
+        let old_hashes = self.inner.adapter.get_hashes_for_object(id).await?;
+        obj.set_owner(to_owner);
+        let new_hashes = obj.derive_unique_hashes();
+
+        let hashes_to_add: Vec<_> = new_hashes
+            .iter()
+            .filter(|(hash, _)| !old_hashes.contains(hash))
+            .cloned()
+            .collect();
+        let hashes_to_remove: Vec<_> = old_hashes
+            .iter()
+            .filter(|hash| !new_hashes.iter().any(|(h, _)| h == *hash))
+            .cloned()
+            .collect();
+
+        if !hashes_to_add.is_empty() {
+            self.inner
+                .adapter
+                .insert_unique_hashes(T::TYPE, id, hashes_to_add.clone())
+                .await?;
+        }
+
+        let record = match self
             .inner
             .adapter
             .transfer_object(T::TYPE, id, from_owner, to_owner)
-            .await?;
+            .await
+        {
+            Ok(record) => record,
+            Err(err) => {
+                if !hashes_to_add.is_empty() {
+                    let hashes = hashes_to_add.into_iter().map(|(hash, _)| hash).collect();
+                    self.inner.adapter.delete_unique_hashes(hashes).await?;
+                }
+                return Err(err);
+            }
+        };
+
+        if !hashes_to_remove.is_empty() {
+            self.inner
+                .adapter
+                .delete_unique_hashes(hashes_to_remove)
+                .await?;
+        }
 
         record.to_object()
     }

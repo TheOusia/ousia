@@ -1030,6 +1030,91 @@ async fn test_transfer_ownership_wrong_owner_fails() {
     assert!(matches!(result, Err(Error::NotFound)));
 }
 
+fn slot_for(owner: uuid::Uuid, label: &str) -> Slot {
+    let mut slot = Slot::default();
+    slot.set_owner(owner);
+    slot.label = label.into();
+    slot
+}
+
+#[tokio::test]
+async fn test_transfer_rekeys_owner_unique_constraint() {
+    let (_r, pool) = setup_test_db().await;
+    let adapter = PostgresAdapter::from_pool(pool);
+    adapter.init_schema().await.unwrap();
+    let engine = Engine::new(Box::new(adapter));
+
+    let (alice, bob) = (uuid::Uuid::now_v7(), uuid::Uuid::now_v7());
+    let slot = slot_for(alice, "a");
+    engine.create_object(&slot).await.unwrap();
+
+    let moved: Slot = engine
+        .transfer_object(slot.id(), alice, bob)
+        .await
+        .unwrap();
+    assert_eq!(moved.owner(), bob);
+
+    // bob's owner hash was registered by the transfer
+    let err = engine
+        .create_object(&slot_for(bob, "b2"))
+        .await
+        .unwrap_err();
+    assert_eq!(err, Error::UniqueConstraintViolation("owner".into()));
+
+    // alice's stale owner hash was released by the transfer
+    engine.create_object(&slot_for(alice, "a2")).await.unwrap();
+}
+
+#[tokio::test]
+async fn test_transfer_into_taken_owner_unique_is_rejected() {
+    let (_r, pool) = setup_test_db().await;
+    let adapter = PostgresAdapter::from_pool(pool);
+    adapter.init_schema().await.unwrap();
+    let engine = Engine::new(Box::new(adapter));
+
+    let (alice, bob) = (uuid::Uuid::now_v7(), uuid::Uuid::now_v7());
+    let alice_slot = slot_for(alice, "a");
+    engine.create_object(&alice_slot).await.unwrap();
+    engine.create_object(&slot_for(bob, "b")).await.unwrap();
+
+    let err = engine
+        .transfer_object::<Slot>(alice_slot.id(), alice, bob)
+        .await
+        .unwrap_err();
+    assert_eq!(err, Error::UniqueConstraintViolation("owner".into()));
+
+    // nothing moved, and alice still holds her slot's hash
+    let still: Slot = engine.fetch_object(alice_slot.id()).await.unwrap().unwrap();
+    assert_eq!(still.owner(), alice);
+    let err = engine
+        .create_object(&slot_for(alice, "a2"))
+        .await
+        .unwrap_err();
+    assert_eq!(err, Error::UniqueConstraintViolation("owner".into()));
+}
+
+#[tokio::test]
+async fn test_transfer_owner_unique_wrong_owner_leaves_no_hash() {
+    let (_r, pool) = setup_test_db().await;
+    let adapter = PostgresAdapter::from_pool(pool);
+    adapter.init_schema().await.unwrap();
+    let engine = Engine::new(Box::new(adapter));
+
+    let (alice, bob, carol) = (
+        uuid::Uuid::now_v7(),
+        uuid::Uuid::now_v7(),
+        uuid::Uuid::now_v7(),
+    );
+    let slot = slot_for(alice, "a");
+    engine.create_object(&slot).await.unwrap();
+
+    let result = engine.transfer_object::<Slot>(slot.id(), bob, carol).await;
+    assert!(matches!(result, Err(Error::NotFound)));
+
+    // no hash was reserved for carol by the failed transfer
+    engine.create_object(&slot_for(carol, "c")).await.unwrap();
+}
+
 #[tokio::test]
 async fn test_delete_bulk_objects() {
     let (_r, pool) = setup_test_db().await;
