@@ -207,7 +207,7 @@ impl PostgresAdapter {
             obj_filters,
             &plan.filters,
             plan.cursor,
-        );
+        )?;
         let order_clause = Self::build_edge_order_clause(&plan.filters);
         let join_col = match direction {
             TraversalDirection::Forward => "to",
@@ -508,8 +508,24 @@ impl PostgresAdapter {
     pub(super) fn build_object_query_conditions(
         filters: &[QueryFilter],
         cursor: Option<Cursor>,
-    ) -> String {
-        Self::build_object_query_conditions_with_geo(filters, cursor, &[], None, &mut 3).0
+    ) -> Result<String, Error> {
+        Ok(Self::build_object_query_conditions_with_geo(filters, cursor, &[], None, &mut 3)?.0)
+    }
+
+    /// A cursor is a keyset boundary; under `ORDER BY RANDOM()` there is no
+    /// order for it to be a boundary of, so pages would overlap or skip rows.
+    fn reject_random_with_cursor(
+        cursor: Option<Cursor>,
+        filter_sets: &[&[QueryFilter]],
+    ) -> Result<(), Error> {
+        let random = filter_sets.iter().flat_map(|f| f.iter()).any(|f| f.mode.is_random_sort());
+        if cursor.is_some() && random {
+            return Err(Error::InvalidQuery(
+                "sort_random cannot be combined with a cursor; paginate with a deterministic sort"
+                    .into(),
+            ));
+        }
+        Ok(())
     }
 
     /// Build the `JOIN ... object_geo ...` block needed by geo filters + order.
@@ -573,7 +589,8 @@ impl PostgresAdapter {
         geo_filters: &[GeoFilter],
         geo_order: Option<&GeoOrder>,
         param_idx: &mut usize,
-    ) -> (String, GeoJoinPlan) {
+    ) -> Result<(String, GeoJoinPlan), Error> {
+        Self::reject_random_with_cursor(cursor, &[filters])?;
         // $1 = type, $2 = owner, $3 = cursor (optional), then filter values,
         // then geo filter params (per filter), then geo order field param (if not reused).
         let mut conditions: Vec<(String, &str)> = vec![
@@ -643,10 +660,10 @@ impl PostgresAdapter {
             let _ = go;
         }
 
-        (
+        Ok((
             format!("WHERE {}", Self::join_conditions(&conditions)),
             plan,
-        )
+        ))
     }
 
     /// Compute the `$N` placeholder indices that the binders will use for the
@@ -823,7 +840,8 @@ impl PostgresAdapter {
         filters: &[QueryFilter],
         cursor: Option<Cursor>,
         direction: TraversalDirection,
-    ) -> String {
+    ) -> Result<String, Error> {
+        Self::reject_random_with_cursor(cursor, &[filters])?;
         // $1 = type, $2 = from/to owner, $3 = cursor (optional), $4+ = filter values
         let anchor_col = match direction {
             TraversalDirection::Forward => r#"e."from""#,
@@ -866,7 +884,7 @@ impl PostgresAdapter {
             }
         }
 
-        format!("WHERE {}", Self::join_conditions(&conditions))
+        Ok(format!("WHERE {}", Self::join_conditions(&conditions)))
     }
 
     pub(super) fn build_order_clause(filters: &[QueryFilter], is_edge: bool) -> String {
@@ -945,7 +963,8 @@ impl PostgresAdapter {
         obj_filters: &[QueryFilter],
         edge_filters: &Vec<QueryFilter>,
         cursor: Option<Cursor>,
-    ) -> String {
+    ) -> Result<String, Error> {
+        Self::reject_random_with_cursor(cursor, &[obj_filters, edge_filters])?;
         // $1 = object type_name
         // $2 = edge type_name
         // $3 = owner
@@ -986,7 +1005,7 @@ impl PostgresAdapter {
         let obj_clause = Self::join_conditions(&obj_conditions);
         let edge_clause = Self::join_conditions(&edge_conditions);
 
-        format!("WHERE {} AND ({})", obj_clause, edge_clause)
+        Ok(format!("WHERE {} AND ({})", obj_clause, edge_clause))
     }
 
     pub(super) fn query_bind_filters<'a>(
@@ -1176,7 +1195,7 @@ impl PostgresAdapter {
             filters,
             &plan.filters,
             plan.cursor,
-        );
+        )?;
         let order_clause = Self::build_edge_order_clause(&plan.filters);
 
         let mut sql = format!(
@@ -1444,7 +1463,7 @@ impl PostgresAdapter {
         direction: TraversalDirection,
     ) -> Result<Vec<EdgeRecord>, Error> {
         let where_clause =
-            Self::build_edge_query_conditions(&plan.filters, plan.cursor, direction.clone());
+            Self::build_edge_query_conditions(&plan.filters, plan.cursor, direction.clone())?;
 
         // Tie-break on the edge's own identity column (`from`/`to`, unique within
         // this pivot's edge set once type + anchor are fixed) so ties in the sort

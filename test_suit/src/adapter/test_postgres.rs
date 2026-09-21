@@ -1158,6 +1158,45 @@ async fn test_query_sort_random() {
 }
 
 #[tokio::test]
+async fn test_sort_random_rejects_cursor() {
+    let (_r, pool) = setup_test_db().await;
+    let adapter = PostgresAdapter::from_pool(pool);
+    adapter.init_schema().await.unwrap();
+    let engine = Engine::new(Box::new(adapter));
+
+    let mut hub = Hub::default();
+    hub.name = "hub".into();
+    engine.create_object(&hub).await.unwrap();
+    let cursor = uuid::Uuid::now_v7();
+    let invalid = |r: &Result<_, Error>| matches!(r, Err(Error::InvalidQuery(_)));
+
+    let r: Result<Vec<Hub>, _> = engine
+        .query_objects(Query::default().sort_random().with_cursor(cursor))
+        .await;
+    assert!(invalid(&r.map(|_| ())));
+
+    let r = engine
+        .query_edges::<HubSpoke>(hub.id(), EdgeQuery::default().sort_random().with_cursor(cursor))
+        .await;
+    assert!(invalid(&r.map(|_| ())));
+
+    let r = engine
+        .preload_object::<Hub>(hub.id())
+        .edge::<HubSpoke, Spoke>()
+        .edge_sort_random()
+        .with_cursor(cursor)
+        .collect()
+        .await;
+    assert!(invalid(&r.map(|_| ())));
+
+    // a deterministic sort with a cursor is still fine
+    let r: Result<Vec<Post>, _> = engine
+        .query_objects(Query::default().sort_asc(&Post::FIELDS.title).with_cursor(cursor))
+        .await;
+    assert!(r.is_ok());
+}
+
+#[tokio::test]
 async fn test_edge_negated_filters_and_random_sort() {
     let (_r, pool) = setup_test_db().await;
     let adapter = PostgresAdapter::from_pool(pool);
