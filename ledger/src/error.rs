@@ -11,7 +11,8 @@ pub enum MoneyError {
     InvalidAuthority,
     TransactionNotFound,
     DuplicateIdempotencyKey(uuid::Uuid),
-    /// Asset code rejected: must be 1–42 chars of `[A-Za-z0-9_-]`, unique after case/`-` folding.
+    /// Asset code rejected: must be 1-42 ASCII letters (case-insensitive), or its
+    /// partition name is already taken by a different code.
     InvalidAssetCode(String),
     Storage(String),
 }

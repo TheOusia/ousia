@@ -55,7 +55,9 @@ impl Portfolio {
 
     /// Find a holding by asset code.
     pub fn get(&self, asset_code: &str) -> Option<&Holding> {
-        self.holdings.iter().find(|h| h.asset.code == asset_code)
+        self.holdings
+            .iter()
+            .find(|h| h.asset.code.eq_ignore_ascii_case(asset_code))
     }
 
     /// Total portfolio value in a target currency.
@@ -72,7 +74,7 @@ impl Portfolio {
         self.holdings
             .iter()
             .map(|h| {
-                let rate = rates.get(h.asset.code.as_str()).copied().unwrap_or(0.0);
+                let rate = rate_for(rates, &h.asset.code);
                 h.value(rate)
             })
             .sum()
@@ -99,8 +101,8 @@ impl Portfolio {
     /// Sort holdings by value in a target currency, largest first.
     pub fn sort_by_value_desc(&mut self, rates: &HashMap<&str, f64>) {
         self.holdings.sort_by(|a, b| {
-            let a_rate = rates.get(a.asset.code.as_str()).copied().unwrap_or(0.0);
-            let b_rate = rates.get(b.asset.code.as_str()).copied().unwrap_or(0.0);
+            let a_rate = rate_for(rates, &a.asset.code);
+            let b_rate = rate_for(rates, &b.asset.code);
             b.value(b_rate)
                 .partial_cmp(&a.value(a_rate))
                 .unwrap_or(std::cmp::Ordering::Equal)
@@ -110,8 +112,8 @@ impl Portfolio {
     /// Sort holdings by value in a target currency, smallest first.
     pub fn sort_by_value_asc(&mut self, rates: &HashMap<&str, f64>) {
         self.holdings.sort_by(|a, b| {
-            let a_rate = rates.get(a.asset.code.as_str()).copied().unwrap_or(0.0);
-            let b_rate = rates.get(b.asset.code.as_str()).copied().unwrap_or(0.0);
+            let a_rate = rate_for(rates, &a.asset.code);
+            let b_rate = rate_for(rates, &b.asset.code);
             a.value(a_rate)
                 .partial_cmp(&b.value(b_rate))
                 .unwrap_or(std::cmp::Ordering::Equal)
@@ -132,4 +134,13 @@ impl IntoIterator for Portfolio {
     fn into_iter(self) -> Self::IntoIter {
         self.holdings.into_iter()
     }
+}
+
+/// Rate for `code`; keys in `rates` match case-insensitively. Missing → 0.
+fn rate_for(rates: &HashMap<&str, f64>, code: &str) -> f64 {
+    rates
+        .get(code)
+        .or_else(|| rates.iter().find(|(k, _)| k.eq_ignore_ascii_case(code)).map(|(_, v)| v))
+        .copied()
+        .unwrap_or(0.0)
 }

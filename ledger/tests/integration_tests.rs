@@ -1580,3 +1580,32 @@ mod account_registry {
         );
     }
 }
+
+#[tokio::test]
+async fn test_asset_codes_are_case_insensitive_letters() {
+    let (system, ctx, user) = setup();
+    system
+        .adapter()
+        .create_asset(Asset::new("mgpoint", 1, 0))
+        .await
+        .unwrap();
+
+    Money::atomic(&ctx, |tx| async move {
+        tx.mint("MgPoint", user, 40, "reward".to_string()).await?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let balance = Balance::get("MGPOINT", user, &ctx).await.unwrap();
+    assert_eq!(balance.available, 40);
+
+    let holdings = ousia_ledger::Portfolio::new(ctx.holdings(user).await.unwrap());
+    assert_eq!(holdings.get("mgpoint").map(|h| h.asset.code.as_str()), Some("MGPOINT"));
+    let rates = std::collections::HashMap::from([("MgPoint", 2.0)]);
+    assert_eq!(holdings.value(&rates), 80.0);
+
+    for bad in ["MG-POINT", "MG_POINT", "MGPOINT1", ""] {
+        let err = system.adapter().create_asset(Asset::new(bad, 1, 0)).await.unwrap_err();
+        assert!(matches!(err, MoneyError::InvalidAssetCode(_)), "{bad:?}: {err:?}");
+    }
+}

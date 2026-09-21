@@ -412,14 +412,16 @@ impl LedgerAdapter for MemoryAdapter {
     }
 
     async fn get_asset(&self, code: &str) -> Result<Asset, MoneyError> {
+        let code = crate::asset::normalize_asset_code(code)?;
         let assets = self.store.assets.lock().unwrap();
         assets
-            .get(code)
+            .get(&code)
             .cloned()
             .ok_or_else(|| MoneyError::AssetNotFound(code.to_string()))
     }
 
-    async fn create_asset(&self, asset: Asset) -> Result<(), MoneyError> {
+    async fn create_asset(&self, mut asset: Asset) -> Result<(), MoneyError> {
+        asset.code = crate::asset::normalize_asset_code(&asset.code)?;
         let mut assets = self.store.assets.lock().unwrap();
         assets.insert(asset.code.clone(), asset);
         Ok(())

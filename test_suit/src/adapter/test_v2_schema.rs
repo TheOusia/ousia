@@ -712,10 +712,11 @@ async fn test_orphan_cleanup_waits_for_in_flight_writes() {
     assert_eq!(vo_rows(&pool, "ledger_value_objects_eur").await, 1);
 }
 
-/// Codes that fold to the same partition name are rejected across calls too,
-/// not only within one call.
+/// Codes are case-insensitive, so `usd` and `USD` share one partition. A
+/// partition name already taken by a different code (e.g. a lower-case `ngn`
+/// partition from before normalisation) or by a non-partition table is rejected.
 #[tokio::test]
-async fn test_init_ledger_schema_rejects_partition_collisions_across_calls() {
+async fn test_init_ledger_schema_partition_name_checks() {
     use ousia::ledger::MoneyError;
     use ousia::ledger::adapters::postgres::PostgresSchemaLedgerAdapter;
 
@@ -723,26 +724,76 @@ async fn test_init_ledger_schema_rejects_partition_collisions_across_calls() {
     let adapter = PostgresAdapter::from_pool(pool.clone());
     adapter.init_schema().await.unwrap();
 
-    adapter.init_ledger_schema(&["usd"]).await.unwrap();
-    adapter.init_ledger_schema(&["usd"]).await.unwrap();
-    let err = adapter.init_ledger_schema(&["USD"]).await.unwrap_err();
+    adapter.init_ledger_schema(&["usd", "USD"]).await.unwrap();
+    adapter.init_ledger_schema(&["Usd"]).await.unwrap();
+    let bound = |table: &'static str| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, String>(
+                "SELECT pg_get_expr(relpartbound, oid) FROM pg_class WHERE relname = $1",
+            )
+            .bind(table)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    assert_eq!(bound("ledger_value_objects_usd").await, "FOR VALUES IN ('USD')");
+
+    sqlx::query(
+        "CREATE TABLE ledger_value_objects_ngn PARTITION OF ledger_value_objects FOR VALUES IN ('ngn')",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let err = adapter.init_ledger_schema(&["NGN"]).await.unwrap_err();
     assert!(matches!(err, MoneyError::InvalidAssetCode(_)), "{err:?}");
 
-    // a same-named table that isn't a partition of ledger_value_objects
     sqlx::query("CREATE TABLE ledger_value_objects_gbp (id uuid)")
         .execute(&pool)
         .await
         .unwrap();
     let err = adapter.init_ledger_schema(&["GBP"]).await.unwrap_err();
     assert!(matches!(err, MoneyError::InvalidAssetCode(_)), "{err:?}");
+}
 
-    let bound: String = sqlx::query_scalar(
-        "SELECT pg_get_expr(relpartbound, oid) FROM pg_class WHERE relname = 'ledger_value_objects_usd'",
-    )
-    .fetch_one(&pool)
+#[tokio::test]
+async fn test_asset_codes_are_case_insensitive_letters() {
+    use ousia::ledger::adapters::postgres::PostgresSchemaLedgerAdapter;
+    use ousia::ledger::{Asset, MoneyError, Money};
+
+    let (_r, pool) = setup_test_db().await;
+    let adapter = PostgresAdapter::from_pool(pool.clone());
+    adapter.init_schema().await.unwrap();
+    adapter.init_ledger_schema(&["mgpoint"]).await.unwrap();
+    let engine = Engine::new(Box::new(adapter));
+
+    engine.ledger().create_asset(Asset::new("mgpoint", 1, 0)).await.unwrap();
+    let codes: Vec<String> = sqlx::query_scalar("SELECT code FROM ledger_assets")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert_eq!(codes, ["MGPOINT"]);
+
+    let owner = uuid::Uuid::now_v7();
+    Money::atomic(&engine.ledger_ctx(), |tx| async move {
+        tx.mint("MgPoint", owner, 250, "reward".to_string()).await
+    })
     .await
     .unwrap();
-    assert_eq!(bound, "FOR VALUES IN ('usd')");
+    let balance = engine.ledger_ctx().balance("MGPOINT", owner).await.unwrap();
+    assert_eq!(balance.available, 250);
+    assert!(vo_rows(&pool, "ledger_value_objects_mgpoint").await > 0);
+    assert_eq!(vo_rows(&pool, "ledger_value_objects_default").await, 0);
+
+    let err = engine
+        .ledger()
+        .create_asset(Asset::new("MG-POINT", 1, 0))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, MoneyError::InvalidAssetCode(_)), "{err:?}");
+    let err = engine.ledger_ctx().balance("MG-POINT", owner).await.unwrap_err();
+    assert!(matches!(err, MoneyError::InvalidAssetCode(_)), "{err:?}");
 }
 
 #[tokio::test]
@@ -759,7 +810,7 @@ async fn test_init_ledger_schema_rejects_unsafe_asset_codes() {
         .await
         .unwrap_err();
     assert!(matches!(err, MoneyError::InvalidAssetCode(_)), "{err:?}");
-    let err = adapter.init_ledger_schema(&["USD", "usd"]).await.unwrap_err();
+    let err = adapter.init_ledger_schema(&["USD", "MG-POINT"]).await.unwrap_err();
     assert!(matches!(err, MoneyError::InvalidAssetCode(_)), "{err:?}");
 
     // rejected before any DDL ran

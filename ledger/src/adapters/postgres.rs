@@ -33,7 +33,7 @@ where
     T: PostgresLedgerAdapter + Send + Sync,
 {
     async fn init_ledger_schema(&self, assets: &[&str]) -> Result<(), MoneyError> {
-        validate_asset_codes(assets)?;
+        let assets = normalize_asset_codes(assets)?;
         let mut tx = self
             .get_pool()
             .begin()
@@ -153,10 +153,10 @@ where
         .await
         .map_err(|e| MoneyError::Storage(e.to_string()))?;
 
-        for code in assets {
+        for code in &assets {
             create_vo_partition(&mut tx, code).await?;
         }
-        drop_orphaned_vo_partitions(&mut tx, assets).await?;
+        drop_orphaned_vo_partitions(&mut tx, &assets).await?;
 
         // Indexes for ValueObjects
         //
@@ -286,9 +286,10 @@ where
     }
 }
 
-/// Lowercase + `-` → `_` so an asset code like `"BTC-LN"` partitions as
-/// `ledger_value_objects_btc_ln`. Mirrors `partition_name_segment` in
-/// the ousia postgres adapter.
+/// `USD` partitions as `ledger_value_objects_usd`. The `-` → `_` step only
+/// matters for codes registered before codes were restricted to letters, so
+/// their existing partitions are still recognised. Mirrors
+/// `partition_name_segment` in the ousia postgres adapter.
 fn ledger_partition_segment(code: &str) -> String {
     code.to_lowercase().replace('-', "_")
 }
@@ -297,7 +298,7 @@ fn storage_err(e: sqlx::Error) -> MoneyError {
     MoneyError::Storage(e.to_string())
 }
 
-/// Create the partition for `code` (already validated). Rows for that code
+/// Create the partition for `code` (normalised: upper-case letters). Rows for that code
 /// may already sit in `_default` (minted before the asset was listed);
 /// Postgres refuses to add the partition while they're there, so move them.
 async fn create_vo_partition(conn: &mut sqlx::PgConnection, code: &str) -> Result<(), MoneyError> {
@@ -315,9 +316,10 @@ async fn create_vo_partition(conn: &mut sqlx::PgConnection, code: &str) -> Resul
     .await
     .map_err(storage_err)?;
     if exists {
-        // A same-named partition may belong to a code that folds the same way
-        // (`usd` vs `USD`); rows for this code would then silently go to `_default`.
-        // Codes are validated to [A-Za-z0-9_-], so the quoted literal is unambiguous.
+        // A same-named partition may hold a different code, e.g. a `usd` partition
+        // created before codes were normalised to upper case; rows for this code
+        // would then silently go to `_default`. Codes are letters only, so the
+        // quoted literal is unambiguous.
         return match bound {
             Some(b) if b.contains(&format!("'{code}'")) => Ok(()),
             Some(b) => Err(MoneyError::InvalidAssetCode(format!(
@@ -370,7 +372,7 @@ async fn create_vo_partition(conn: &mut sqlx::PgConnection, code: &str) -> Resul
 /// every start, so registered assets must keep their partitions regardless.
 async fn drop_orphaned_vo_partitions(
     conn: &mut sqlx::PgConnection,
-    listed: &[&str],
+    listed: &[String],
 ) -> Result<(), MoneyError> {
     let registered: Vec<String> = sqlx::query_scalar("SELECT code FROM ledger_assets")
         .fetch_all(&mut *conn)
@@ -378,8 +380,7 @@ async fn drop_orphaned_vo_partitions(
         .map_err(storage_err)?;
     let keep: std::collections::HashSet<String> = listed
         .iter()
-        .copied()
-        .chain(registered.iter().map(String::as_str))
+        .chain(registered.iter())
         .map(|c| format!("ledger_value_objects_{}", ledger_partition_segment(c)))
         .chain(std::iter::once("ledger_value_objects_default".to_string()))
         .collect();
@@ -416,31 +417,17 @@ async fn drop_orphaned_vo_partitions(
     Ok(())
 }
 
-/// Asset codes are spliced into partition DDL, so only allow identifier-safe
-/// characters, and a length that keeps `ledger_value_objects_<code>` within
-/// Postgres' 63-byte identifier limit. Codes that fold to the same partition
-/// name would silently share (or lose) a partition, so reject those too.
-fn validate_asset_codes(assets: &[&str]) -> Result<(), MoneyError> {
-    const MAX_LEN: usize = 63 - "ledger_value_objects_".len();
-    let mut seen: std::collections::HashMap<String, &str> = std::collections::HashMap::new();
+/// Normalised, de-duplicated codes. Normalisation also makes them safe to
+/// splice into partition DDL: letters only, within the identifier limit.
+fn normalize_asset_codes(assets: &[&str]) -> Result<Vec<String>, MoneyError> {
+    let mut out: Vec<String> = Vec::new();
     for code in assets {
-        let valid = !code.is_empty()
-            && code.len() <= MAX_LEN
-            && code.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-');
-        if !valid {
-            return Err(MoneyError::InvalidAssetCode(format!(
-                "{code:?}: use 1-{MAX_LEN} characters from [A-Za-z0-9_-]"
-            )));
-        }
-        if let Some(other) = seen.insert(ledger_partition_segment(code), code) {
-            if other != *code {
-                return Err(MoneyError::InvalidAssetCode(format!(
-                    "{other:?} and {code:?} map to the same partition"
-                )));
-            }
+        let code = crate::asset::normalize_asset_code(code)?;
+        if !out.contains(&code) {
+            out.push(code);
         }
     }
-    Ok(())
+    Ok(out)
 }
 
 // ── Fragmentation ─────────────────────────────────────────────────────────────
@@ -1222,6 +1209,7 @@ where
     }
 
     async fn get_asset(&self, code: &str) -> Result<Asset, MoneyError> {
+        let code = crate::asset::normalize_asset_code(code)?;
         let row = sqlx::query(
             r#"
             SELECT id, code, unit, decimals
@@ -1229,11 +1217,11 @@ where
             WHERE code = $1
             "#,
         )
-        .bind(code)
+        .bind(&code)
         .fetch_optional(&self.get_pool())
         .await
         .map_err(|e| MoneyError::Storage(e.to_string()))?
-        .ok_or_else(|| MoneyError::AssetNotFound(code.to_string()))?;
+        .ok_or_else(|| MoneyError::AssetNotFound(code.clone()))?;
 
         Ok(Asset {
             id: row
@@ -1252,6 +1240,7 @@ where
     }
 
     async fn create_asset(&self, asset: Asset) -> Result<(), MoneyError> {
+        let code = crate::asset::normalize_asset_code(&asset.code)?;
         sqlx::query(
             r#"
             INSERT INTO ledger_assets (id, code, unit, decimals, created_at)
@@ -1259,7 +1248,7 @@ where
             "#,
         )
         .bind(asset.id)
-        .bind(asset.code)
+        .bind(code)
         .bind(asset.unit as i64)
         .bind(asset.decimals as i16)
         .execute(&self.get_pool())
@@ -1683,30 +1672,17 @@ mod schema_resolution_tests {
 
 #[cfg(test)]
 mod asset_code_tests {
-    use super::validate_asset_codes;
+    use super::normalize_asset_codes;
 
     #[test]
-    fn accepts_identifier_safe_codes() {
-        assert!(validate_asset_codes(&["USD", "BTC-LN", "usdc_e", "X1"]).is_ok());
-        assert!(validate_asset_codes(&["USD", "USD"]).is_ok());
+    fn dedupes_case_insensitively() {
+        assert_eq!(normalize_asset_codes(&["usd", "USD", "Ngn"]).unwrap(), ["USD", "NGN"]);
     }
 
     #[test]
-    fn rejects_injection_and_bad_characters() {
-        for bad in ["", "US D", "USD'); DROP TABLE objects; --", "NGN\"", "€UR", "a.b"] {
-            assert!(validate_asset_codes(&[bad]).is_err(), "{bad:?} should be rejected");
+    fn rejects_non_letters() {
+        for bad in ["", "MG-POINT", "U-S-D", "usdc_e", "X1", "US D", "USD'); DROP TABLE objects; --"] {
+            assert!(normalize_asset_codes(&["USD", bad]).is_err(), "{bad:?} should be rejected");
         }
-    }
-
-    #[test]
-    fn rejects_overlong_codes() {
-        assert!(validate_asset_codes(&[&"A".repeat(42)]).is_ok());
-        assert!(validate_asset_codes(&[&"A".repeat(43)]).is_err());
-    }
-
-    #[test]
-    fn rejects_codes_that_share_a_partition() {
-        assert!(validate_asset_codes(&["USD", "usd"]).is_err());
-        assert!(validate_asset_codes(&["BTC-LN", "BTC_LN"]).is_err());
     }
 }

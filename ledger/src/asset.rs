@@ -2,6 +2,26 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::MoneyError;
+
+/// Longest code whose Postgres partition name, `ledger_value_objects_<code>`,
+/// fits the 63-byte identifier limit.
+pub const MAX_ASSET_CODE_LEN: usize = 63 - "ledger_value_objects_".len();
+
+/// Asset codes are 1-42 ASCII letters and case-insensitive (`usd` is `USD`).
+/// Returns the canonical upper-case form.
+pub fn normalize_asset_code(code: &str) -> Result<String, MoneyError> {
+    let valid = !code.is_empty()
+        && code.len() <= MAX_ASSET_CODE_LEN
+        && code.bytes().all(|b| b.is_ascii_alphabetic());
+    if !valid {
+        return Err(MoneyError::InvalidAssetCode(format!(
+            "{code:?}: use 1-{MAX_ASSET_CODE_LEN} letters A-Z (e.g. MGPOINT, not MG-POINT)"
+        )));
+    }
+    Ok(code.to_ascii_uppercase())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Asset {
     pub id: Uuid,
@@ -14,7 +34,7 @@ impl Asset {
     pub fn new(code: &str, unit: u64, decimals: u8) -> Self {
         Self {
             id: uuid::Uuid::now_v7(),
-            code: code.to_string(),
+            code: code.to_ascii_uppercase(),
             unit,
             decimals,
         }

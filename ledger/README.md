@@ -110,6 +110,10 @@ let usd = Asset::new("USD", 10_000, 2);  // unit = $100, 2 decimal places
 system.adapter().create_asset(usd).await?;
 ```
 
+Asset codes are 1-42 ASCII letters and case-insensitive: `usd`, `Usd` and
+`USD` are the same asset, stored as `USD`. Digits and separators are rejected
+with `MoneyError::InvalidAssetCode` (use `MGPOINT`, not `MG-POINT`).
+
 In production you implement `LedgerAdapter` for your database (see [Implementing a Production Adapter](#implementing-a-production-adapter)).
 
 ---
@@ -413,7 +417,7 @@ match result {
     Err(MoneyError::Storage(msg))                => { /* DB or logic error, see msg */ }
     Err(MoneyError::DuplicateIdempotencyKey(id)) => { /* key already used */ }
     Err(MoneyError::TransactionNotFound)         => { /* tx_id not in store */ }
-    Err(MoneyError::Conflict(msg))               => { /* concurrent modification */ }
+    Err(MoneyError::InvalidAssetCode(msg))       => { /* code isn't 1-42 letters */ }
     Ok(())                                       => { /* success */ }
 }
 ```
