@@ -11,6 +11,8 @@ pub enum MoneyError {
     InvalidAuthority,
     TransactionNotFound,
     DuplicateIdempotencyKey(uuid::Uuid),
+    /// Asset code rejected: must be 1–42 chars of `[A-Za-z0-9_-]`, unique after case/`-` folding.
+    InvalidAssetCode(String),
     Storage(String),
 }
 
@@ -25,6 +27,7 @@ impl fmt::Display for MoneyError {
             Self::InvalidAuthority => write!(f, "Invalid authority"),
             Self::TransactionNotFound => write!(f, "Transaction not found"),
             Self::DuplicateIdempotencyKey(id) => write!(f, "Duplicate idempotency key: {}", id),
+            Self::InvalidAssetCode(msg) => write!(f, "Invalid asset code: {}", msg),
             Self::Storage(msg) => write!(f, "Storage error: {}", msg),
         }
     }

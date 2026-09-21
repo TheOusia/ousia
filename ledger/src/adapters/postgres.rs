@@ -33,6 +33,7 @@ where
     T: PostgresLedgerAdapter + Send + Sync,
 {
     async fn init_ledger_schema(&self, assets: &[&str]) -> Result<(), MoneyError> {
+        validate_asset_codes(assets)?;
         let mut tx = self
             .get_pool()
             .begin()
@@ -297,6 +298,33 @@ where
 /// the ousia postgres adapter.
 fn ledger_partition_segment(code: &str) -> String {
     code.to_lowercase().replace('-', "_")
+}
+
+/// Asset codes are spliced into partition DDL, so only allow identifier-safe
+/// characters, and a length that keeps `ledger_value_objects_<code>` within
+/// Postgres' 63-byte identifier limit. Codes that fold to the same partition
+/// name would silently share (or lose) a partition, so reject those too.
+fn validate_asset_codes(assets: &[&str]) -> Result<(), MoneyError> {
+    const MAX_LEN: usize = 63 - "ledger_value_objects_".len();
+    let mut seen: std::collections::HashMap<String, &str> = std::collections::HashMap::new();
+    for code in assets {
+        let valid = !code.is_empty()
+            && code.len() <= MAX_LEN
+            && code.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-');
+        if !valid {
+            return Err(MoneyError::InvalidAssetCode(format!(
+                "{code:?}: use 1-{MAX_LEN} characters from [A-Za-z0-9_-]"
+            )));
+        }
+        if let Some(other) = seen.insert(ledger_partition_segment(code), code) {
+            if other != *code {
+                return Err(MoneyError::InvalidAssetCode(format!(
+                    "{other:?} and {code:?} map to the same partition"
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 // ── Fragmentation ─────────────────────────────────────────────────────────────
@@ -1534,5 +1562,35 @@ mod schema_resolution_tests {
             first_search_path_entry("\"odd\"\"name\"").as_deref(),
             Some("odd\"name")
         );
+    }
+}
+
+#[cfg(test)]
+mod asset_code_tests {
+    use super::validate_asset_codes;
+
+    #[test]
+    fn accepts_identifier_safe_codes() {
+        assert!(validate_asset_codes(&["USD", "BTC-LN", "usdc_e", "X1"]).is_ok());
+        assert!(validate_asset_codes(&["USD", "USD"]).is_ok());
+    }
+
+    #[test]
+    fn rejects_injection_and_bad_characters() {
+        for bad in ["", "US D", "USD'); DROP TABLE objects; --", "NGN\"", "€UR", "a.b"] {
+            assert!(validate_asset_codes(&[bad]).is_err(), "{bad:?} should be rejected");
+        }
+    }
+
+    #[test]
+    fn rejects_overlong_codes() {
+        assert!(validate_asset_codes(&[&"A".repeat(42)]).is_ok());
+        assert!(validate_asset_codes(&[&"A".repeat(43)]).is_err());
+    }
+
+    #[test]
+    fn rejects_codes_that_share_a_partition() {
+        assert!(validate_asset_codes(&["USD", "usd"]).is_err());
+        assert!(validate_asset_codes(&["BTC-LN", "BTC_LN"]).is_err());
     }
 }

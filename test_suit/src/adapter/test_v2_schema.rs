@@ -603,6 +603,33 @@ async fn v2_ledger_init_creates_per_asset_partitions() {
     assert!(parts.contains(&"ledger_value_objects_eur".to_string()));
 }
 
+#[tokio::test]
+async fn test_init_ledger_schema_rejects_unsafe_asset_codes() {
+    use ousia::ledger::MoneyError;
+    use ousia::ledger::adapters::postgres::PostgresSchemaLedgerAdapter;
+
+    let (_r, pool) = setup_test_db().await;
+    let adapter = PostgresAdapter::from_pool(pool.clone());
+    adapter.init_schema().await.unwrap();
+
+    let err = adapter
+        .init_ledger_schema(&["USD", "X') ; DROP TABLE objects; --"])
+        .await
+        .unwrap_err();
+    assert!(matches!(err, MoneyError::InvalidAssetCode(_)), "{err:?}");
+    let err = adapter.init_ledger_schema(&["USD", "usd"]).await.unwrap_err();
+    assert!(matches!(err, MoneyError::InvalidAssetCode(_)), "{err:?}");
+
+    // rejected before any DDL ran
+    let parts = relations_under(&pool, "ledger_value_objects").await;
+    assert!(!parts.contains(&"ledger_value_objects_usd".to_string()), "{parts:?}");
+    let objects: bool = sqlx::query_scalar("SELECT to_regclass('objects') IS NOT NULL")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(objects);
+}
+
 // ─────────────────────────────────────────────────────────────────────
 // Custom schema (search_path from the connection string)
 // ─────────────────────────────────────────────────────────────────────
