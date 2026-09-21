@@ -670,6 +670,48 @@ async fn test_init_ledger_schema_drops_only_empty_unregistered_partitions() {
     assert!(parts.contains(&"ledger_value_objects_eur".to_string()), "{parts:?}");
 }
 
+/// A mint into a partition that cleanup considers orphaned (its asset is
+/// registered in a transaction cleanup can't see yet) must never be dropped.
+#[tokio::test]
+async fn test_orphan_cleanup_waits_for_in_flight_writes() {
+    use ousia::ledger::adapters::postgres::PostgresSchemaLedgerAdapter;
+
+    let (_r, pool) = setup_test_db().await;
+    let adapter = PostgresAdapter::from_pool(pool.clone());
+    adapter.init_schema().await.unwrap();
+    adapter.init_ledger_schema(&["EUR"]).await.unwrap();
+
+    let mut writer = pool.begin().await.unwrap();
+    let asset = uuid::Uuid::now_v7();
+    sqlx::query("INSERT INTO ledger_assets (id, code, unit, decimals) VALUES ($1, 'EUR', 100, 2)")
+        .bind(asset)
+        .execute(&mut *writer)
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO ledger_value_objects (id, asset, asset_code, owner, amount, state) \
+         VALUES ($1, $2, 'EUR', $3, 100, 'alive')",
+    )
+    .bind(uuid::Uuid::now_v7())
+    .bind(asset)
+    .bind(uuid::Uuid::now_v7())
+    .execute(&mut *writer)
+    .await
+    .unwrap();
+
+    // cleanup starts while the mint is uncommitted: EUR is not a registered
+    // asset from its point of view and the partition looks empty
+    let cleanup = tokio::spawn({
+        let pool = pool.clone();
+        async move { PostgresAdapter::from_pool(pool).init_ledger_schema(&[]).await }
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    writer.commit().await.unwrap();
+    cleanup.await.unwrap().unwrap();
+
+    assert_eq!(vo_rows(&pool, "ledger_value_objects_eur").await, 1);
+}
+
 #[tokio::test]
 async fn test_init_ledger_schema_rejects_unsafe_asset_codes() {
     use ousia::ledger::MoneyError;

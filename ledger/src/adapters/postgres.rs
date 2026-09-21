@@ -376,6 +376,12 @@ async fn drop_orphaned_vo_partitions(
 
     for partition in partitions.into_iter().filter(|p| !keep.contains(p)) {
         let quoted = format!("\"{}\"", quote_ident(&partition));
+        // Lock before the emptiness check: an uncommitted write into this
+        // partition finishes first and is then seen, instead of being dropped.
+        sqlx::query(&format!("LOCK TABLE {quoted} IN ACCESS EXCLUSIVE MODE"))
+            .execute(&mut *conn)
+            .await
+            .map_err(storage_err)?;
         let has_rows: bool = sqlx::query_scalar(&format!("SELECT EXISTS (SELECT 1 FROM {quoted})"))
             .fetch_one(&mut *conn)
             .await
