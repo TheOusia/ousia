@@ -296,6 +296,15 @@ impl Engine {
         records.into_iter().map(|r| r.to_object()).collect()
     }
 
+    /// Fetch objects of several types in one query. Returns raw records;
+    /// group by `record.type_name` and decode each with `to_object::<T>()`.
+    pub async fn fetch_objects_batch(
+        &self,
+        pairs: Vec<(&'static str, Vec<Uuid>)>,
+    ) -> Result<Vec<ObjectRecord>, Error> {
+        self.inner.adapter.fetch_objects_batch(pairs).await
+    }
+
     /// Update an existing object
     pub async fn update_object<T: Object>(&self, obj: &mut T) -> Result<(), Error> {
         let meta = obj.meta_mut();

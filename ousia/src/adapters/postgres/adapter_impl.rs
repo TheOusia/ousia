@@ -96,6 +96,38 @@ impl Adapter for PostgresAdapter {
             .collect()
     }
 
+    async fn fetch_objects_batch(
+        &self,
+        pairs: Vec<(&'static str, Vec<Uuid>)>,
+    ) -> Result<Vec<ObjectRecord>, Error> {
+        let pairs: Vec<_> = pairs.into_iter().filter(|(_, ids)| !ids.is_empty()).collect();
+        if pairs.is_empty() {
+            return Ok(vec![]);
+        }
+        let sql = (0..pairs.len())
+            .map(|i| {
+                format!(
+                    "SELECT o.id, o.type, o.owner, o.created_at, o.updated_at, o.data \
+                     FROM objects o WHERE o.type = ${} AND o.id = ANY(${})",
+                    2 * i + 1,
+                    2 * i + 2
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" UNION ALL ");
+        let mut query = sqlx::query(&sql);
+        for (type_name, ids) in &pairs {
+            query = query.bind(*type_name).bind(ids);
+        }
+        let rows = query
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|err| Error::Storage(err.to_string()))?;
+        rows.into_iter()
+            .map(|row| Self::map_row_to_object_record_slim(row, None))
+            .collect()
+    }
+
     async fn update_object(&self, record: ObjectRecord) -> Result<(), Error> {
         sqlx::query(
             r#"

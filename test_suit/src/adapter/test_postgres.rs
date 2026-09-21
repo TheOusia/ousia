@@ -217,6 +217,56 @@ async fn test_fetch_owned_objects() {
     assert_eq!(posts.len(), 3);
 }
 
+#[tokio::test]
+async fn test_fetch_objects_batch_mixed_types() {
+    let (_r, pool) = setup_test_db().await;
+    let adapter = PostgresAdapter::from_pool(pool);
+    adapter.init_schema().await.unwrap();
+    let engine = Engine::new(Box::new(adapter));
+
+    let mut alice = User::default();
+    alice.username = "alice".into();
+    engine.create_object(&alice).await.unwrap();
+    let mut bob = User::default();
+    bob.username = "bob".into();
+    engine.create_object(&bob).await.unwrap();
+    let mut post = Post::default();
+    post.title = "Batch Post".into();
+    engine.create_object(&post).await.unwrap();
+
+    let records = engine
+        .fetch_objects_batch(vec![
+            (User::TYPE, vec![alice.id(), bob.id()]),
+            // a User id asked for under the Post type must not match
+            (Post::TYPE, vec![post.id(), alice.id()]),
+            (Hub::TYPE, vec![]),
+        ])
+        .await
+        .unwrap();
+    assert_eq!(records.len(), 3);
+
+    let mut users = Vec::new();
+    let mut posts = Vec::new();
+    for r in records {
+        match r.type_name.as_ref() {
+            t if t == User::TYPE => users.push(r.to_object::<User>().unwrap()),
+            t if t == Post::TYPE => posts.push(r.to_object::<Post>().unwrap()),
+            other => panic!("unexpected type {other}"),
+        }
+    }
+    let mut names: Vec<_> = users.iter().map(|u| u.username.as_str()).collect();
+    names.sort();
+    assert_eq!(names, ["alice", "bob"]);
+    assert_eq!(posts.len(), 1);
+    assert_eq!(posts[0].title, "Batch Post");
+
+    let none = engine
+        .fetch_objects_batch(vec![(User::TYPE, vec![])])
+        .await
+        .unwrap();
+    assert!(none.is_empty());
+}
+
 // ============================================================
 // Section 2: Object Queries — Filter Variants
 // ============================================================

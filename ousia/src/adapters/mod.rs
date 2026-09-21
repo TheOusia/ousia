@@ -223,6 +223,11 @@ pub trait Adapter: UniqueAdapter + GeoAdapter + EdgeTraversal + Send + Sync + 's
         type_name: &'static str,
         ids: Vec<Uuid>,
     ) -> Result<Vec<ObjectRecord>, Error>;
+    /// Objects of several types in one round trip; pairs with no ids are skipped.
+    async fn fetch_objects_batch(
+        &self,
+        pairs: Vec<(&'static str, Vec<Uuid>)>,
+    ) -> Result<Vec<ObjectRecord>, Error>;
     async fn update_object(&self, record: ObjectRecord) -> Result<(), Error>;
 
     /// Explicit ownership transfer
