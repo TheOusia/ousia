@@ -1030,6 +1030,7 @@ async fn test_transfer_ownership_wrong_owner_fails() {
     assert!(matches!(result, Err(Error::NotFound)));
 }
 
+#[cfg(test)]
 fn slot_for(owner: uuid::Uuid, label: &str) -> Slot {
     let mut slot = Slot::default();
     slot.set_owner(owner);
