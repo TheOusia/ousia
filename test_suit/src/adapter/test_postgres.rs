@@ -4393,6 +4393,49 @@ async fn test_count_owned_objects_batch() {
 // can't catch.
 
 #[tokio::test]
+async fn test_rename_alias_reads_old_key_and_rewrites_on_save() {
+    let (_r, pool) = setup_test_db().await;
+    let adapter = PostgresAdapter::from_pool(pool.clone());
+    adapter.init_schema().await.unwrap();
+
+    let id = uuid::Uuid::now_v7();
+    let mut legacy = std::collections::BTreeMap::new();
+    legacy.insert("handle", "alice");
+    sqlx::query(
+        "INSERT INTO objects (id, type, owner, created_at, updated_at, data, index_meta) \
+         VALUES ($1, 'Profile', $2, now(), now(), $3, '{}'::jsonb)",
+    )
+    .bind(id)
+    .bind(uuid::Uuid::nil())
+    .bind(rmp_serde::to_vec_named(&legacy).unwrap())
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // an aliased key is not drift: it is read, not lost
+    let warnings = adapter.check_field_drift().await.unwrap();
+    assert!(
+        !warnings.iter().any(|w| w.contains("object:Profile")),
+        "unexpected drift warning: {warnings:?}"
+    );
+
+    let engine = Engine::new(Box::new(adapter));
+    let mut profile: Profile = engine.fetch_object(id).await.unwrap().unwrap();
+    assert_eq!(profile.display, "alice");
+
+    // saving re-encodes under the current name
+    engine.update_object(&mut profile).await.unwrap();
+    let data: Vec<u8> = sqlx::query_scalar("SELECT data FROM objects WHERE id = $1")
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let stored: std::collections::BTreeMap<String, String> = rmp_serde::from_slice(&data).unwrap();
+    assert_eq!(stored.get("display").map(String::as_str), Some("alice"));
+    assert!(!stored.contains_key("handle"));
+}
+
+#[tokio::test]
 async fn test_check_field_drift_detects_renamed_field_on_object() {
     let (_r, pool) = setup_test_db().await;
     let adapter = PostgresAdapter::from_pool(pool.clone());

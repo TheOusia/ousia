@@ -5,7 +5,7 @@ use quote::{format_ident, quote};
 use syn::{Data, DeriveInput, Expr, ExprLit, Field, Fields, Lit, Meta, Result, Type};
 
 use crate::shared::{
-    get_field_default_value, get_ousia_attr, import_ousia, is_meta_field, is_private_field,
+    get_field_default_value, get_ousia_attr, get_rename_value, import_ousia, is_meta_field, is_private_field,
     parse_geo_source_fields, parse_index_kinds, parse_ousia_attr,
 };
 
@@ -637,6 +637,18 @@ pub fn generate_object_impl(input: &DeriveInput) -> Result<TokenStream> {
         })
         .collect();
 
+    let field_aliases: Vec<Option<String>> =
+        non_meta_fields.iter().map(|f| get_rename_value(f)).collect();
+    let manifest_aliases: Vec<&String> = field_aliases.iter().flatten().collect();
+    let field_enum_variants: Vec<proc_macro2::TokenStream> = deserialize_field_variants
+        .iter()
+        .zip(field_aliases.iter())
+        .map(|(variant, alias)| match alias {
+            Some(old) => quote! { #[serde(alias = #old)] #variant },
+            None => quote! { #variant },
+        })
+        .collect();
+
     let deserialize_field_types: Vec<_> = non_meta_fields.iter().map(|f| &f.ty).collect();
 
     let visitor_name = format_ident!("{}Visitor", ident);
@@ -852,7 +864,7 @@ pub fn generate_object_impl(input: &DeriveInput) -> Result<TokenStream> {
                     #[derive(serde::Deserialize)]
                     #[serde(field_identifier, rename_all = "snake_case")]
                     enum Field {
-                        #(#deserialize_field_variants,)*
+                        #(#field_enum_variants,)*
                         #[serde(other)]
                         Unknown,
                     }
@@ -912,6 +924,7 @@ pub fn generate_object_impl(input: &DeriveInput) -> Result<TokenStream> {
             from_type: None,
             to_type: None,
             field_names: &[#(#deserialize_field_names),*],
+            field_aliases: &[#(#manifest_aliases),*],
         };
 
         impl #ousia::object::traits::Object for #ident {

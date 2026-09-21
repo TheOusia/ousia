@@ -553,6 +553,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
             from_type: Some(<#from_ty as #ousia::object::Object>::TYPE),
             to_type: Some(<#to_ty as #ousia::object::Object>::TYPE),
             field_names: &[#(#deserialize_field_names),*],
+            field_aliases: &[],
         };
 
         impl #ousia::edge::Edge for #ident {

@@ -42,6 +42,8 @@ pub struct TypeManifestEntry {
     pub from_type: Option<&'static str>,
     pub to_type: Option<&'static str>,
     pub field_names: &'static [&'static str],
+    /// Old names still accepted on read via `#[ousia(rename = "old")]`.
+    pub field_aliases: &'static [&'static str],
 }
 
 /// Compile-time set of every Object/Edge linked into the binary.

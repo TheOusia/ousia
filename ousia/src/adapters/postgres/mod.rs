@@ -266,7 +266,7 @@ impl PostgresAdapter {
             by_type
                 .entry((entry.kind, entry.type_name))
                 .or_default()
-                .extend(entry.field_names.iter().copied());
+                .extend(entry.field_names.iter().chain(entry.field_aliases).copied());
         }
 
         let mut warnings = Vec::new();

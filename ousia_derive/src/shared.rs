@@ -75,6 +75,33 @@ pub fn get_field_default_value(field: &Field) -> Option<proc_macro2::TokenStream
     None
 }
 
+/// `#[ousia(rename = "old_name")]`: previous name of a field, still accepted when decoding.
+pub fn get_rename_value(field: &Field) -> Option<String> {
+    for attr in &field.attrs {
+        if !attr.path().is_ident("ousia") {
+            continue;
+        }
+        let Meta::List(meta_list) = &attr.meta else {
+            continue;
+        };
+        let Ok(nested) = meta_list.parse_args_with(
+            syn::punctuated::Punctuated::<Meta, syn::Token![,]>::parse_terminated,
+        ) else {
+            continue;
+        };
+        for meta in nested {
+            if let Meta::NameValue(nv) = meta {
+                if nv.path.is_ident("rename") {
+                    if let Expr::Lit(ExprLit { lit: Lit::Str(s), .. }) = &nv.value {
+                        return Some(s.value());
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
 fn default_expr_to_tokens(expr: &Expr) -> proc_macro2::TokenStream {
     match expr {
         Expr::Lit(ExprLit { lit: Lit::Str(s), .. }) => {

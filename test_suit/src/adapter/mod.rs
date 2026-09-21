@@ -248,3 +248,13 @@ pub struct Slot {
 
     pub label: String,
 }
+
+/// `display` was previously stored under the key `handle`.
+#[derive(OusiaObject, OusiaDefault, Debug)]
+#[ousia(type_name = "Profile")]
+pub struct Profile {
+    _meta: Meta,
+
+    #[ousia(rename = "handle")]
+    pub display: String,
+}
