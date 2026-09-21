@@ -99,4 +99,63 @@ impl UniqueAdapter for PostgresAdapter {
             .map(|row| row.try_get("key").unwrap())
             .collect())
     }
+
+    async fn delete_unique_for_object(&self, object_id: Uuid) -> Result<(), Error> {
+        sqlx::query("DELETE FROM unique_constraints WHERE id = $1")
+            .bind(object_id)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| Error::Storage(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn delete_unique_for_objects(
+        &self,
+        type_name: &str,
+        owner: Uuid,
+        ids: Vec<Uuid>,
+    ) -> Result<(), Error> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        sqlx::query(
+            r#"
+            DELETE FROM unique_constraints uc
+            USING objects o
+            WHERE uc.id = o.id
+              AND o.id = ANY($1)
+              AND o.type = $2
+              AND o.owner = $3
+            "#,
+        )
+        .bind(&ids)
+        .bind(type_name)
+        .bind(owner)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| Error::Storage(e.to_string()))?;
+        Ok(())
+    }
+
+    async fn delete_unique_for_owned(
+        &self,
+        type_name: &str,
+        owner: Uuid,
+    ) -> Result<(), Error> {
+        sqlx::query(
+            r#"
+            DELETE FROM unique_constraints uc
+            USING objects o
+            WHERE uc.id = o.id
+              AND o.type = $1
+              AND o.owner = $2
+            "#,
+        )
+        .bind(type_name)
+        .bind(owner)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| Error::Storage(e.to_string()))?;
+        Ok(())
+    }
 }

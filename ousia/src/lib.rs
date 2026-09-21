@@ -331,8 +331,13 @@ impl Engine {
     ) -> Result<Option<T>, Error> {
         let record = self.inner.adapter.delete_object(T::TYPE, id, owner).await?;
 
-        if T::HAS_GEO_FIELDS && record.is_some() {
-            self.inner.adapter.delete_geo_for_object(id).await?;
+        if record.is_some() {
+            if T::HAS_UNIQUE_FIELDS {
+                self.inner.adapter.delete_unique_for_object(id).await?;
+            }
+            if T::HAS_GEO_FIELDS {
+                self.inner.adapter.delete_geo_for_object(id).await?;
+            }
         }
 
         match record {
@@ -346,29 +351,62 @@ impl Engine {
         ids: Vec<Uuid>,
         owner: Uuid,
     ) -> Result<u64, Error> {
-        let geo_cleanup_ids = if T::HAS_GEO_FIELDS {
+        let cleanup_ids = if T::HAS_UNIQUE_FIELDS || T::HAS_GEO_FIELDS {
             ids.clone()
         } else {
             Vec::new()
         };
+        // Unique cleanup runs BEFORE the object delete so the join in
+        // `delete_unique_for_objects` can resolve which ids actually belong to
+        // (type, owner) and avoid touching unrelated hashes.
+        if T::HAS_UNIQUE_FIELDS {
+            self.inner
+                .adapter
+                .delete_unique_for_objects(T::TYPE, owner, cleanup_ids.clone())
+                .await?;
+        }
         let record = self
             .inner
             .adapter
             .delete_bulk_objects(T::TYPE, ids, owner)
             .await?;
-        for id in geo_cleanup_ids {
-            self.inner.adapter.delete_geo_for_object(id).await?;
+        if T::HAS_GEO_FIELDS {
+            for id in cleanup_ids {
+                self.inner.adapter.delete_geo_for_object(id).await?;
+            }
         }
 
         Ok(record)
     }
 
     pub async fn delete_owned_objects<T: Object>(&self, owner: Uuid) -> Result<u64, Error> {
+        // Geo cleanup needs ids; capture them before the rows disappear.
+        let geo_cleanup_ids: Vec<Uuid> = if T::HAS_GEO_FIELDS {
+            self.fetch_owned_objects::<T>(owner)
+                .await?
+                .iter()
+                .map(|o| o.id())
+                .collect()
+        } else {
+            Vec::new()
+        };
+        // Unique cleanup must precede the object delete — the join resolves ids
+        // through `objects`, so it has to run while those rows still exist.
+        if T::HAS_UNIQUE_FIELDS {
+            self.inner
+                .adapter
+                .delete_unique_for_owned(T::TYPE, owner)
+                .await?;
+        }
         let record = self
             .inner
             .adapter
             .delete_owned_objects(T::TYPE, owner)
             .await?;
+
+        for id in geo_cleanup_ids {
+            self.inner.adapter.delete_geo_for_object(id).await?;
+        }
 
         Ok(record)
     }
@@ -380,13 +418,87 @@ impl Engine {
         from_owner: Uuid,
         to_owner: Uuid,
     ) -> Result<T, Error> {
-        let record = self
+        // Fast path: nothing to migrate in the side-table.
+        if !T::HAS_UNIQUE_FIELDS {
+            let record = self
+                .inner
+                .adapter
+                .transfer_object(T::TYPE, id, from_owner, to_owner)
+                .await?;
+            return record.to_object();
+        }
+
+        // Re-deriving hashes requires the current object state. We fetch by id
+        // and validate ownership ourselves so a wrong-owner caller behaves the
+        // same as the adapter SQL (returns NotFound, no side-effects).
+        let current = self
+            .inner
+            .adapter
+            .fetch_object(T::TYPE, id)
+            .await?
+            .ok_or(Error::NotFound)?;
+        if current.owner != from_owner {
+            return Err(Error::NotFound);
+        }
+
+        let from_obj: T = current.to_object()?;
+        let from_hashes: Vec<String> = from_obj
+            .derive_unique_hashes()
+            .into_iter()
+            .map(|(h, _)| h)
+            .collect();
+
+        let mut to_obj = from_obj;
+        to_obj.meta_mut().owner = to_owner;
+        let to_hashes = to_obj.derive_unique_hashes();
+
+        // Diff: only hashes that involve `owner` will differ; the rest are
+        // unchanged and skip the side-table entirely.
+        let hashes_to_add: Vec<(String, &'static str)> = to_hashes
+            .iter()
+            .filter(|(h, _)| !from_hashes.contains(h))
+            .cloned()
+            .collect();
+        let hashes_to_remove: Vec<String> = from_hashes
+            .into_iter()
+            .filter(|h| !to_hashes.iter().any(|(nh, _)| nh == h))
+            .collect();
+
+        // Insert new hashes first — if the destination owner already has a
+        // conflicting object, this aborts before any owner mutation lands.
+        if !hashes_to_add.is_empty() {
+            self.inner
+                .adapter
+                .insert_unique_hashes(T::TYPE, id, hashes_to_add.clone())
+                .await?;
+        }
+
+        match self
             .inner
             .adapter
             .transfer_object(T::TYPE, id, from_owner, to_owner)
-            .await?;
-
-        record.to_object()
+            .await
+        {
+            Ok(record) => {
+                if !hashes_to_remove.is_empty() {
+                    self.inner
+                        .adapter
+                        .delete_unique_hashes(hashes_to_remove)
+                        .await?;
+                }
+                record.to_object()
+            }
+            Err(err) => {
+                // Rollback the optimistic hash insert so we don't leave an
+                // orphan claim for the destination owner.
+                if !hashes_to_add.is_empty() {
+                    let rollback: Vec<String> =
+                        hashes_to_add.into_iter().map(|(h, _)| h).collect();
+                    let _ = self.inner.adapter.delete_unique_hashes(rollback).await;
+                }
+                Err(err)
+            }
+        }
     }
 
     // ==================== Object Queries ====================

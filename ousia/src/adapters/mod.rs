@@ -36,6 +36,32 @@ pub trait UniqueAdapter {
     async fn delete_unique_hashes(&self, hashes: Vec<String>) -> Result<(), Error>;
 
     async fn get_hashes_for_object(&self, object_id: Uuid) -> Result<Vec<String>, Error>;
+
+    /// Drop every `unique_constraints` row belonging to `object_id`. Called by
+    /// `Engine::delete_object` after a successful object delete; without it, the
+    /// side-table row outlives the object and blocks future creates that reuse
+    /// the same unique value (e.g. an `unique = "owner"` O2O after a clear).
+    async fn delete_unique_for_object(&self, object_id: Uuid) -> Result<(), Error>;
+
+    /// Drop `unique_constraints` rows for the subset of `ids` that currently
+    /// exist under (`type_name`, `owner`). Joined against `objects` so we never
+    /// touch hashes for an id that maps to a different owner. Must run BEFORE
+    /// the matching object delete.
+    async fn delete_unique_for_objects(
+        &self,
+        type_name: &str,
+        owner: Uuid,
+        ids: Vec<Uuid>,
+    ) -> Result<(), Error>;
+
+    /// Drop `unique_constraints` rows for every object of `type_name` owned by
+    /// `owner`. Must run BEFORE `delete_owned_objects` so the join can resolve
+    /// the ids.
+    async fn delete_unique_for_owned(
+        &self,
+        type_name: &str,
+        owner: Uuid,
+    ) -> Result<(), Error>;
 }
 
 /// Side-table operations for geo-indexed fields. All methods have default
