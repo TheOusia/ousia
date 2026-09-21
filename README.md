@@ -894,14 +894,19 @@ for (user, posts) in results {
 Named counters backed by the database. Useful for order numbers, invoice IDs, and similar monotonically increasing values.
 
 ```rust
-// Read the current value without incrementing
-let current: u64 = engine.counter_value("order_number".to_string()).await;
+// Read the current value without incrementing (`None` before first use)
+let current: Option<u64> = engine.counter_value("order_number".to_string()).await;
 
-// Increment and return the new value. Initializes the value on first call and return 1
+// Increment and return the new value; the first call returns 1
 let next: u64 = engine.counter_next_value("order_number".to_string()).await;
 ```
 
 Counter keys are arbitrary strings. The counter is created on first use.
+
+Counters are gap-free: every value is handed out once, in order. The price is
+that increments of the *same* key run one at a time (a few thousand per second
+on typical hardware); different keys don't contend. For high-rate IDs that
+don't need to be gap-free, use a native Postgres sequence instead.
 
 ---
 

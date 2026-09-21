@@ -82,10 +82,18 @@ ALTER INDEX objects_user_index_meta_idx SET (gin_pending_list_limit = 32768);
 
 ## Counters
 
-`counter_next_value` increments a row in the `sequences` table, so every call
-for the same key serialises on that row's lock. For counters incremented at
->1K/s, keep the table on a low fillfactor so updates stay HOT, and prefer
-sharding hot counters by key (e.g. `invoice-seq:{shard}`) over a single row:
+`counter_next_value` increments a row in the `sequences` table. That is what
+makes counters gap-free, and it also means increments of the same key run one
+at a time. Measured on Postgres 16: one hot key tops out around 4-5K
+increments/s (it plateaus rather than collapsing as clients are added), 1,000
+keys spread across 32 clients reach ~34K/s, and a native sequence ~120K/s.
+
+- Keep per-key rates well under that ceiling, or split unrelated counters into
+  separate keys. Don't shard one logical counter across keys if it must stay a
+  single gap-free sequence (invoice numbers).
+- For high-rate IDs that may have gaps, use a native sequence
+  (`CREATE SEQUENCE ... CACHE 100` + `nextval`) instead of a counter.
+- A lower fillfactor keeps these single-row updates HOT:
 
 ```sql
 ALTER TABLE sequences SET (fillfactor = 50);
