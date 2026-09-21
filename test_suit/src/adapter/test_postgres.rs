@@ -968,6 +968,220 @@ async fn test_query_ne_requires_key_existence() {
     assert_eq!(eq_false[0].id(), explicit_false.id());
 }
 
+// ── Negated comparisons & random sort ───────────────────────────────────────
+
+#[cfg(test)]
+async fn seed_variants(engine: &Engine, rows: &[(&str, i64, &[&str])]) {
+    for (name, count, tags) in rows {
+        let mut v = Variants::default();
+        v.name = (*name).into();
+        v.count = *count;
+        v.tags = tags.iter().map(|t| t.to_string()).collect();
+        engine.create_object(&v).await.unwrap();
+    }
+}
+
+#[cfg(test)]
+fn sorted_names(rows: &[Variants]) -> Vec<String> {
+    let mut names: Vec<String> = rows.iter().map(|v| v.name.clone()).collect();
+    names.sort();
+    names
+}
+
+#[tokio::test]
+async fn test_query_not_begins_with() {
+    let (_r, pool) = setup_test_db().await;
+    let adapter = PostgresAdapter::from_pool(pool);
+    adapter.init_schema().await.unwrap();
+    let engine = Engine::new(Box::new(adapter));
+
+    seed_variants(&engine, &[("rust-a", 1, &[]), ("rust-b", 2, &[]), ("go-c", 3, &[])]).await;
+
+    let rows: Vec<Variants> = engine
+        .query_objects(Query::default().where_not_begins_with(&Variants::FIELDS.name, "rust"))
+        .await
+        .unwrap();
+    assert_eq!(sorted_names(&rows), ["go-c"]);
+}
+
+#[tokio::test]
+async fn test_query_not_in_strings_and_ints() {
+    let (_r, pool) = setup_test_db().await;
+    let adapter = PostgresAdapter::from_pool(pool);
+    adapter.init_schema().await.unwrap();
+    let engine = Engine::new(Box::new(adapter));
+
+    seed_variants(&engine, &[("a", 1, &[]), ("b", 2, &[]), ("c", 3, &[]), ("d", 4, &[])]).await;
+
+    let rows: Vec<Variants> = engine
+        .query_objects(Query::default().where_not_in(&Variants::FIELDS.name, vec!["a", "b"]))
+        .await
+        .unwrap();
+    assert_eq!(sorted_names(&rows), ["c", "d"]);
+
+    let rows: Vec<Variants> = engine
+        .query_objects(Query::default().where_not_in(&Variants::FIELDS.count, vec![1i64, 4]))
+        .await
+        .unwrap();
+    assert_eq!(sorted_names(&rows), ["b", "c"]);
+
+    // AND-ed with a range filter: count >= 2 AND name NOT IN [c]
+    let rows: Vec<Variants> = engine
+        .query_objects(
+            Query::default()
+                .where_gte(&Variants::FIELDS.count, 2i64)
+                .where_not_in(&Variants::FIELDS.name, vec!["c"]),
+        )
+        .await
+        .unwrap();
+    assert_eq!(sorted_names(&rows), ["b", "d"]);
+
+    // OR form: name = a OR count NOT IN [1, 2, 3]
+    let rows: Vec<Variants> = engine
+        .query_objects(
+            Query::default()
+                .where_eq(&Variants::FIELDS.name, "a")
+                .or_not_in(&Variants::FIELDS.count, vec![1i64, 2, 3]),
+        )
+        .await
+        .unwrap();
+    assert_eq!(sorted_names(&rows), ["a", "d"]);
+}
+
+#[tokio::test]
+async fn test_query_not_contains_all() {
+    let (_r, pool) = setup_test_db().await;
+    let adapter = PostgresAdapter::from_pool(pool);
+    adapter.init_schema().await.unwrap();
+    let engine = Engine::new(Box::new(adapter));
+
+    seed_variants(
+        &engine,
+        &[("xy", 1, &["x", "y"]), ("xyz", 2, &["x", "y", "z"]), ("x", 3, &["x"]), ("yz", 4, &["y", "z"])],
+    )
+    .await;
+
+    let rows: Vec<Variants> = engine
+        .query_objects(
+            Query::default().where_not_contains_all(&Variants::FIELDS.tags, vec!["x", "y"]),
+        )
+        .await
+        .unwrap();
+    assert_eq!(sorted_names(&rows), ["x", "yz"]);
+}
+
+#[tokio::test]
+async fn test_query_sort_random() {
+    let (_r, pool) = setup_test_db().await;
+    let adapter = PostgresAdapter::from_pool(pool);
+    adapter.init_schema().await.unwrap();
+    let engine = Engine::new(Box::new(adapter));
+
+    let names: Vec<String> = (0..20).map(|i| format!("v{i:02}")).collect();
+    let rows: Vec<(&str, i64, &[&str])> =
+        names.iter().enumerate().map(|(i, n)| (n.as_str(), i as i64, &[][..])).collect();
+    seed_variants(&engine, &rows).await;
+
+    let mut orders = std::collections::HashSet::new();
+    for _ in 0..5 {
+        let rows: Vec<Variants> = engine
+            .query_objects(Query::default().sort_random())
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 20);
+        orders.insert(rows.iter().map(|v| v.name.clone()).collect::<Vec<_>>());
+    }
+    assert!(orders.len() > 1, "5 random orderings of 20 rows were identical");
+
+    // composes with filters and limit
+    let rows: Vec<Variants> = engine
+        .query_objects(
+            Query::default()
+                .where_lt(&Variants::FIELDS.count, 10i64)
+                .sort_random()
+                .with_limit(3),
+        )
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 3);
+    assert!(rows.iter().all(|v| v.count < 10));
+}
+
+#[tokio::test]
+async fn test_edge_negated_filters_and_random_sort() {
+    let (_r, pool) = setup_test_db().await;
+    let adapter = PostgresAdapter::from_pool(pool);
+    adapter.init_schema().await.unwrap();
+    let engine = Engine::new(Box::new(adapter));
+
+    let mut hub = Hub::default();
+    hub.name = "hub".into();
+    engine.create_object(&hub).await.unwrap();
+    for (position, name) in [(1i64, "s-a"), (2, "s-b"), (3, "t-c"), (4, "t-d")] {
+        let mut spoke = Spoke::default();
+        spoke.name = name.into();
+        engine.create_object(&spoke).await.unwrap();
+        engine
+            .create_edge(&HubSpoke {
+                _meta: EdgeMeta::new(hub.id(), spoke.id()),
+                position,
+            })
+            .await
+            .unwrap();
+    }
+    let positions = |edges: &[HubSpoke]| {
+        let mut p: Vec<i64> = edges.iter().map(|e| e.position).collect();
+        p.sort();
+        p
+    };
+
+    // EdgeQuery
+    let edges: Vec<HubSpoke> = engine
+        .query_edges(
+            hub.id(),
+            EdgeQuery::default().where_not_in(&HubSpoke::FIELDS.position, vec![1i64, 2]),
+        )
+        .await
+        .unwrap();
+    assert_eq!(positions(&edges), [3, 4]);
+
+    let edges: Vec<HubSpoke> = engine
+        .query_edges(hub.id(), EdgeQuery::default().sort_random())
+        .await
+        .unwrap();
+    assert_eq!(positions(&edges), [1, 2, 3, 4]);
+
+    // EdgeQueryContext: edge-side and target-side negations together
+    let spokes: Vec<Spoke> = engine
+        .preload_object::<Hub>(hub.id())
+        .edge::<HubSpoke, Spoke>()
+        .edge_not_in(&HubSpoke::FIELDS.position, vec![1i64])
+        .where_not_begins_with(&Spoke::FIELDS.name, "t-")
+        .collect()
+        .await
+        .unwrap();
+    assert_eq!(spokes.len(), 1);
+    assert_eq!(spokes[0].name, "s-b");
+
+    let edges: Vec<HubSpoke> = engine
+        .preload_object::<Hub>(hub.id())
+        .edge::<HubSpoke, Spoke>()
+        .edge_sort_random()
+        .collect_edges()
+        .await
+        .unwrap();
+    assert_eq!(positions(&edges), [1, 2, 3, 4]);
+
+    let spokes: Vec<Spoke> = engine
+        .preload_object::<Hub>(hub.id())
+        .edge::<HubSpoke, Spoke>()
+        .sort_random()
+        .collect()
+        .await
+        .unwrap();
+    assert_eq!(spokes.len(), 4);
+}
+
 // ============================================================
 // Section 3: Object Ownership & Bulk Operations
 // ============================================================

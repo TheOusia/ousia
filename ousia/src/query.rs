@@ -302,6 +302,8 @@ pub struct QueryFilter {
 pub enum QueryMode {
     Search(QuerySearch),
     Sort(QuerySort),
+    /// `ORDER BY RANDOM()` — full sort of the matching rows; not cursor-paginatable.
+    SortRandom,
 }
 
 impl QueryMode {
@@ -317,6 +319,10 @@ impl QueryMode {
             QueryMode::Sort(sort) => Some(sort),
             _ => None,
         }
+    }
+
+    pub fn is_random_sort(&self) -> bool {
+        matches!(self, QueryMode::SortRandom)
     }
 
     pub fn search(comp: Comparison, op: Option<Operator>) -> Self {
@@ -342,6 +348,10 @@ impl QueryMode {
     pub fn sort_default() -> Self {
         QueryMode::Sort(QuerySort { ascending: true })
     }
+
+    pub fn sort_random() -> Self {
+        QueryMode::SortRandom
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -359,9 +369,13 @@ pub struct QuerySort {
 pub enum Comparison {
     Equal,
     BeginsWith,
+    NotBeginsWith,
     Contains,
     NotContains,
     ContainsAll,
+    NotContainsAll,
+    /// Scalar field is not any of the supplied array values.
+    NotIn,
     GreaterThan,
     LessThan,
     GreaterThanOrEqual,
@@ -374,6 +388,35 @@ pub enum Operator {
     #[default]
     And,
     Or,
+}
+
+/// Placeholder field for `QueryFilter::random_sort`; never rendered into SQL.
+pub static SORT_RANDOM_FIELD: IndexField = IndexField {
+    name: "__random__",
+    kinds: &[],
+};
+
+impl QueryFilter {
+    pub(crate) fn search(
+        field: &'static IndexField,
+        value: IndexValue,
+        comparison: Comparison,
+        operator: Operator,
+    ) -> Self {
+        Self {
+            field,
+            value,
+            mode: QueryMode::Search(QuerySearch { comparison, operator }),
+        }
+    }
+
+    pub fn random_sort() -> Self {
+        Self {
+            field: &SORT_RANDOM_FIELD,
+            value: IndexValue::Bool(false),
+            mode: QueryMode::SortRandom,
+        }
+    }
 }
 
 /// Pagination cursor

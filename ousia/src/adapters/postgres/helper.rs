@@ -349,8 +349,36 @@ impl PostgresAdapter {
                 return Some((cond, operator));
             }
 
+            // ── NotContainsAll: the full array must NOT be present ───────────────────
+            (NotContainsAll, IndexValue::Array(arr)) if !arr.is_empty() => {
+                let cond = format!("NOT ({}.index_meta @> ${})", alias, param_idx);
+                *param_idx += 1;
+                return Some((cond, operator));
+            }
+
+            // ── NotIn: scalar field is none of the values (missing key never matches)
+            (NotIn, IndexValue::Array(arr)) if !arr.is_empty() => {
+                let elem_type = match arr[0] {
+                    IndexValueInner::String(_) => "text",
+                    IndexValueInner::Int(_) => "bigint",
+                    IndexValueInner::Float(_) => "double precision",
+                };
+                let cond = format!(
+                    "NOT (({alias}.index_meta->>'{field}')::{t} = ANY(${idx}::{t}[]))",
+                    alias = alias,
+                    field = filter.field.name,
+                    t = elem_type,
+                    idx = param_idx
+                );
+                *param_idx += 1;
+                return Some((cond, operator));
+            }
+
             // ── Contains / NotContains / ContainsAll on a single string ──────────────
-            (Contains | NotContains | BeginsWith, IndexValue::String(_)) => {
+            (
+                Contains | NotContains | BeginsWith | NotBeginsWith,
+                IndexValue::String(_),
+            ) => {
                 // Falls through to the ILIKE extraction path below.
             }
 
@@ -383,9 +411,15 @@ impl PostgresAdapter {
             }
 
             // ── Empty array: no useful predicate ─────────────────────────────────────
-            (Contains | ContainsAll | NotContains, IndexValue::Array(arr)) if arr.is_empty() => {
+            (
+                Contains | ContainsAll | NotContains | NotContainsAll | NotIn,
+                IndexValue::Array(arr),
+            ) if arr.is_empty() => {
                 return None;
             }
+
+            // NotIn only makes sense against a list of values
+            (NotIn, _) => return None,
 
             // ── Everything else falls through to the extraction path ─────────────────
             _ => {}
@@ -403,7 +437,8 @@ impl PostgresAdapter {
             BeginsWith => "ILIKE",
             Contains => "ILIKE",
             ContainsAll => "ILIKE",
-            NotContains => "NOT ILIKE",
+            NotBeginsWith | NotContains | NotContainsAll => "NOT ILIKE",
+            NotIn => unreachable!("NotIn handled above"),
         };
 
         let condition = format!(
@@ -839,6 +874,9 @@ impl PostgresAdapter {
     }
 
     pub(super) fn build_edge_order_clause(filters: &[QueryFilter]) -> String {
+        if filters.iter().any(|f| f.mode.is_random_sort()) {
+            return "ORDER BY RANDOM()".to_string();
+        }
         let (sort_outer, _, ascending) = Self::resolve_edge_sort(filters);
         let dir = if ascending { "ASC" } else { "DESC" };
         format!("ORDER BY {sort_outer} {dir}")
@@ -854,6 +892,10 @@ impl PostgresAdapter {
         } else {
             format!("{}.", alias)
         };
+
+        if filters.iter().any(|f| f.mode.is_random_sort()) {
+            return "ORDER BY RANDOM()".to_string();
+        }
 
         let sort: Vec<&QueryFilter> = filters
             .iter()
@@ -970,7 +1012,7 @@ impl PostgresAdapter {
                         Self::index_value_to_json(&filter.value),
                     ));
                 }
-                (ContainsAll, IndexValue::Array(arr)) if !arr.is_empty() => {
+                (ContainsAll | NotContainsAll, IndexValue::Array(arr)) if !arr.is_empty() => {
                     let elements: Vec<serde_json::Value> =
                         arr.iter().map(Self::inner_to_json).collect();
                     query = query.bind(Self::make_eq_json(
@@ -987,10 +1029,26 @@ impl PostgresAdapter {
                         ));
                     }
                 }
+                (NotIn, IndexValue::Array(arr)) if !arr.is_empty() => {
+                    query = match arr[0] {
+                        IndexValueInner::String(_) => query.bind(
+                            arr.iter()
+                                .filter_map(|e| e.as_string().map(str::to_owned))
+                                .collect::<Vec<String>>(),
+                        ),
+                        IndexValueInner::Int(_) => {
+                            query.bind(arr.iter().filter_map(|e| e.as_int()).collect::<Vec<i64>>())
+                        }
+                        IndexValueInner::Float(_) => query
+                            .bind(arr.iter().filter_map(|e| e.as_float()).collect::<Vec<f64>>()),
+                    };
+                }
+                // NotIn without a list emitted no condition, so nothing to bind
+                (NotIn, _) => {}
                 // Extraction-based binds: range ops, ILIKE
                 (_, IndexValue::String(s)) => {
                     query = match search.comparison {
-                        BeginsWith => query.bind(format!("{}%", s)),
+                        BeginsWith | NotBeginsWith => query.bind(format!("{}%", s)),
                         Contains | NotContains => query.bind(format!("%{}%", s)),
                         _ => query.bind(s),
                     };
@@ -1040,7 +1098,7 @@ impl PostgresAdapter {
                         Self::index_value_to_json(&filter.value),
                     ));
                 }
-                (ContainsAll, IndexValue::Array(arr)) if !arr.is_empty() => {
+                (ContainsAll | NotContainsAll, IndexValue::Array(arr)) if !arr.is_empty() => {
                     let elements: Vec<serde_json::Value> =
                         arr.iter().map(Self::inner_to_json).collect();
                     query = query.bind(Self::make_eq_json(
@@ -1057,10 +1115,26 @@ impl PostgresAdapter {
                         ));
                     }
                 }
+                (NotIn, IndexValue::Array(arr)) if !arr.is_empty() => {
+                    query = match arr[0] {
+                        IndexValueInner::String(_) => query.bind(
+                            arr.iter()
+                                .filter_map(|e| e.as_string().map(str::to_owned))
+                                .collect::<Vec<String>>(),
+                        ),
+                        IndexValueInner::Int(_) => {
+                            query.bind(arr.iter().filter_map(|e| e.as_int()).collect::<Vec<i64>>())
+                        }
+                        IndexValueInner::Float(_) => query
+                            .bind(arr.iter().filter_map(|e| e.as_float()).collect::<Vec<f64>>()),
+                    };
+                }
+                // NotIn without a list emitted no condition, so nothing to bind
+                (NotIn, _) => {}
                 // Extraction-based binds: range ops, ILIKE
                 (_, IndexValue::String(s)) => {
                     query = match search.comparison {
-                        BeginsWith => query.bind(format!("{}%", s)),
+                        BeginsWith | NotBeginsWith => query.bind(format!("{}%", s)),
                         Contains | NotContains => query.bind(format!("%{}%", s)),
                         _ => query.bind(s),
                     };

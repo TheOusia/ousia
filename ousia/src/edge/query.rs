@@ -177,6 +177,50 @@ impl EdgeQuery {
         consumed_self
     }
 
+    /// Field does not contain value.
+    pub fn where_not_contains(mut self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
+        self.filters.push(QueryFilter::search(
+            field,
+            value.to_index_value(),
+            Comparison::NotContains,
+            Operator::And,
+        ));
+        self
+    }
+
+    /// Field does not begin with value (prefix).
+    pub fn where_not_begins_with(mut self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
+        self.filters.push(QueryFilter::search(
+            field,
+            value.to_index_value(),
+            Comparison::NotBeginsWith,
+            Operator::And,
+        ));
+        self
+    }
+
+    /// Array field does not contain every one of the values.
+    pub fn where_not_contains_all(mut self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
+        self.filters.push(QueryFilter::search(
+            field,
+            value.to_index_value(),
+            Comparison::NotContainsAll,
+            Operator::And,
+        ));
+        self
+    }
+
+    /// Scalar field is none of the given values.
+    pub fn where_not_in(mut self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
+        self.filters.push(QueryFilter::search(
+            field,
+            value.to_index_value(),
+            Comparison::NotIn,
+            Operator::And,
+        ));
+        self
+    }
+
     // Sorting
     pub fn sort_asc(self, field: &'static IndexField) -> Self {
         let mut consumed_self = self;
@@ -196,6 +240,12 @@ impl EdgeQuery {
             mode: QueryMode::Sort(QuerySort { ascending: false }),
         });
         consumed_self
+    }
+
+    /// Random order (`ORDER BY RANDOM()`); ignores cursor pagination.
+    pub fn sort_random(mut self) -> Self {
+        self.filters.push(QueryFilter::random_sort());
+        self
     }
 
     // OR operator variants
@@ -301,6 +351,50 @@ impl EdgeQuery {
             }),
         });
         consumed_self
+    }
+
+    /// OR: field does not contain value.
+    pub fn or_not_contains(mut self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
+        self.filters.push(QueryFilter::search(
+            field,
+            value.to_index_value(),
+            Comparison::NotContains,
+            Operator::Or,
+        ));
+        self
+    }
+
+    /// OR: field does not begin with value (prefix).
+    pub fn or_not_begins_with(mut self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
+        self.filters.push(QueryFilter::search(
+            field,
+            value.to_index_value(),
+            Comparison::NotBeginsWith,
+            Operator::Or,
+        ));
+        self
+    }
+
+    /// OR: array field does not contain every one of the values.
+    pub fn or_not_contains_all(mut self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
+        self.filters.push(QueryFilter::search(
+            field,
+            value.to_index_value(),
+            Comparison::NotContainsAll,
+            Operator::Or,
+        ));
+        self
+    }
+
+    /// OR: scalar field is none of the given values.
+    pub fn or_not_in(mut self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
+        self.filters.push(QueryFilter::search(
+            field,
+            value.to_index_value(),
+            Comparison::NotIn,
+            Operator::Or,
+        ));
+        self
     }
 
     pub fn with_limit(mut self, limit: u32) -> Self {

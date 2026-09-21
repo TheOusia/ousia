@@ -323,6 +323,39 @@ impl Query {
         consumed_self
     }
 
+    /// Field does not begin with value (prefix).
+    pub fn where_not_begins_with(mut self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
+        self.filters.push(QueryFilter::search(
+            field,
+            value.to_index_value(),
+            Comparison::NotBeginsWith,
+            Operator::And,
+        ));
+        self
+    }
+
+    /// Array field does not contain every one of the values.
+    pub fn where_not_contains_all(mut self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
+        self.filters.push(QueryFilter::search(
+            field,
+            value.to_index_value(),
+            Comparison::NotContainsAll,
+            Operator::And,
+        ));
+        self
+    }
+
+    /// Scalar field is none of the given values.
+    pub fn where_not_in(mut self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
+        self.filters.push(QueryFilter::search(
+            field,
+            value.to_index_value(),
+            Comparison::NotIn,
+            Operator::And,
+        ));
+        self
+    }
+
     // Sorting
     pub fn sort_asc(self, field: &'static IndexField) -> Self {
         let mut consumed_self = self;
@@ -342,6 +375,12 @@ impl Query {
             mode: QueryMode::Sort(QuerySort { ascending: false }),
         });
         consumed_self
+    }
+
+    /// Random order (`ORDER BY RANDOM()`); ignores cursor pagination.
+    pub fn sort_random(mut self) -> Self {
+        self.filters.push(QueryFilter::random_sort());
+        self
     }
 
     // OR operator variants
@@ -474,6 +513,39 @@ impl Query {
             }),
         });
         consumed_self
+    }
+
+    /// OR: field does not begin with value (prefix).
+    pub fn or_not_begins_with(mut self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
+        self.filters.push(QueryFilter::search(
+            field,
+            value.to_index_value(),
+            Comparison::NotBeginsWith,
+            Operator::Or,
+        ));
+        self
+    }
+
+    /// OR: array field does not contain every one of the values.
+    pub fn or_not_contains_all(mut self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
+        self.filters.push(QueryFilter::search(
+            field,
+            value.to_index_value(),
+            Comparison::NotContainsAll,
+            Operator::Or,
+        ));
+        self
+    }
+
+    /// OR: scalar field is none of the given values.
+    pub fn or_not_in(mut self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
+        self.filters.push(QueryFilter::search(
+            field,
+            value.to_index_value(),
+            Comparison::NotIn,
+            Operator::Or,
+        ));
+        self
     }
 
     pub fn with_limit(mut self, limit: u32) -> Self {
@@ -699,6 +771,50 @@ impl<'a, E: Edge, O: Object> EdgeQueryContext<'a, E, O> {
         self
     }
 
+    /// Field does not contain value.
+    pub fn where_not_contains(mut self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
+        self.filters.push(QueryFilter::search(
+            field,
+            value.to_index_value(),
+            Comparison::NotContains,
+            Operator::And,
+        ));
+        self
+    }
+
+    /// Field does not begin with value (prefix).
+    pub fn where_not_begins_with(mut self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
+        self.filters.push(QueryFilter::search(
+            field,
+            value.to_index_value(),
+            Comparison::NotBeginsWith,
+            Operator::And,
+        ));
+        self
+    }
+
+    /// Array field does not contain every one of the values.
+    pub fn where_not_contains_all(mut self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
+        self.filters.push(QueryFilter::search(
+            field,
+            value.to_index_value(),
+            Comparison::NotContainsAll,
+            Operator::And,
+        ));
+        self
+    }
+
+    /// Scalar field is none of the given values.
+    pub fn where_not_in(mut self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
+        self.filters.push(QueryFilter::search(
+            field,
+            value.to_index_value(),
+            Comparison::NotIn,
+            Operator::And,
+        ));
+        self
+    }
+
     // OR variants for target objects
     pub fn or_eq(mut self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
         self.filters.push(QueryFilter {
@@ -805,6 +921,50 @@ impl<'a, E: Edge, O: Object> EdgeQueryContext<'a, E, O> {
                 operator: Operator::Or,
             }),
         });
+        self
+    }
+
+    /// OR: field does not contain value.
+    pub fn or_not_contains(mut self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
+        self.filters.push(QueryFilter::search(
+            field,
+            value.to_index_value(),
+            Comparison::NotContains,
+            Operator::Or,
+        ));
+        self
+    }
+
+    /// OR: field does not begin with value (prefix).
+    pub fn or_not_begins_with(mut self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
+        self.filters.push(QueryFilter::search(
+            field,
+            value.to_index_value(),
+            Comparison::NotBeginsWith,
+            Operator::Or,
+        ));
+        self
+    }
+
+    /// OR: array field does not contain every one of the values.
+    pub fn or_not_contains_all(mut self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
+        self.filters.push(QueryFilter::search(
+            field,
+            value.to_index_value(),
+            Comparison::NotContainsAll,
+            Operator::Or,
+        ));
+        self
+    }
+
+    /// OR: scalar field is none of the given values.
+    pub fn or_not_in(mut self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
+        self.filters.push(QueryFilter::search(
+            field,
+            value.to_index_value(),
+            Comparison::NotIn,
+            Operator::Or,
+        ));
         self
     }
 
@@ -951,6 +1111,50 @@ impl<'a, E: Edge, O: Object> EdgeQueryContext<'a, E, O> {
         self
     }
 
+    /// Field does not contain value.
+    pub fn edge_not_contains(mut self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
+        self.edge_filters.push(QueryFilter::search(
+            field,
+            value.to_index_value(),
+            Comparison::NotContains,
+            Operator::And,
+        ));
+        self
+    }
+
+    /// Field does not begin with value (prefix).
+    pub fn edge_not_begins_with(mut self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
+        self.edge_filters.push(QueryFilter::search(
+            field,
+            value.to_index_value(),
+            Comparison::NotBeginsWith,
+            Operator::And,
+        ));
+        self
+    }
+
+    /// Array field does not contain every one of the values.
+    pub fn edge_not_contains_all(mut self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
+        self.edge_filters.push(QueryFilter::search(
+            field,
+            value.to_index_value(),
+            Comparison::NotContainsAll,
+            Operator::And,
+        ));
+        self
+    }
+
+    /// Scalar field is none of the given values.
+    pub fn edge_not_in(mut self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
+        self.edge_filters.push(QueryFilter::search(
+            field,
+            value.to_index_value(),
+            Comparison::NotIn,
+            Operator::And,
+        ));
+        self
+    }
+
     // OR variants for edges
     pub fn edge_or_eq(mut self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
         self.edge_filters.push(QueryFilter {
@@ -1072,6 +1276,50 @@ impl<'a, E: Edge, O: Object> EdgeQueryContext<'a, E, O> {
         self
     }
 
+    /// OR: field does not contain value.
+    pub fn edge_or_not_contains(mut self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
+        self.edge_filters.push(QueryFilter::search(
+            field,
+            value.to_index_value(),
+            Comparison::NotContains,
+            Operator::Or,
+        ));
+        self
+    }
+
+    /// OR: field does not begin with value (prefix).
+    pub fn edge_or_not_begins_with(mut self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
+        self.edge_filters.push(QueryFilter::search(
+            field,
+            value.to_index_value(),
+            Comparison::NotBeginsWith,
+            Operator::Or,
+        ));
+        self
+    }
+
+    /// OR: array field does not contain every one of the values.
+    pub fn edge_or_not_contains_all(mut self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
+        self.edge_filters.push(QueryFilter::search(
+            field,
+            value.to_index_value(),
+            Comparison::NotContainsAll,
+            Operator::Or,
+        ));
+        self
+    }
+
+    /// OR: scalar field is none of the given values.
+    pub fn edge_or_not_in(mut self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
+        self.edge_filters.push(QueryFilter::search(
+            field,
+            value.to_index_value(),
+            Comparison::NotIn,
+            Operator::Or,
+        ));
+        self
+    }
+
     // ============================================================
     // SORTING
     // ============================================================
@@ -1113,6 +1361,18 @@ impl<'a, E: Edge, O: Object> EdgeQueryContext<'a, E, O> {
             value: field.name.to_index_value(),
             mode: QueryMode::Sort(QuerySort { ascending: false }),
         });
+        self
+    }
+
+    /// Random order for target objects (`ORDER BY RANDOM()`).
+    pub fn sort_random(mut self) -> Self {
+        self.filters.push(QueryFilter::random_sort());
+        self
+    }
+
+    /// Random order for edges (`ORDER BY RANDOM()`).
+    pub fn edge_sort_random(mut self) -> Self {
+        self.edge_filters.push(QueryFilter::random_sort());
         self
     }
 
