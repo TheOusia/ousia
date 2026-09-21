@@ -302,13 +302,31 @@ fn storage_err(e: sqlx::Error) -> MoneyError {
 /// Postgres refuses to add the partition while they're there, so move them.
 async fn create_vo_partition(conn: &mut sqlx::PgConnection, code: &str) -> Result<(), MoneyError> {
     let table = format!("ledger_value_objects_{}", ledger_partition_segment(code));
-    let exists: bool = sqlx::query_scalar("SELECT to_regclass($1) IS NOT NULL")
-        .bind(&table)
-        .fetch_one(&mut *conn)
-        .await
-        .map_err(storage_err)?;
+    // (table exists, its partition bound if it is a partition of ledger_value_objects)
+    let (exists, bound): (bool, Option<String>) = sqlx::query_as(
+        "SELECT to_regclass($1) IS NOT NULL, \
+                (SELECT pg_get_expr(c.relpartbound, c.oid) FROM pg_class c \
+                 JOIN pg_inherits i ON i.inhrelid = c.oid \
+                 WHERE c.oid = to_regclass($1) \
+                   AND i.inhparent = 'ledger_value_objects'::regclass)",
+    )
+    .bind(&table)
+    .fetch_one(&mut *conn)
+    .await
+    .map_err(storage_err)?;
     if exists {
-        return Ok(());
+        // A same-named partition may belong to a code that folds the same way
+        // (`usd` vs `USD`); rows for this code would then silently go to `_default`.
+        // Codes are validated to [A-Za-z0-9_-], so the quoted literal is unambiguous.
+        return match bound {
+            Some(b) if b.contains(&format!("'{code}'")) => Ok(()),
+            Some(b) => Err(MoneyError::InvalidAssetCode(format!(
+                "{code:?} maps to partition {table}, which already holds {b}"
+            ))),
+            None => Err(MoneyError::InvalidAssetCode(format!(
+                "{code:?} maps to {table}, which exists but is not a ledger_value_objects partition"
+            ))),
+        };
     }
 
     // Blocks concurrent writes to `_default` until commit, so no new row

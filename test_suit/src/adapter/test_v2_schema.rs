@@ -712,6 +712,39 @@ async fn test_orphan_cleanup_waits_for_in_flight_writes() {
     assert_eq!(vo_rows(&pool, "ledger_value_objects_eur").await, 1);
 }
 
+/// Codes that fold to the same partition name are rejected across calls too,
+/// not only within one call.
+#[tokio::test]
+async fn test_init_ledger_schema_rejects_partition_collisions_across_calls() {
+    use ousia::ledger::MoneyError;
+    use ousia::ledger::adapters::postgres::PostgresSchemaLedgerAdapter;
+
+    let (_r, pool) = setup_test_db().await;
+    let adapter = PostgresAdapter::from_pool(pool.clone());
+    adapter.init_schema().await.unwrap();
+
+    adapter.init_ledger_schema(&["usd"]).await.unwrap();
+    adapter.init_ledger_schema(&["usd"]).await.unwrap();
+    let err = adapter.init_ledger_schema(&["USD"]).await.unwrap_err();
+    assert!(matches!(err, MoneyError::InvalidAssetCode(_)), "{err:?}");
+
+    // a same-named table that isn't a partition of ledger_value_objects
+    sqlx::query("CREATE TABLE ledger_value_objects_gbp (id uuid)")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let err = adapter.init_ledger_schema(&["GBP"]).await.unwrap_err();
+    assert!(matches!(err, MoneyError::InvalidAssetCode(_)), "{err:?}");
+
+    let bound: String = sqlx::query_scalar(
+        "SELECT pg_get_expr(relpartbound, oid) FROM pg_class WHERE relname = 'ledger_value_objects_usd'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(bound, "FOR VALUES IN ('usd')");
+}
+
 #[tokio::test]
 async fn test_init_ledger_schema_rejects_unsafe_asset_codes() {
     use ousia::ledger::MoneyError;
