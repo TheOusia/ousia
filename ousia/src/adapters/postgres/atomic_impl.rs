@@ -39,9 +39,7 @@ impl PostgresAdapter {
         let mut tx = self.pool.begin().await.map_err(storage)?;
         // The UPDATE takes the row lock, so every later read in this
         // transaction sees this object's constraints/geo rows stably.
-        if !Self::update_object_row(&mut tx, &record).await? {
-            return Err(Error::NotFound);
-        }
+        Self::update_object_row(&mut tx, &record).await?;
         if let Some(unique) = unique {
             Self::sync_constraints(&mut tx, &record.type_name, record.id, &unique).await?;
         }
@@ -127,11 +125,11 @@ impl PostgresAdapter {
         Ok(())
     }
 
-    /// Returns false when no object with this id and type exists.
+    /// `NotFound` when no object with this id and type exists.
     pub(super) async fn update_object_row(
         conn: &mut PgConnection,
         record: &ObjectRecord,
-    ) -> Result<bool, Error> {
+    ) -> Result<(), Error> {
         let result = sqlx::query(
             r#"
             UPDATE objects
@@ -147,7 +145,10 @@ impl PostgresAdapter {
         .execute(conn)
         .await
         .map_err(storage)?;
-        Ok(result.rows_affected() > 0)
+        match result.rows_affected() {
+            0 => Err(Error::NotFound),
+            _ => Ok(()),
+        }
     }
 
     async fn sync_constraints(

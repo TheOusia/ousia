@@ -1498,6 +1498,10 @@ async fn test_update_missing_object_is_not_found() {
     let (_r, pool) = setup_test_db().await;
     let adapter = PostgresAdapter::from_pool(pool);
     adapter.init_schema().await.unwrap();
+    assert_eq!(
+        adapter.update_object(ObjectRecord::from_object(&Post::default())).await,
+        Err(Error::NotFound)
+    );
     let engine = Engine::new(Box::new(adapter));
 
     let mut ghost = User::default();

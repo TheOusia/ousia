@@ -228,6 +228,7 @@ pub trait Adapter: UniqueAdapter + GeoAdapter + EdgeTraversal + Send + Sync + 's
         &self,
         pairs: Vec<(&'static str, Vec<Uuid>)>,
     ) -> Result<Vec<ObjectRecord>, Error>;
+    /// `NotFound` if no object with this id and type exists.
     async fn update_object(&self, record: ObjectRecord) -> Result<(), Error>;
 
     /// Insert the object with its unique keys and geo points in one transaction.

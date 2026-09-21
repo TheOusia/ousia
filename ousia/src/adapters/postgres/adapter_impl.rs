@@ -100,8 +100,7 @@ impl Adapter for PostgresAdapter {
 
     async fn update_object(&self, record: ObjectRecord) -> Result<(), Error> {
         let mut conn = self.pool.acquire().await.map_err(|e| Error::Storage(e.to_string()))?;
-        Self::update_object_row(&mut conn, &record).await?;
-        Ok(())
+        Self::update_object_row(&mut conn, &record).await
     }
 
     async fn create_object_atomic(
@@ -124,10 +123,7 @@ impl Adapter for PostgresAdapter {
     ) -> Result<(), Error> {
         if unique.is_none() && geo.is_none() {
             let mut conn = self.pool.acquire().await.map_err(|e| Error::Storage(e.to_string()))?;
-            return match Self::update_object_row(&mut conn, &record).await? {
-                true => Ok(()),
-                false => Err(Error::NotFound),
-            };
+            return Self::update_object_row(&mut conn, &record).await;
         }
         self.update_object_tx(record, unique, geo).await
     }
