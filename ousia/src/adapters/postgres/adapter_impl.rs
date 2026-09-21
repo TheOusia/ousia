@@ -8,45 +8,15 @@ use uuid::Uuid;
 
 use crate::{
     adapters::{Adapter, EdgeQuery, EdgeRecord, Error, ObjectRecord, Query, TraversalDirection},
-    query::QueryFilter,
+    query::{GeoPoint, QueryFilter},
 };
 use sqlx::Row;
 
 #[async_trait::async_trait]
 impl Adapter for PostgresAdapter {
     async fn insert_object(&self, record: ObjectRecord) -> Result<(), Error> {
-        let ObjectRecord {
-            id,
-            type_name,
-            owner,
-            created_at,
-            updated_at,
-            data,
-            index_meta,
-        } = record;
-        let _ = sqlx::query(
-            r#"
-            INSERT INTO objects (id, type, owner, created_at, updated_at, data, index_meta)
-            VALUES ($1, $2, $3, $4, $5, $6, $7)
-            "#,
-        )
-        .bind(id)
-        .bind(type_name.as_ref())
-        .bind(owner)
-        .bind(created_at)
-        .bind(updated_at)
-        .bind(data)
-        .bind(index_meta)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(|err| {
-            if err.to_string().contains("unique") {
-                Error::UniqueConstraintViolation("id".to_string())
-            } else {
-                Error::Storage(err.to_string())
-            }
-        })?;
-        Ok(())
+        let mut conn = self.pool.acquire().await.map_err(|e| Error::Storage(e.to_string()))?;
+        Self::insert_object_row(&mut conn, &record).await
     }
 
     async fn fetch_object(
@@ -129,22 +99,50 @@ impl Adapter for PostgresAdapter {
     }
 
     async fn update_object(&self, record: ObjectRecord) -> Result<(), Error> {
-        sqlx::query(
-            r#"
-            UPDATE objects
-            SET updated_at = $2, data = $3, index_meta = $4
-            WHERE id = $1
-            "#,
-        )
-        .bind(record.id)
-        .bind(record.updated_at)
-        .bind(record.data)
-        .bind(record.index_meta)
-        .execute(&self.pool)
-        .await
-        .map_err(|err| Error::Storage(err.to_string()))?;
-
+        let mut conn = self.pool.acquire().await.map_err(|e| Error::Storage(e.to_string()))?;
+        Self::update_object_row(&mut conn, &record).await?;
         Ok(())
+    }
+
+    async fn create_object_atomic(
+        &self,
+        record: ObjectRecord,
+        unique: Vec<(String, &'static str)>,
+        geo: Vec<GeoPoint>,
+    ) -> Result<(), Error> {
+        if unique.is_empty() && geo.is_empty() {
+            return self.insert_object(record).await;
+        }
+        self.create_object_tx(record, unique, geo).await
+    }
+
+    async fn update_object_atomic(
+        &self,
+        record: ObjectRecord,
+        unique: Option<Vec<(String, &'static str)>>,
+        geo: Option<Vec<GeoPoint>>,
+    ) -> Result<(), Error> {
+        if unique.is_none() && geo.is_none() {
+            let mut conn = self.pool.acquire().await.map_err(|e| Error::Storage(e.to_string()))?;
+            return match Self::update_object_row(&mut conn, &record).await? {
+                true => Ok(()),
+                false => Err(Error::NotFound),
+            };
+        }
+        self.update_object_tx(record, unique, geo).await
+    }
+
+    async fn transfer_object_atomic(
+        &self,
+        type_name: &'static str,
+        id: Uuid,
+        from_owner: Uuid,
+        to_owner: Uuid,
+        snapshot: Vec<u8>,
+        unique: Vec<(String, &'static str)>,
+    ) -> Result<Option<ObjectRecord>, Error> {
+        self.transfer_object_tx(type_name, id, from_owner, to_owner, snapshot, unique)
+            .await
     }
 
     async fn transfer_object(

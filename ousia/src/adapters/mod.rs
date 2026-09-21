@@ -230,6 +230,35 @@ pub trait Adapter: UniqueAdapter + GeoAdapter + EdgeTraversal + Send + Sync + 's
     ) -> Result<Vec<ObjectRecord>, Error>;
     async fn update_object(&self, record: ObjectRecord) -> Result<(), Error>;
 
+    /// Insert the object with its unique keys and geo points in one transaction.
+    async fn create_object_atomic(
+        &self,
+        record: ObjectRecord,
+        unique: Vec<(String, &'static str)>,
+        geo: Vec<GeoPoint>,
+    ) -> Result<(), Error>;
+
+    /// Update the object and reconcile its unique keys / geo points to the given
+    /// full sets (`None` = leave untouched), in one transaction. `NotFound` if missing.
+    async fn update_object_atomic(
+        &self,
+        record: ObjectRecord,
+        unique: Option<Vec<(String, &'static str)>>,
+        geo: Option<Vec<GeoPoint>>,
+    ) -> Result<(), Error>;
+
+    /// Transfer and reconcile unique keys in one transaction, only if the stored
+    /// `data` still equals `snapshot`. `Ok(None)` means it changed concurrently.
+    async fn transfer_object_atomic(
+        &self,
+        type_name: &'static str,
+        id: Uuid,
+        from_owner: Uuid,
+        to_owner: Uuid,
+        snapshot: Vec<u8>,
+        unique: Vec<(String, &'static str)>,
+    ) -> Result<Option<ObjectRecord>, Error>;
+
     /// Explicit ownership transfer
     async fn transfer_object(
         &self,

@@ -237,48 +237,12 @@ impl Engine {
     /// object is rolled back by deleting it (which cascades any
     /// children that did succeed).
     pub async fn create_object<T: Object>(&self, obj: &T) -> Result<(), Error> {
+        let unique = if T::HAS_UNIQUE_FIELDS { obj.derive_unique_hashes() } else { vec![] };
+        let geo = if T::HAS_GEO_FIELDS { obj.geo_points() } else { vec![] };
         self.inner
             .adapter
-            .insert_object(ObjectRecord::from_object(obj))
-            .await?;
-
-        if T::HAS_UNIQUE_FIELDS {
-            let unique_hashes = obj.derive_unique_hashes();
-            if let Err(e) = self
-                .inner
-                .adapter
-                .insert_unique_hashes(obj.type_name(), obj.id(), unique_hashes)
-                .await
-            {
-                let _ = self
-                    .inner
-                    .adapter
-                    .delete_object(T::TYPE, obj.id(), obj.meta().owner)
-                    .await;
-                return Err(e);
-            }
-        }
-
-        if T::HAS_GEO_FIELDS {
-            let points = obj.geo_points();
-            if !points.is_empty() {
-                if let Err(e) = self
-                    .inner
-                    .adapter
-                    .upsert_geo_points(obj.type_name(), obj.id(), points)
-                    .await
-                {
-                    let _ = self
-                        .inner
-                        .adapter
-                        .delete_object(T::TYPE, obj.id(), obj.meta().owner)
-                        .await;
-                    return Err(e);
-                }
-            }
-        }
-
-        Ok(())
+            .create_object_atomic(ObjectRecord::from_object(obj), unique, geo)
+            .await
     }
 
     /// Fetch an object by ID
@@ -305,140 +269,16 @@ impl Engine {
         self.inner.adapter.fetch_objects_batch(pairs).await
     }
 
-    /// Update an existing object
+    /// Update an existing object. Unique keys and geo points are reconciled in
+    /// the same transaction; errors with `NotFound` if the object doesn't exist.
     pub async fn update_object<T: Object>(&self, obj: &mut T) -> Result<(), Error> {
-        let meta = obj.meta_mut();
-        meta.updated_at = Utc::now();
-
-        if !T::HAS_UNIQUE_FIELDS {
-            // No unique fields, just update the object
-            self.inner
-                .adapter
-                .update_object(ObjectRecord::from_object(obj))
-                .await?;
-        } else {
-            let object_id = obj.id();
-            let type_name = obj.type_name();
-
-            // Get current hashes from database
-            let old_hashes = self.inner.adapter.get_hashes_for_object(object_id).await?;
-
-            // Get new hashes from the updated object
-            let new_hashes = obj.derive_unique_hashes();
-
-            // Determine which hashes to add and remove
-            let hashes_to_add: Vec<_> = new_hashes
-                .iter()
-                .filter(|(hash, _)| !old_hashes.contains(hash))
-                .cloned()
-                .collect();
-
-            let hashes_to_remove: Vec<_> = old_hashes
-                .iter()
-                .filter(|hash| !new_hashes.iter().any(|(h, _)| h == *hash))
-                .cloned()
-                .collect();
-
-            // If nothing changed in unique fields, skip uniqueness operations
-            if hashes_to_add.is_empty() && hashes_to_remove.is_empty() {
-                // Just update the object
-                self.inner
-                    .adapter
-                    .update_object(ObjectRecord::from_object(obj))
-                    .await?;
-            } else {
-                // Try to insert new hashes (will fail if already taken)
-                if !hashes_to_add.is_empty() {
-                    self.inner
-                        .adapter
-                        .insert_unique_hashes(
-                            type_name,
-                            object_id,
-                            hashes_to_add.iter().cloned().collect(),
-                        )
-                        .await?;
-                }
-
-                // Update the object
-                match self
-                    .inner
-                    .adapter
-                    .update_object(ObjectRecord::from_object(obj))
-                    .await
-                {
-                    Ok(_) => (),
-                    Err(err) => {
-                        // Rollback the insertion of new hashes
-                        if !hashes_to_add.is_empty() {
-                            let hashes = hashes_to_add
-                                .into_iter()
-                                .map(|(hash, _)| hash)
-                                .collect::<Vec<String>>();
-                            self.inner.adapter.delete_unique_hashes(hashes).await?;
-                        }
-                        return Err(err);
-                    }
-                }
-
-                // Clean up old hashes (only after successful update)
-                if !hashes_to_remove.is_empty() {
-                    for hash in hashes_to_remove {
-                        self.inner.adapter.delete_unique(&hash).await?;
-                    }
-                }
-            }
-        }
-
-        if T::HAS_GEO_FIELDS {
-            let object_id = obj.id();
-            let new_points = obj.geo_points();
-            let old_hashes: std::collections::HashMap<String, String> = self
-                .inner
-                .adapter
-                .get_geo_hashes(object_id)
-                .await?
-                .into_iter()
-                .collect();
-
-            let new_fields: std::collections::HashSet<&str> =
-                new_points.iter().map(|p| p.field).collect();
-
-            // Points whose (field, hash) differs from the stored row — these
-            // need to be UPSERTed. Points whose hash is unchanged are skipped.
-            let points_to_upsert: Vec<crate::query::GeoPoint> = new_points
-                .iter()
-                .filter(|p| {
-                    old_hashes
-                        .get(p.field)
-                        .map(|h| h != &p.hash)
-                        .unwrap_or(true)
-                })
-                .cloned()
-                .collect();
-
-            // Fields that existed before but are no longer produced by the
-            // object — these rows must be deleted.
-            let fields_to_delete: Vec<String> = old_hashes
-                .keys()
-                .filter(|f| !new_fields.contains(f.as_str()))
-                .cloned()
-                .collect();
-
-            if !points_to_upsert.is_empty() {
-                self.inner
-                    .adapter
-                    .upsert_geo_points(obj.type_name(), object_id, points_to_upsert)
-                    .await?;
-            }
-            if !fields_to_delete.is_empty() {
-                self.inner
-                    .adapter
-                    .delete_geo_fields(object_id, fields_to_delete)
-                    .await?;
-            }
-        }
-
-        Ok(())
+        obj.meta_mut().updated_at = Utc::now();
+        let unique = T::HAS_UNIQUE_FIELDS.then(|| obj.derive_unique_hashes());
+        let geo = T::HAS_GEO_FIELDS.then(|| obj.geo_points());
+        self.inner
+            .adapter
+            .update_object_atomic(ObjectRecord::from_object(obj), unique, geo)
+            .await
     }
 
     /// Delete an object. `object_constraints` and `object_geo` rows
@@ -478,7 +318,7 @@ impl Engine {
     }
 
     /// Transfer ownership of an object. Unique constraints that include
-    /// `owner` are re-keyed the same way `update_object` handles them.
+    /// `owner` are re-keyed in the same transaction as the move.
     pub async fn transfer_object<T: Object>(
         &self,
         id: Uuid,
@@ -494,57 +334,30 @@ impl Engine {
             return record.to_object();
         }
 
-        let mut obj: T = match self.inner.adapter.fetch_object(T::TYPE, id).await? {
-            Some(record) if record.owner == from_owner => record.to_object()?,
-            _ => return Err(Error::NotFound),
-        };
+        const ATTEMPTS: usize = 3;
+        for _ in 0..ATTEMPTS {
+            let record = match self.inner.adapter.fetch_object(T::TYPE, id).await? {
+                Some(record) if record.owner == from_owner => record,
+                _ => return Err(Error::NotFound),
+            };
+            let snapshot = record.data.clone();
+            let mut obj: T = record.to_object()?;
+            obj.set_owner(to_owner);
+            let unique = obj.derive_unique_hashes();
 
-        let old_hashes = self.inner.adapter.get_hashes_for_object(id).await?;
-        obj.set_owner(to_owner);
-        let new_hashes = obj.derive_unique_hashes();
-
-        let hashes_to_add: Vec<_> = new_hashes
-            .iter()
-            .filter(|(hash, _)| !old_hashes.contains(hash))
-            .cloned()
-            .collect();
-        let hashes_to_remove: Vec<_> = old_hashes
-            .iter()
-            .filter(|hash| !new_hashes.iter().any(|(h, _)| h == *hash))
-            .cloned()
-            .collect();
-
-        if !hashes_to_add.is_empty() {
-            self.inner
+            let moved = self
+                .inner
                 .adapter
-                .insert_unique_hashes(T::TYPE, id, hashes_to_add.clone())
+                .transfer_object_atomic(T::TYPE, id, from_owner, to_owner, snapshot, unique)
                 .await?;
-        }
-
-        let record = match self
-            .inner
-            .adapter
-            .transfer_object(T::TYPE, id, from_owner, to_owner)
-            .await
-        {
-            Ok(record) => record,
-            Err(err) => {
-                if !hashes_to_add.is_empty() {
-                    let hashes = hashes_to_add.into_iter().map(|(hash, _)| hash).collect();
-                    self.inner.adapter.delete_unique_hashes(hashes).await?;
-                }
-                return Err(err);
+            if let Some(record) = moved {
+                return record.to_object();
             }
-        };
-
-        if !hashes_to_remove.is_empty() {
-            self.inner
-                .adapter
-                .delete_unique_hashes(hashes_to_remove)
-                .await?;
         }
-
-        record.to_object()
+        Err(Error::Storage(format!(
+            "transfer_object: {} {id} changed concurrently {ATTEMPTS} times; giving up",
+            T::TYPE
+        )))
     }
 
     // ==================== Object Queries ====================
