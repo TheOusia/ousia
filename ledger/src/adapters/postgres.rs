@@ -153,6 +153,7 @@ where
         .await
         .map_err(|e| MoneyError::Storage(e.to_string()))?;
 
+        migrate_legacy_asset_codes(&mut tx).await?;
         for code in &assets {
             create_vo_partition(&mut tx, code).await?;
         }
@@ -298,6 +299,108 @@ fn storage_err(e: sqlx::Error) -> MoneyError {
     MoneyError::Storage(e.to_string())
 }
 
+/// Codes are case-insensitive and stored upper case. Earlier versions stored
+/// them as given, so rewrite any letters-only code in another case (`ngn` →
+/// `NGN`) in `ledger_assets`, `ledger_value_objects` and its partition bound.
+/// Codes with other characters (`MG-POINT`) can't be normalised and are left as is.
+async fn migrate_legacy_asset_codes(conn: &mut sqlx::PgConnection) -> Result<(), MoneyError> {
+    let mut legacy: Vec<String> =
+        sqlx::query_scalar("SELECT code FROM ledger_assets WHERE code <> upper(code)")
+            .fetch_all(&mut *conn)
+            .await
+            .map_err(storage_err)?;
+    let partitions: Vec<(String, String)> = sqlx::query_as(
+        "SELECT c.relname::text, pg_get_expr(c.relpartbound, c.oid) \
+         FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid \
+         WHERE i.inhparent = 'ledger_value_objects'::regclass",
+    )
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(storage_err)?;
+    let single_value = |bound: &str| {
+        bound
+            .strip_prefix("FOR VALUES IN ('")
+            .and_then(|b| b.strip_suffix("')"))
+            .map(str::to_string)
+    };
+    legacy.extend(partitions.iter().filter_map(|(_, b)| single_value(b)));
+    legacy.retain(|c| {
+        crate::asset::normalize_asset_code(c).is_ok_and(|canonical| canonical != *c)
+    });
+    legacy.sort();
+    legacy.dedup();
+
+    for old in legacy {
+        let code = old.to_ascii_uppercase();
+        let clash: bool = sqlx::query_scalar(
+            "SELECT COUNT(*) > 1 FROM ledger_assets WHERE upper(code) = $1",
+        )
+        .bind(&code)
+        .fetch_one(&mut *conn)
+        .await
+        .map_err(storage_err)?;
+        if clash {
+            return Err(MoneyError::InvalidAssetCode(format!(
+                "separate assets differ only in case from {code:?}; merge them into one before upgrading"
+            )));
+        }
+        sqlx::query("UPDATE ledger_assets SET code = $1 WHERE code = $2")
+            .bind(&code)
+            .bind(&old)
+            .execute(&mut *conn)
+            .await
+            .map_err(storage_err)?;
+
+        // Blocks writes to `_default` while its rows are re-keyed and moved.
+        sqlx::query("LOCK TABLE ledger_value_objects_default IN ACCESS EXCLUSIVE MODE")
+            .execute(&mut *conn)
+            .await
+            .map_err(storage_err)?;
+        let partition = partitions
+            .iter()
+            .find(|(_, b)| single_value(b).as_deref() == Some(old.as_str()))
+            .map(|(name, _)| format!("\"{}\"", quote_ident(name)));
+        if let Some(p) = &partition {
+            sqlx::query(&format!("ALTER TABLE ledger_value_objects DETACH PARTITION {p}"))
+                .execute(&mut *conn)
+                .await
+                .map_err(storage_err)?;
+            sqlx::query(&format!("UPDATE {p} SET asset_code = $1 WHERE asset_code = $2"))
+                .bind(&code)
+                .bind(&old)
+                .execute(&mut *conn)
+                .await
+                .map_err(storage_err)?;
+        }
+        // Rows re-keyed here move to `code`'s partition if one is attached,
+        // otherwise they stay in `_default`.
+        sqlx::query("UPDATE ledger_value_objects_default SET asset_code = $1 WHERE asset_code = $2")
+            .bind(&code)
+            .bind(&old)
+            .execute(&mut *conn)
+            .await
+            .map_err(storage_err)?;
+        if let Some(p) = &partition {
+            sqlx::query(&format!(
+                "WITH moved AS (DELETE FROM ledger_value_objects_default WHERE asset_code = $1 RETURNING *) \
+                 INSERT INTO {p} SELECT * FROM moved"
+            ))
+            .bind(&code)
+            .execute(&mut *conn)
+            .await
+            .map_err(storage_err)?;
+            // `code` is letters only (normalised above), safe to splice
+            sqlx::query(&format!(
+                "ALTER TABLE ledger_value_objects ATTACH PARTITION {p} FOR VALUES IN ('{code}')"
+            ))
+            .execute(&mut *conn)
+            .await
+            .map_err(storage_err)?;
+        }
+    }
+    Ok(())
+}
+
 /// Create the partition for `code` (normalised: upper-case letters). Rows for that code
 /// may already sit in `_default` (minted before the asset was listed);
 /// Postgres refuses to add the partition while they're there, so move them.
@@ -316,10 +419,10 @@ async fn create_vo_partition(conn: &mut sqlx::PgConnection, code: &str) -> Resul
     .await
     .map_err(storage_err)?;
     if exists {
-        // A same-named partition may hold a different code, e.g. a `usd` partition
-        // created before codes were normalised to upper case; rows for this code
-        // would then silently go to `_default`. Codes are letters only, so the
-        // quoted literal is unambiguous.
+        // Legacy lower-case partitions were already re-keyed by
+        // `migrate_legacy_asset_codes`, so a bound without this code means the
+        // name is held by something else; rows for this code would silently go
+        // to `_default`. Codes are letters only, so the quoted literal is unambiguous.
         return match bound {
             Some(b) if b.contains(&format!("'{code}'")) => Ok(()),
             Some(b) => Err(MoneyError::InvalidAssetCode(format!(

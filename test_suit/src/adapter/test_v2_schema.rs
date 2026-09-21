@@ -713,8 +713,7 @@ async fn test_orphan_cleanup_waits_for_in_flight_writes() {
 }
 
 /// Codes are case-insensitive, so `usd` and `USD` share one partition. A
-/// partition name already taken by a different code (e.g. a lower-case `ngn`
-/// partition from before normalisation) or by a non-partition table is rejected.
+/// partition name taken by a table that isn't a partition is rejected.
 #[tokio::test]
 async fn test_init_ledger_schema_partition_name_checks() {
     use ousia::ledger::MoneyError;
@@ -740,21 +739,118 @@ async fn test_init_ledger_schema_partition_name_checks() {
     };
     assert_eq!(bound("ledger_value_objects_usd").await, "FOR VALUES IN ('USD')");
 
-    sqlx::query(
-        "CREATE TABLE ledger_value_objects_ngn PARTITION OF ledger_value_objects FOR VALUES IN ('ngn')",
-    )
-    .execute(&pool)
-    .await
-    .unwrap();
-    let err = adapter.init_ledger_schema(&["NGN"]).await.unwrap_err();
-    assert!(matches!(err, MoneyError::InvalidAssetCode(_)), "{err:?}");
-
     sqlx::query("CREATE TABLE ledger_value_objects_gbp (id uuid)")
         .execute(&pool)
         .await
         .unwrap();
     let err = adapter.init_ledger_schema(&["GBP"]).await.unwrap_err();
     assert!(matches!(err, MoneyError::InvalidAssetCode(_)), "{err:?}");
+}
+
+/// Data written before codes were normalised (`ngn`, in an `('ngn')`
+/// partition, plus `eur` rows in `_default`) is migrated to upper case.
+#[tokio::test]
+async fn test_init_ledger_schema_migrates_legacy_lower_case_codes() {
+    use ousia::ledger::adapters::postgres::PostgresSchemaLedgerAdapter;
+    use ousia::ledger::{Asset, Money};
+
+    let (_r, pool) = setup_test_db().await;
+    let adapter = PostgresAdapter::from_pool(pool.clone());
+    adapter.init_schema().await.unwrap();
+
+    let (ngn, eur, owner) = (uuid::Uuid::now_v7(), uuid::Uuid::now_v7(), uuid::Uuid::now_v7());
+    for sql in [
+        "CREATE TABLE ledger_value_objects_ngn PARTITION OF ledger_value_objects FOR VALUES IN ('ngn')",
+        "INSERT INTO ledger_assets (id, code, unit, decimals) VALUES ($1, 'ngn', 100, 2), ($2, 'eur', 100, 2)",
+        "INSERT INTO ledger_value_objects (id, asset, asset_code, owner, amount, state) VALUES \
+         (gen_random_uuid(), $1, 'ngn', $3, 300, 'alive'), \
+         (gen_random_uuid(), $1, 'ngn', $3, 200, 'alive'), \
+         (gen_random_uuid(), $2, 'eur', $3, 700, 'alive')",
+    ] {
+        let q = sqlx::query(sql);
+        let q = if sql.contains("$3") {
+            q.bind(ngn).bind(eur).bind(owner)
+        } else if sql.contains("$1") {
+            q.bind(ngn).bind(eur)
+        } else {
+            q
+        };
+        q.execute(&pool).await.unwrap();
+    }
+
+    adapter.init_ledger_schema(&["NGN"]).await.unwrap();
+    // idempotent
+    adapter.init_ledger_schema(&["ngn"]).await.unwrap();
+
+    let mut codes: Vec<String> = sqlx::query_scalar("SELECT code FROM ledger_assets")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    codes.sort();
+    assert_eq!(codes, ["EUR", "NGN"]);
+    let bound: String = sqlx::query_scalar(
+        "SELECT pg_get_expr(relpartbound, oid) FROM pg_class WHERE relname = 'ledger_value_objects_ngn'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(bound, "FOR VALUES IN ('NGN')");
+    let ngn_rows: Vec<String> = sqlx::query_scalar("SELECT asset_code FROM ledger_value_objects_ngn")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert_eq!(ngn_rows, ["NGN", "NGN"]);
+    let default_rows: Vec<String> =
+        sqlx::query_scalar("SELECT asset_code FROM ledger_value_objects_default")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(default_rows, ["EUR"]);
+
+    // old balances are reachable in any case, and new mints join them
+    let engine = Engine::new(Box::new(PostgresAdapter::from_pool(pool.clone())));
+    let ctx = engine.ledger_ctx();
+    assert_eq!(ctx.balance("ngn", owner).await.unwrap().available, 500);
+    assert_eq!(ctx.balance("Eur", owner).await.unwrap().available, 700);
+    Money::atomic(&ctx, |tx| async move { tx.mint("NGN", owner, 100, "top-up".to_string()).await })
+        .await
+        .unwrap();
+    assert_eq!(ctx.balance("NGN", owner).await.unwrap().available, 600);
+    assert_eq!(vo_rows(&pool, "ledger_value_objects_ngn").await, 3);
+    // re-registering the migrated asset updates it rather than duplicating it
+    engine.ledger().create_asset(Asset::new("ngn", 100, 2)).await.unwrap();
+    let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM ledger_assets WHERE code = 'NGN'")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(n, 1);
+}
+
+/// Two separate assets that differ only in case can't be merged automatically.
+#[tokio::test]
+async fn test_init_ledger_schema_rejects_assets_differing_only_in_case() {
+    use ousia::ledger::MoneyError;
+    use ousia::ledger::adapters::postgres::PostgresSchemaLedgerAdapter;
+
+    let (_r, pool) = setup_test_db().await;
+    let adapter = PostgresAdapter::from_pool(pool.clone());
+    adapter.init_schema().await.unwrap();
+    sqlx::query(
+        "INSERT INTO ledger_assets (id, code, unit, decimals) VALUES \
+         (gen_random_uuid(), 'gbp', 100, 2), (gen_random_uuid(), 'GBP', 100, 2)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let err = adapter.init_ledger_schema(&[]).await.unwrap_err();
+    assert!(matches!(err, MoneyError::InvalidAssetCode(_)), "{err:?}");
+    let mut codes: Vec<String> = sqlx::query_scalar("SELECT code FROM ledger_assets")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    codes.sort();
+    assert_eq!(codes, ["GBP", "gbp"], "nothing changed");
 }
 
 #[tokio::test]

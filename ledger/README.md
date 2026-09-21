@@ -114,6 +114,12 @@ Asset codes are 1-42 ASCII letters and case-insensitive: `usd`, `Usd` and
 `USD` are the same asset, stored as `USD`. Digits and separators are rejected
 with `MoneyError::InvalidAssetCode` (use `MGPOINT`, not `MG-POINT`).
 
+Upgrading: `init_ledger_schema` rewrites codes that earlier versions stored in
+another case (`ngn` → `NGN`), including their value-object rows and partition,
+so existing balances stay reachable. It fails if two separate assets differ
+only in case (merge them first). Codes with separators, such as `MG-POINT`,
+are not renamed automatically.
+
 In production you implement `LedgerAdapter` for your database (see [Implementing a Production Adapter](#implementing-a-production-adapter)).
 
 ---
