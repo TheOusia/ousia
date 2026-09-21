@@ -582,8 +582,9 @@ impl PostgresAdapter {
             ("o.owner = $2".to_string(), "AND"),
         ];
 
+        // The cursor takes this slot; its condition depends on the ORDER BY and
+        // is added by the caller via `build_object_cursor_condition`.
         if cursor.is_some() {
-            conditions.push((format!("o.id < ${}", param_idx), "AND"));
             *param_idx += 1;
         }
 
@@ -883,6 +884,34 @@ impl PostgresAdapter {
         format!("ORDER BY {sort_outer} {dir}")
     }
 
+    /// `(expression, ascending)` for each scalar sort filter, with every column
+    /// qualified by `prefix` (e.g. `"o."`, or `""` for an unaliased table).
+    fn sort_keys(filters: &[QueryFilter], prefix: &str) -> Vec<(String, bool)> {
+        filters
+            .iter()
+            .filter(|f| f.value.as_array().is_none())
+            .filter_map(|f| {
+                let ascending = f.mode.as_sort()?.ascending;
+                // Native columns: direct reference so composite indexes are hit
+                if matches!(f.field.name, "created_at" | "updated_at") {
+                    return Some((format!("{}{}", prefix, f.field.name), ascending));
+                }
+                let index_type = match &f.value {
+                    IndexValue::String(_) => "text",
+                    IndexValue::Int(_) => "bigint",
+                    IndexValue::Float(_) => "double precision",
+                    IndexValue::Bool(_) => "boolean",
+                    IndexValue::Timestamp(_) => "timestamptz",
+                    _ => "text",
+                };
+                Some((
+                    format!("({}index_meta->>'{}')::{}", prefix, f.field.name, index_type),
+                    ascending,
+                ))
+            })
+            .collect()
+    }
+
     pub(super) fn build_order_clause_aliased(
         filters: &[QueryFilter],
         alias: &str,
@@ -898,47 +927,69 @@ impl PostgresAdapter {
             return "ORDER BY RANDOM()".to_string();
         }
 
-        let sort: Vec<&QueryFilter> = filters
-            .iter()
-            .filter(|f| f.mode.as_sort().is_some())
-            .collect();
-
-        if sort.is_empty() {
+        let keys = Self::sort_keys(filters, &prefix);
+        if keys.is_empty() {
             if is_edge {
                 return "".to_string();
             }
             return format!("ORDER BY {}id DESC", prefix);
         }
 
-        let order_terms: Vec<String> = sort
+        let mut order_terms: Vec<String> = keys
             .iter()
-            .filter(|s| s.value.as_array().is_none())
-            .map(|s| {
-                let direction = if s.mode.as_sort().unwrap().ascending {
-                    "ASC"
-                } else {
-                    "DESC"
-                };
-                // Native columns: use direct column reference so composite indexes are hit
-                if matches!(s.field.name, "created_at" | "updated_at") {
-                    return format!("{}{} {}", prefix, s.field.name, direction);
-                }
-                let index_type = match &s.value {
-                    IndexValue::String(_) => "text",
-                    IndexValue::Int(_) => "bigint",
-                    IndexValue::Float(_) => "double precision",
-                    IndexValue::Bool(_) => "boolean",
-                    IndexValue::Timestamp(_) => "timestamptz",
-                    _ => "text",
-                };
-                format!(
-                    "({}index_meta->>'{}')::{} {}",
-                    prefix, s.field.name, index_type, direction,
-                )
-            })
+            .map(|(expr, asc)| format!("{} {}", expr, if *asc { "ASC" } else { "DESC" }))
             .collect();
-
+        // Objects: id breaks ties so the order is total, which cursor paging needs.
+        if !is_edge {
+            order_terms.push(format!("{}id DESC", prefix));
+        }
         format!("ORDER BY {}", order_terms.join(", "))
+    }
+
+    /// Keyset condition selecting the rows that come strictly after the
+    /// cursor object in the query's ORDER BY: optional distance, then the
+    /// scalar sort keys, then `id DESC`. `cursor_p` is the cursor's `$N`.
+    pub(super) fn build_object_cursor_condition(
+        filters: &[QueryFilter],
+        geo: Option<(&str, &GeoOrder, usize, usize)>,
+        cursor_p: usize,
+    ) -> String {
+        let mut keys: Vec<KeysetKey> = Vec::new();
+        if let Some((alias, go, lon_p, lat_p)) = geo {
+            let point = format!("ST_SetSRID(ST_MakePoint(${lon_p}, ${lat_p}), 4326)::geography");
+            keys.push(KeysetKey {
+                outer: format!("{alias}.location <-> {point}"),
+                at_cursor: format!(
+                    "(SELECT gc.location <-> {point} FROM object_geo gc \
+                     WHERE gc.type = $1 AND gc.object_id = ${cursor_p} AND gc.field = '{}')",
+                    go.field.replace('\'', "''")
+                ),
+                ascending: go.ascending,
+                nullable: true,
+            });
+        }
+        let outer = Self::sort_keys(filters, "o.");
+        for ((outer, ascending), (bare, _)) in outer.into_iter().zip(Self::sort_keys(filters, "")) {
+            let nullable = !matches!(bare.as_str(), "created_at" | "updated_at");
+            keys.push(KeysetKey {
+                outer,
+                at_cursor: format!(
+                    "(SELECT {bare} FROM objects WHERE type = $1 AND id = ${cursor_p})"
+                ),
+                ascending,
+                nullable,
+            });
+        }
+        if keys.is_empty() {
+            return format!("o.id < ${cursor_p}");
+        }
+        keys.push(KeysetKey {
+            outer: "o.id".to_string(),
+            at_cursor: format!("${cursor_p}"),
+            ascending: false,
+            nullable: false,
+        });
+        keyset_condition(&keys)
     }
 
     pub(super) fn build_object_traversal_query_conditions(
@@ -1495,4 +1546,51 @@ impl PostgresAdapter {
             .filter_map(|row| Self::map_row_to_edge_record(row, type_name).ok())
             .collect())
     }
+}
+
+struct KeysetKey {
+    outer: String,
+    at_cursor: String,
+    ascending: bool,
+    nullable: bool,
+}
+
+/// Rows strictly after the cursor row for `ORDER BY k1, k2, ...` with
+/// Postgres' default NULL placement (ASC NULLS LAST, DESC NULLS FIRST).
+fn keyset_condition(keys: &[KeysetKey]) -> String {
+    let same_dir = keys.iter().all(|k| k.ascending == keys[0].ascending);
+    if same_dir && keys.iter().all(|k| !k.nullable) {
+        // Row comparison is equivalent here and lets Postgres use a btree index.
+        let outer: Vec<&str> = keys.iter().map(|k| k.outer.as_str()).collect();
+        let cursor: Vec<&str> = keys.iter().map(|k| k.at_cursor.as_str()).collect();
+        let cmp = if keys[0].ascending { ">" } else { "<" };
+        return format!("(({}) {} ({}))", outer.join(", "), cmp, cursor.join(", "));
+    }
+
+    let after = |k: &KeysetKey| {
+        let (o, c) = (&k.outer, &k.at_cursor);
+        match (k.ascending, k.nullable) {
+            (true, false) => format!("{o} > {c}"),
+            (false, false) => format!("{o} < {c}"),
+            // values ascending, then NULLs
+            (true, true) => format!("({c} IS NOT NULL AND ({o} > {c} OR {o} IS NULL))"),
+            // NULLs, then values descending
+            (false, true) => format!("(({c} IS NULL AND {o} IS NOT NULL) OR {o} < {c})"),
+        }
+    };
+    let equal = |k: &KeysetKey| {
+        if k.nullable {
+            format!("{} IS NOT DISTINCT FROM {}", k.outer, k.at_cursor)
+        } else {
+            format!("{} = {}", k.outer, k.at_cursor)
+        }
+    };
+    let branches: Vec<String> = (0..keys.len())
+        .map(|i| {
+            let mut parts: Vec<String> = keys[..i].iter().map(equal).collect();
+            parts.push(after(&keys[i]));
+            format!("({})", parts.join(" AND "))
+        })
+        .collect();
+    format!("({})", branches.join(" OR "))
 }

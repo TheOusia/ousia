@@ -1157,6 +1157,128 @@ async fn test_query_sort_random() {
     assert!(rows.iter().all(|v| v.count < 10));
 }
 
+/// Walk `query` page by page (cursor = last id of the previous page) and
+/// return the ids in visit order.
+#[cfg(test)]
+async fn paged_ids<T: Object>(engine: &Engine, query: impl Fn() -> Query, page: u32) -> Vec<uuid::Uuid> {
+    let mut out = Vec::new();
+    let mut cursor = None;
+    loop {
+        let mut q = query().with_limit(page);
+        if let Some(c) = cursor {
+            q = q.with_cursor(c);
+        }
+        let rows: Vec<T> = engine.query_objects(q).await.unwrap();
+        out.extend(rows.iter().map(|r| r.id()));
+        match rows.last() {
+            Some(last) if rows.len() == page as usize => cursor = Some(last.id()),
+            _ => return out,
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_cursor_pagination_follows_field_sorts() {
+    let (_r, pool) = setup_test_db().await;
+    let adapter = PostgresAdapter::from_pool(pool);
+    adapter.init_schema().await.unwrap();
+
+    // duplicate names (ties), and one row whose index_meta lacks `name` (sorts as NULL)
+    let mut missing = Variants::default();
+    missing.name = "zz".into();
+    let mut record = ObjectRecord::from_object(&missing);
+    record.index_meta = serde_json::json!({});
+    adapter.insert_object(record).await.unwrap();
+    let engine = Engine::new(Box::new(adapter));
+    for (name, count) in [("c", 1i64), ("a", 2), ("b", 3), ("a", 4), ("c", 5), ("b", 6), ("a", 7)] {
+        let mut v = Variants::default();
+        v.name = name.into();
+        v.count = count;
+        engine.create_object(&v).await.unwrap();
+    }
+
+    let cases: Vec<(&str, Box<dyn Fn() -> Query>)> = vec![
+        ("name asc", Box::new(|| Query::default().sort_asc(&Variants::FIELDS.name))),
+        ("name desc", Box::new(|| Query::default().sort_desc(&Variants::FIELDS.name))),
+        ("created_at asc", Box::new(|| Query::default().sort_asc(&Variants::FIELDS.created_at))),
+        ("created_at desc", Box::new(|| Query::default().sort_desc(&Variants::FIELDS.created_at))),
+        (
+            "name asc, count desc",
+            Box::new(|| {
+                Query::default()
+                    .sort_asc(&Variants::FIELDS.name)
+                    .sort_desc(&Variants::FIELDS.count)
+            }),
+        ),
+        (
+            "filtered, name desc",
+            Box::new(|| {
+                Query::default()
+                    .where_gt(&Variants::FIELDS.count, 1i64)
+                    .sort_desc(&Variants::FIELDS.name)
+            }),
+        ),
+    ];
+    for (label, query) in cases {
+        let full: Vec<uuid::Uuid> = engine
+            .query_objects::<Variants>(query())
+            .await
+            .unwrap()
+            .iter()
+            .map(|v| v.id())
+            .collect();
+        for page in [1, 2, 3] {
+            let paged = paged_ids::<Variants>(&engine, &query, page).await;
+            assert_eq!(paged, full, "{label}, page size {page}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_cursor_pagination_follows_distance_order() {
+    let (_r, pool) = setup_test_db().await;
+    let adapter = PostgresAdapter::from_pool(pool);
+    adapter.init_schema().await.unwrap();
+    let engine = Engine::new(Box::new(adapter));
+
+    // pairs at identical distances, so distance alone doesn't give a total order
+    for (i, (lat, lon)) in [(6.50, 3.30), (6.50, 3.30), (6.60, 3.40), (6.60, 3.40), (6.70, 3.50), (6.45, 3.35)]
+        .into_iter()
+        .enumerate()
+    {
+        let mut p = Place::default();
+        p.name = format!("p{i}");
+        p.lat = lat;
+        p.lon = lon;
+        engine.create_object(&p).await.unwrap();
+    }
+
+    for ascending in [true, false] {
+        let query = || Query::default().order_by_distance(&Place::FIELDS.location, 3.3, 6.5, ascending);
+        let full: Vec<uuid::Uuid> = engine
+            .query_objects::<Place>(query())
+            .await
+            .unwrap()
+            .iter()
+            .map(|p| p.id())
+            .collect();
+        assert_eq!(full.len(), 6);
+        for page in [1, 2, 4] {
+            let paged = paged_ids::<Place>(&engine, query, page).await;
+            assert_eq!(paged, full, "ascending={ascending}, page size {page}");
+        }
+
+        let with_distance: Vec<uuid::Uuid> = engine
+            .query_objects_with_distance::<Place>(query().with_limit(2).with_cursor(full[1]))
+            .await
+            .unwrap()
+            .iter()
+            .map(|(p, _)| p.id())
+            .collect();
+        assert_eq!(with_distance, full[2..4], "with_distance, ascending={ascending}");
+    }
+}
+
 #[tokio::test]
 async fn test_sort_random_ignores_cursor() {
     let (_r, pool) = setup_test_db().await;
