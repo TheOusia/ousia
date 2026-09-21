@@ -389,8 +389,8 @@ pub async fn seed_raw_follows_bulk(pool: &PgPool, user_ids: &[uuid::Uuid], follo
 
 /// Batch-insert N ousia `BenchUser` objects directly into `public.objects`.
 ///
-/// Bypasses the engine (no `unique_constraints` entry, no sequence); suitable only for
-/// read-only benchmark fixtures.
+/// Bypasses the engine (no `object_constraints` rows); suitable only for
+/// read-only benchmark fixtures. Rows use the engine's own encoding.
 pub async fn seed_ousia_users_bulk(pool: &PgPool, n: usize) -> Vec<uuid::Uuid> {
     let nil = uuid::Uuid::nil();
     let mut ids: Vec<uuid::Uuid> = Vec::with_capacity(n);
@@ -398,35 +398,17 @@ pub async fn seed_ousia_users_bulk(pool: &PgPool, n: usize) -> Vec<uuid::Uuid> {
     let mut index_meta_strs: Vec<String> = Vec::with_capacity(n);
 
     for i in 0..n {
-        let id = uuid::Uuid::now_v7();
-        let username = format!("user_{i:06}");
-        let email = format!("user_{i:06}@bench.test");
-        let display_name = format!("User {i}");
-        let score: i64 = (i as i64) * 7 % 10_000;
-        let active = i % 3 != 0;
+        let mut user = BenchUser::default();
+        user.username = format!("user_{i:06}");
+        user.email = format!("user_{i:06}@bench.test");
+        user.display_name = format!("User {i}");
+        user.score = (i as i64) * 7 % 10_000;
+        user.active = i % 3 != 0;
 
-        ids.push(id);
-        // `data` is BYTEA msgpack keyed by BenchUser's `#[ousia(tag = N)]`
-        // (0=username, 1=email, 2=display_name, 3=score, 4=active), not
-        // JSONB — must match the real `ObjectRecord::from_object` wire
-        // format exactly since this bypasses the engine/derive entirely.
-        let mut data: std::collections::BTreeMap<u32, serde_json::Value> =
-            std::collections::BTreeMap::new();
-        data.insert(0, serde_json::json!(username));
-        data.insert(1, serde_json::json!(email));
-        data.insert(2, serde_json::json!(display_name));
-        data.insert(3, serde_json::json!(score));
-        data.insert(4, serde_json::json!(active));
-        data_bytes.push(rmp_serde::to_vec(&data).expect("msgpack encode"));
-        index_meta_strs.push(
-            serde_json::json!({
-                "username": username,
-                "email": email,
-                "score": score,
-                "active": active,
-            })
-            .to_string(),
-        );
+        let record = ousia::adapters::ObjectRecord::from_object(&user);
+        ids.push(record.id);
+        data_bytes.push(record.data);
+        index_meta_strs.push(record.index_meta.to_string());
     }
 
     sqlx::query(
@@ -459,15 +441,15 @@ pub async fn seed_ousia_edges_bulk(pool: &PgPool, user_ids: &[uuid::Uuid], follo
 
     for i in 0..n {
         for j in 1..=follows_per {
-            let weight = j as i64;
-            froms.push(user_ids[i]);
-            tos.push(user_ids[(i + j) % n]);
-            // BenchFollow: weight = tag 0.
-            let mut data: std::collections::BTreeMap<u32, serde_json::Value> =
-                std::collections::BTreeMap::new();
-            data.insert(0, serde_json::json!(weight));
-            data_bytes.push(rmp_serde::to_vec(&data).expect("msgpack encode"));
-            index_meta_strs.push(serde_json::json!({ "weight": weight }).to_string());
+            let follow = BenchFollow {
+                _meta: EdgeMeta::new(user_ids[i], user_ids[(i + j) % n]),
+                weight: j as i64,
+            };
+            let record = ousia::adapters::EdgeRecord::from_edge(&follow);
+            froms.push(record.from);
+            tos.push(record.to);
+            data_bytes.push(record.data);
+            index_meta_strs.push(record.index_meta.to_string());
         }
     }
 
@@ -486,3 +468,4 @@ pub async fn seed_ousia_edges_bulk(pool: &PgPool, user_ids: &[uuid::Uuid], follo
     .await
     .unwrap();
 }
+
