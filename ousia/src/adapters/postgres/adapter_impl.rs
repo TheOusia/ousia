@@ -239,7 +239,7 @@ impl Adapter for PostgresAdapter {
         owner: Uuid,
         filters: &[QueryFilter],
     ) -> Result<Option<ObjectRecord>, Error> {
-        let where_clause = Self::build_object_query_conditions(filters, None)?;
+        let where_clause = Self::build_object_query_conditions(filters, None);
         let order_clause = Self::build_order_clause(filters, false);
 
         let sql = format!(
@@ -278,7 +278,7 @@ impl Adapter for PostgresAdapter {
             &plan.geo_filters,
             plan.geo_order.as_ref(),
             &mut param_idx,
-        )?;
+        );
         // `param_idx` now points to the slot where bind_geo_filters will start
         // emitting its bindings. Reconstruct the per-geo-order lon/lat slot
         // indices so we can splice them into the ORDER BY suffix.
@@ -364,7 +364,7 @@ impl Adapter for PostgresAdapter {
             &plan.geo_filters,
             plan.geo_order.as_ref(),
             &mut param_idx,
-        )?;
+        );
         let scalar_order = Self::build_order_clause(&plan.filters, false);
 
         if plan.owner.is_nil() {
@@ -447,7 +447,7 @@ impl Adapter for PostgresAdapter {
                     &plan.geo_filters,
                     plan.geo_order.as_ref(),
                     &mut param_idx,
-                )?;
+                );
 
                 if plan.owner.is_nil() {
                     where_clause = where_clause.replace("owner = ", "owner > ");
@@ -900,7 +900,7 @@ impl Adapter for PostgresAdapter {
                     &plan.filters,
                     None,
                     TraversalDirection::Forward,
-                )?;
+                );
 
                 let mut sql = format!(
                     r#"
@@ -954,7 +954,7 @@ impl Adapter for PostgresAdapter {
                     &plan.filters,
                     None,
                     TraversalDirection::Reverse,
-                )?;
+                );
 
                 let mut sql = format!(
                     r#"
