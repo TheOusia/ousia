@@ -603,6 +603,73 @@ async fn v2_ledger_init_creates_per_asset_partitions() {
     assert!(parts.contains(&"ledger_value_objects_eur".to_string()));
 }
 
+async fn vo_rows(pool: &PgPool, table: &str) -> i64 {
+    sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table}"))
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+/// An asset minted before it was listed lives in `_default`; listing it later
+/// must move those rows into the new partition instead of failing.
+#[tokio::test]
+async fn test_listing_an_asset_after_minting_moves_its_rows() {
+    use ousia::ledger::adapters::postgres::PostgresSchemaLedgerAdapter;
+    use ousia::ledger::{Asset, Money};
+
+    let (_r, pool) = setup_test_db().await;
+    let adapter = PostgresAdapter::from_pool(pool.clone());
+    adapter.init_schema().await.unwrap();
+    let engine = Engine::new(Box::new(PostgresAdapter::from_pool(pool.clone())));
+    engine.ledger().create_asset(Asset::new("USD", 100, 2)).await.unwrap();
+
+    let owner = uuid::Uuid::now_v7();
+    Money::atomic(&engine.ledger_ctx(), |tx| async move {
+        tx.mint("USD", owner, 500_00, "seed".to_string()).await
+    })
+    .await
+    .unwrap();
+    let minted = vo_rows(&pool, "ledger_value_objects_default").await;
+    assert!(minted > 0);
+
+    adapter.init_ledger_schema(&["USD"]).await.unwrap();
+    assert_eq!(vo_rows(&pool, "ledger_value_objects_default").await, 0);
+    assert_eq!(vo_rows(&pool, "ledger_value_objects_usd").await, minted);
+
+    let ctx = engine.ledger_ctx();
+    let balance = ctx.balance("USD", owner).await.unwrap();
+    assert_eq!(balance.available, 500_00);
+}
+
+/// Empty partitions for codes that are no longer registered assets are
+/// dropped; anything registered or holding rows is kept.
+#[tokio::test]
+async fn test_init_ledger_schema_drops_only_empty_unregistered_partitions() {
+    use ousia::ledger::adapters::postgres::PostgresSchemaLedgerAdapter;
+    use ousia::ledger::Asset;
+
+    let (_r, pool) = setup_test_db().await;
+    let adapter = PostgresAdapter::from_pool(pool.clone());
+    adapter.init_schema().await.unwrap();
+    let engine = Engine::new(Box::new(PostgresAdapter::from_pool(pool.clone())));
+    engine.ledger().create_asset(Asset::new("NGN", 100, 2)).await.unwrap();
+
+    adapter.init_ledger_schema(&["USD", "NGN", "EUR"]).await.unwrap();
+    // an empty partition for a code no asset uses (e.g. a typo, later fixed)
+    adapter.init_ledger_schema(&[]).await.unwrap();
+
+    let parts = relations_under(&pool, "ledger_value_objects").await;
+    assert!(parts.contains(&"ledger_value_objects_ngn".to_string()), "{parts:?}");
+    assert!(!parts.contains(&"ledger_value_objects_usd".to_string()), "{parts:?}");
+    assert!(!parts.contains(&"ledger_value_objects_eur".to_string()), "{parts:?}");
+    assert!(parts.contains(&"ledger_value_objects_default".to_string()), "{parts:?}");
+
+    // listed codes are always kept, registered or not
+    adapter.init_ledger_schema(&["EUR"]).await.unwrap();
+    let parts = relations_under(&pool, "ledger_value_objects").await;
+    assert!(parts.contains(&"ledger_value_objects_eur".to_string()), "{parts:?}");
+}
+
 #[tokio::test]
 async fn test_init_ledger_schema_rejects_unsafe_asset_codes() {
     use ousia::ledger::MoneyError;

@@ -154,16 +154,9 @@ where
         .map_err(|e| MoneyError::Storage(e.to_string()))?;
 
         for code in assets {
-            let safe = ledger_partition_segment(code);
-            let sql = format!(
-                "CREATE TABLE IF NOT EXISTS ledger_value_objects_{safe} \
-                 PARTITION OF ledger_value_objects FOR VALUES IN ('{code}')"
-            );
-            sqlx::query(&sql)
-                .execute(&mut *tx)
-                .await
-                .map_err(|e| MoneyError::Storage(e.to_string()))?;
+            create_vo_partition(&mut tx, code).await?;
         }
+        drop_orphaned_vo_partitions(&mut tx, assets).await?;
 
         // Indexes for ValueObjects
         //
@@ -298,6 +291,105 @@ where
 /// the ousia postgres adapter.
 fn ledger_partition_segment(code: &str) -> String {
     code.to_lowercase().replace('-', "_")
+}
+
+fn storage_err(e: sqlx::Error) -> MoneyError {
+    MoneyError::Storage(e.to_string())
+}
+
+/// Create the partition for `code` (already validated). Rows for that code
+/// may already sit in `_default` (minted before the asset was listed);
+/// Postgres refuses to add the partition while they're there, so move them.
+async fn create_vo_partition(conn: &mut sqlx::PgConnection, code: &str) -> Result<(), MoneyError> {
+    let table = format!("ledger_value_objects_{}", ledger_partition_segment(code));
+    let exists: bool = sqlx::query_scalar("SELECT to_regclass($1) IS NOT NULL")
+        .bind(&table)
+        .fetch_one(&mut *conn)
+        .await
+        .map_err(storage_err)?;
+    if exists {
+        return Ok(());
+    }
+
+    // Blocks concurrent writes to `_default` until commit, so no new row
+    // for this code can land there between the move and the CREATE.
+    sqlx::query("LOCK TABLE ledger_value_objects_default IN ACCESS EXCLUSIVE MODE")
+        .execute(&mut *conn)
+        .await
+        .map_err(storage_err)?;
+    sqlx::query(
+        "CREATE TEMP TABLE IF NOT EXISTS ledger_vo_move \
+         (LIKE ledger_value_objects) ON COMMIT DROP",
+    )
+    .execute(&mut *conn)
+    .await
+    .map_err(storage_err)?;
+    sqlx::query(
+        "WITH moved AS (DELETE FROM ledger_value_objects_default WHERE asset_code = $1 RETURNING *) \
+         INSERT INTO ledger_vo_move SELECT * FROM moved",
+    )
+    .bind(code)
+    .execute(&mut *conn)
+    .await
+    .map_err(storage_err)?;
+    sqlx::query(&format!(
+        "CREATE TABLE {table} PARTITION OF ledger_value_objects FOR VALUES IN ('{code}')"
+    ))
+    .execute(&mut *conn)
+    .await
+    .map_err(storage_err)?;
+    for sql in [
+        "INSERT INTO ledger_value_objects SELECT * FROM ledger_vo_move",
+        "TRUNCATE ledger_vo_move",
+    ] {
+        sqlx::query(sql).execute(&mut *conn).await.map_err(storage_err)?;
+    }
+    Ok(())
+}
+
+/// Drop per-asset partitions that are empty and belong to neither a listed
+/// code nor a registered asset. `init_schema` calls this with an empty list on
+/// every start, so registered assets must keep their partitions regardless.
+async fn drop_orphaned_vo_partitions(
+    conn: &mut sqlx::PgConnection,
+    listed: &[&str],
+) -> Result<(), MoneyError> {
+    let registered: Vec<String> = sqlx::query_scalar("SELECT code FROM ledger_assets")
+        .fetch_all(&mut *conn)
+        .await
+        .map_err(storage_err)?;
+    let keep: std::collections::HashSet<String> = listed
+        .iter()
+        .copied()
+        .chain(registered.iter().map(String::as_str))
+        .map(|c| format!("ledger_value_objects_{}", ledger_partition_segment(c)))
+        .chain(std::iter::once("ledger_value_objects_default".to_string()))
+        .collect();
+
+    let partitions: Vec<String> = sqlx::query_scalar(
+        "SELECT c.relname::text FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid \
+         WHERE i.inhparent = 'ledger_value_objects'::regclass",
+    )
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(storage_err)?;
+
+    for partition in partitions.into_iter().filter(|p| !keep.contains(p)) {
+        let quoted = format!("\"{}\"", quote_ident(&partition));
+        let has_rows: bool = sqlx::query_scalar(&format!("SELECT EXISTS (SELECT 1 FROM {quoted})"))
+            .fetch_one(&mut *conn)
+            .await
+            .map_err(storage_err)?;
+        if has_rows {
+            eprintln!("[ledger warn] partition {partition} has no registered asset but still holds rows; keeping it");
+            continue;
+        }
+        sqlx::query(&format!("DROP TABLE {quoted}"))
+            .execute(&mut *conn)
+            .await
+            .map_err(storage_err)?;
+    }
+    Ok(())
 }
 
 /// Asset codes are spliced into partition DDL, so only allow identifier-safe
