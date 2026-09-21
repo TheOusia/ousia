@@ -88,8 +88,8 @@ Most Rust ORMs give you tables and rows. Ousia gives you a typed graph with mone
 
 ```toml
 [dependencies]
-// ousia = "1" -- enables "derive", "postgres" and "ledger"
-ousia = { version = "1", features = ["derive", "ledger"] }
+// ousia = "2" -- enables "derive", "postgres" and "ledger"
+ousia = { version = "2", features = ["derive", "ledger"] }
 ```
 
 The `derive` feature enables `#[derive(OusiaObject, OusiaEdge)]`. The `ledger` feature re-exports the `ledger` crate under `ousia::ledger`.
@@ -928,7 +928,7 @@ cargo add ousia --features ledger
 or
 
 ```toml
-ousia = { version = "1", features = ["derive", "postgres"] }
+ousia = { version = "2", features = ["derive", "postgres"] }
 ```
 
 ```rust

@@ -84,8 +84,8 @@ Most Rust ORMs give you tables and rows. Ousia gives you a typed graph with mone
 
 ```toml
 [dependencies]
-// ousia = "1" -- enables "derive", "postgres" and "ledger"
-ousia = { version = "1", features = ["derive", "ledger"] }
+// ousia = "2" -- enables "derive", "postgres" and "ledger"
+ousia = { version = "2", features = ["derive", "ledger"] }
 ```
 
 The `derive` feature enables `#[derive(OusiaObject, OusiaEdge)]`. The `ledger` feature re-exports the `ledger` crate under `ousia::ledger`.
@@ -294,7 +294,7 @@ let published: u64 = engine
     .await?;
 ```
 
-Available comparisons: `where_eq`, `where_ne`, `where_gt`, `where_gte`, `where_lt`, `where_lte`, `where_contains`, `where_begins_with`. Each has an `or_` variant for OR conditions. Sort with `sort_asc` / `sort_desc`.
+Available comparisons: `where_eq`, `where_ne`, `where_gt`, `where_gte`, `where_lt`, `where_lte`, `where_contains`, `where_not_contains`, `where_contains_all`, `where_not_contains_all`, `where_begins_with`, `where_not_begins_with`, `where_not_in`. Each has an `or_` variant for OR conditions. Sort with `sort_asc` / `sort_desc` (numbers by value, timestamps chronologically), or `sort_random` (ignores a cursor, with a warning). Cursor pagination follows the sort order.
 
 ### Uniqueness Constraints
 
@@ -479,7 +479,7 @@ cargo add ousia --features ledger
 or
 
 ```toml
-ousia = { version = "1", features = ["derive", "postgres"] }
+ousia = { version = "2", features = ["derive", "postgres"] }
 ```
 
 ```rust

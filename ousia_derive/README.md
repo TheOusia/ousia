@@ -6,7 +6,7 @@ This crate is an implementation detail of `ousia`. You should not depend on it d
 
 ```toml
 [dependencies]
-ousia = "1.0"
+ousia = "2"
 ```
 
 The macros in this crate (`OusiaObject`, `OusiaDefault`) are re-exported from `ousia` and documented there.
