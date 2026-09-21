@@ -199,9 +199,10 @@ impl PostgresAdapter {
         type_name: &'static str,
         owner: Uuid,
         obj_filters: &[QueryFilter],
-        plan: EdgeQuery,
+        mut plan: EdgeQuery,
         direction: TraversalDirection,
     ) -> Result<Vec<(EdgeRecord, ObjectRecord)>, Error> {
+        plan.cursor = crate::query::cursor_unless_random(plan.cursor, &[&plan.filters, obj_filters]);
         let where_clause = Self::build_object_traversal_query_conditions(
             direction.clone(),
             obj_filters,
@@ -1168,9 +1169,10 @@ impl PostgresAdapter {
         type_name: &str,
         owner: Uuid,
         filters: &[QueryFilter],
-        plan: EdgeQuery,
+        mut plan: EdgeQuery,
         direction: TraversalDirection,
     ) -> Result<Vec<ObjectRecord>, Error> {
+        plan.cursor = crate::query::cursor_unless_random(plan.cursor, &[&plan.filters, filters]);
         let where_clause = Self::build_object_traversal_query_conditions(
             direction.clone(),
             filters,
@@ -1440,9 +1442,10 @@ impl PostgresAdapter {
         &self,
         type_name: &'static str,
         owner: Uuid,
-        plan: EdgeQuery,
+        mut plan: EdgeQuery,
         direction: TraversalDirection,
     ) -> Result<Vec<EdgeRecord>, Error> {
+        plan.cursor = crate::query::cursor_unless_random(plan.cursor, &[&plan.filters]);
         let where_clause =
             Self::build_edge_query_conditions(&plan.filters, plan.cursor, direction.clone());
 

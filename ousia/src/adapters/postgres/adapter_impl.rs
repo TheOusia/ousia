@@ -268,8 +268,9 @@ impl Adapter for PostgresAdapter {
     async fn query_objects(
         &self,
         type_name: &'static str,
-        plan: Query,
+        mut plan: Query,
     ) -> Result<Vec<ObjectRecord>, Error> {
+        plan.cursor = crate::query::cursor_unless_random(plan.cursor, &[&plan.filters]);
         // ── Plan params (WHERE side) ────────────────────────────────────────
         let mut param_idx = 3;
         let (mut where_clause, geo_plan) = Self::build_object_query_conditions_with_geo(
@@ -349,8 +350,9 @@ impl Adapter for PostgresAdapter {
     async fn query_objects_with_distance(
         &self,
         type_name: &'static str,
-        plan: Query,
+        mut plan: Query,
     ) -> Result<Vec<(ObjectRecord, f64)>, Error> {
+        plan.cursor = crate::query::cursor_unless_random(plan.cursor, &[&plan.filters]);
         if plan.geo_order.is_none() {
             return Err(Error::InvalidQuery(
                 "query_objects_with_distance requires order_by_distance(...) to be set".to_string(),

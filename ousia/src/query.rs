@@ -419,6 +419,20 @@ impl QueryFilter {
     }
 }
 
+/// A cursor is a keyset boundary, and `ORDER BY RANDOM()` has no order to page
+/// through, so under a random sort the cursor is dropped with a warning.
+pub(crate) fn cursor_unless_random(
+    cursor: Option<Cursor>,
+    filter_sets: &[&[QueryFilter]],
+) -> Option<Cursor> {
+    let random = filter_sets.iter().flat_map(|f| f.iter()).any(|f| f.mode.is_random_sort());
+    if cursor.is_some() && random {
+        eprintln!("[ousia warn] sort_random ignores the cursor; running the query without it");
+        return None;
+    }
+    cursor
+}
+
 /// Pagination cursor
 #[derive(Debug, Clone, Copy)]
 pub struct Cursor {

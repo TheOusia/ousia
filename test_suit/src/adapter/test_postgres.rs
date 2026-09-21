@@ -1158,6 +1158,69 @@ async fn test_query_sort_random() {
 }
 
 #[tokio::test]
+async fn test_sort_random_ignores_cursor() {
+    let (_r, pool) = setup_test_db().await;
+    let adapter = PostgresAdapter::from_pool(pool);
+    adapter.init_schema().await.unwrap();
+    let engine = Engine::new(Box::new(adapter));
+
+    let mut hub = Hub::default();
+    hub.name = "hub".into();
+    engine.create_object(&hub).await.unwrap();
+    for (position, name) in [(1i64, "a"), (2, "b"), (3, "c")] {
+        let mut spoke = Spoke::default();
+        spoke.name = name.into();
+        engine.create_object(&spoke).await.unwrap();
+        engine
+            .create_edge(&HubSpoke {
+                _meta: EdgeMeta::new(hub.id(), spoke.id()),
+                position,
+            })
+            .await
+            .unwrap();
+    }
+    // a nil cursor is below every v7 id, so if applied it would return nothing
+    let cursor = uuid::Uuid::nil();
+    let applied: Vec<Spoke> = engine
+        .query_objects(Query::default().with_cursor(cursor))
+        .await
+        .unwrap();
+    assert!(applied.is_empty());
+
+    let spokes: Vec<Spoke> = engine
+        .query_objects(Query::default().with_cursor(cursor).sort_random())
+        .await
+        .unwrap();
+    assert_eq!(spokes.len(), 3);
+
+    let edges = engine
+        .query_edges::<HubSpoke>(hub.id(), EdgeQuery::default().sort_random().with_cursor(cursor))
+        .await
+        .unwrap();
+    assert_eq!(edges.len(), 3);
+
+    let via_edge = engine
+        .preload_object::<Hub>(hub.id())
+        .edge::<HubSpoke, Spoke>()
+        .edge_sort_random()
+        .with_cursor(cursor)
+        .collect()
+        .await
+        .unwrap();
+    assert_eq!(via_edge.len(), 3);
+
+    let via_target = engine
+        .preload_object::<Hub>(hub.id())
+        .edge::<HubSpoke, Spoke>()
+        .sort_random()
+        .with_cursor(cursor)
+        .collect_with_target()
+        .await
+        .unwrap();
+    assert_eq!(via_target.len(), 3);
+}
+
+#[tokio::test]
 async fn test_edge_negated_filters_and_random_sort() {
     let (_r, pool) = setup_test_db().await;
     let adapter = PostgresAdapter::from_pool(pool);
