@@ -1,4 +1,5 @@
-pub mod test_postgres;
+#[cfg(test)]
+mod postgres;
 pub mod test_v2_schema;
 
 use ousia::{EdgeMeta, Meta, OusiaDefault, OusiaEdge, OusiaObject, query::ToIndexValue};
