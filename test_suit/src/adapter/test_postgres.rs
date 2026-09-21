@@ -1178,6 +1178,81 @@ async fn paged_ids<T: Object>(engine: &Engine, query: impl Fn() -> Query, page: 
 }
 
 #[tokio::test]
+async fn test_sort_orders_numbers_and_timestamps_by_value() {
+    use chrono::{Duration, DurationRound};
+    let (_r, pool) = setup_test_db().await;
+    let adapter = PostgresAdapter::from_pool(pool);
+    adapter.init_schema().await.unwrap();
+    let engine = Engine::new(Box::new(adapter));
+
+    // Text order would be 10, 100, 2, 9 and -1.5, 10.25, 2.5. Timestamps are
+    // stored with 0, 3 or 6 fractional digits, whose text order is wrong too.
+    let t0 = chrono::Utc::now().duration_trunc(Duration::seconds(1)).unwrap();
+    for (name, count, price, at) in [
+        ("a", 10i64, 10.25, t0 + Duration::microseconds(500_001)),
+        ("b", 2, -1.5, t0),
+        ("c", 100, 2.5, t0 + Duration::seconds(1)),
+        ("d", 9, 9.0, t0 + Duration::milliseconds(500)),
+    ] {
+        let mut v = Variants::default();
+        v.name = name.into();
+        v.count = count;
+        v.price = price;
+        v.occurred_at = EventTime(at);
+        engine.create_object(&v).await.unwrap();
+    }
+    let names = |rows: Vec<Variants>| rows.into_iter().map(|v| v.name).collect::<Vec<_>>();
+    let asc = |f| Query::default().sort_asc(f);
+
+    assert_eq!(names(engine.query_objects(asc(&Variants::FIELDS.count)).await.unwrap()), ["b", "d", "a", "c"]);
+    assert_eq!(names(engine.query_objects(asc(&Variants::FIELDS.price)).await.unwrap()), ["b", "c", "d", "a"]);
+    assert_eq!(names(engine.query_objects(asc(&Variants::FIELDS.occurred_at)).await.unwrap()), ["b", "d", "a", "c"]);
+    assert_eq!(
+        names(engine.query_objects(Query::default().sort_desc(&Variants::FIELDS.count)).await.unwrap()),
+        ["c", "a", "d", "b"]
+    );
+}
+
+#[tokio::test]
+async fn test_edge_sort_orders_numbers_by_value() {
+    let (_r, pool) = setup_test_db().await;
+    let adapter = PostgresAdapter::from_pool(pool);
+    adapter.init_schema().await.unwrap();
+    let engine = Engine::new(Box::new(adapter));
+
+    let mut hub = Hub::default();
+    hub.name = "hub".into();
+    engine.create_object(&hub).await.unwrap();
+    for position in [10i64, 2, 100, 9] {
+        let spoke = Spoke::default();
+        engine.create_object(&spoke).await.unwrap();
+        engine
+            .create_edge(&HubSpoke {
+                _meta: EdgeMeta::new(hub.id(), spoke.id()),
+                position,
+            })
+            .await
+            .unwrap();
+    }
+    let positions = |edges: Vec<HubSpoke>| edges.into_iter().map(|e| e.position).collect::<Vec<_>>();
+
+    let edges = engine
+        .query_edges::<HubSpoke>(hub.id(), EdgeQuery::default().sort_asc(&HubSpoke::FIELDS.position))
+        .await
+        .unwrap();
+    assert_eq!(positions(edges), [2, 9, 10, 100]);
+
+    let edges = engine
+        .preload_object::<Hub>(hub.id())
+        .edge::<HubSpoke, Spoke>()
+        .edge_sort_desc(&HubSpoke::FIELDS.position)
+        .collect_edges()
+        .await
+        .unwrap();
+    assert_eq!(positions(edges), [100, 10, 9, 2]);
+}
+
+#[tokio::test]
 async fn test_cursor_pagination_follows_field_sorts() {
     let (_r, pool) = setup_test_db().await;
     let adapter = PostgresAdapter::from_pool(pool);

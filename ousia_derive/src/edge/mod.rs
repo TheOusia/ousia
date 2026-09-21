@@ -7,7 +7,10 @@ use syn::{
     parse_macro_input,
 };
 
-use crate::shared::{get_field_default_value, get_ousia_attr, import_ousia, is_meta_field, parse_index_kinds};
+use crate::shared::{
+    get_field_default_value, get_ousia_attr, import_ousia, is_meta_field, parse_index_kinds,
+    sort_as_tokens,
+};
 
 const RESERVED_EDGE_FIELDS: &[&str] = &["from", "to", "type"];
 
@@ -191,11 +194,13 @@ pub fn derive(input: TokenStream) -> TokenStream {
             }
 
             let kinds = parse_index_kinds(kind);
+            let sort_as = sort_as_tokens(&ousia, &non_meta_fields, name);
 
             quote! {
                 #ousia::query::IndexField {
                     name: #name,
                     kinds: &[#(#kinds),*],
+                    sort_as: #sort_as,
                 }
             }
         })
@@ -255,10 +260,12 @@ pub fn derive(input: TokenStream) -> TokenStream {
                 .collect::<Vec<_>>()
         };
 
+        let sort_as = sort_as_tokens(&ousia, &non_meta_fields, name_str);
         quote! {
             #field_ident: #ousia::query::IndexField {
                 name: #name_str,
                 kinds: &[#(#unique_kinds),*],
+                sort_as: #sort_as,
             }
         }
     });
@@ -598,18 +605,22 @@ pub fn derive(input: TokenStream) -> TokenStream {
                 from: #ousia::query::IndexField {
                     name: "from",
                     kinds: &[#ousia::query::IndexKind::Search],
+                    sort_as: #ousia::query::SortAs::Json,
                 },
                 to: #ousia::query::IndexField {
                     name: "to",
                     kinds: &[#ousia::query::IndexKind::Search],
+                    sort_as: #ousia::query::SortAs::Json,
                 },
                 created_at: #ousia::query::IndexField {
                     name: "created_at",
                     kinds: &[#ousia::query::IndexKind::Search, #ousia::query::IndexKind::Sort],
+                    sort_as: #ousia::query::SortAs::Timestamp,
                 },
                 updated_at: #ousia::query::IndexField {
                     name: "updated_at",
                     kinds: &[#ousia::query::IndexKind::Search, #ousia::query::IndexKind::Sort],
+                    sort_as: #ousia::query::SortAs::Timestamp,
                 },
                 #(#indexes_const_fields),*
             };

@@ -101,7 +101,22 @@ impl IndexValue {
 
 // Helper trait to convert types to IndexValue
 pub trait ToIndexValue {
+    /// How `sort_asc` / `sort_desc` order this field. The default (`Json`)
+    /// orders numbers numerically and strings as text. A custom type whose
+    /// `to_index_value` returns `IndexValue::Timestamp` must set `Timestamp`,
+    /// since timestamps are stored as text with a varying number of digits.
+    const SORT_AS: SortAs = SortAs::Json;
+
     fn to_index_value(&self) -> IndexValue;
+}
+
+/// How a sorted field is compared in the database.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SortAs {
+    /// By the stored JSON value: numbers by value, strings as text.
+    Json,
+    /// As a point in time.
+    Timestamp,
 }
 
 impl ToIndexValue for String {
@@ -147,6 +162,8 @@ impl ToIndexValue for bool {
 }
 
 impl ToIndexValue for chrono::DateTime<chrono::Utc> {
+    const SORT_AS: SortAs = SortAs::Timestamp;
+
     fn to_index_value(&self) -> IndexValue {
         IndexValue::Timestamp(*self)
     }
@@ -285,6 +302,7 @@ pub struct GeoOrder {
 pub struct IndexField {
     pub name: &'static str,
     pub kinds: &'static [IndexKind],
+    pub sort_as: SortAs,
 }
 
 pub trait IndexQuery {
@@ -394,6 +412,7 @@ pub enum Operator {
 pub static SORT_RANDOM_FIELD: IndexField = IndexField {
     name: "__random__",
     kinds: &[],
+    sort_as: SortAs::Json,
 };
 
 impl QueryFilter {

@@ -8,7 +8,9 @@ use uuid::Uuid;
 
 use crate::{
     adapters::{EdgeQuery, EdgeRecord, Error, ObjectRecord, TraversalDirection},
-    query::{Cursor, GeoFilter, GeoOrder, IndexValue, IndexValueInner, QueryFilter},
+    query::{
+        Cursor, GeoFilter, GeoOrder, IndexField, IndexValue, IndexValueInner, QueryFilter, SortAs,
+    },
 };
 
 /// Resolved JOIN plan for the geo filters + order on a single query.
@@ -804,19 +806,11 @@ impl PostgresAdapter {
     /// row-comparison below only keys on one sort column plus the from/to tiebreak.
     fn resolve_edge_sort(filters: &[QueryFilter]) -> (String, String, bool) {
         match filters.iter().find(|f| f.mode.as_sort().is_some()) {
-            Some(f) if matches!(f.field.name, "created_at" | "updated_at") => (
-                format!("e.{}", f.field.name),
-                f.field.name.to_string(),
+            Some(f) => (
+                Self::sort_expr("e.", f.field),
+                Self::sort_expr("", f.field),
                 f.mode.as_sort().unwrap().ascending,
             ),
-            Some(f) => {
-                let t = Self::index_type_str(&f.value);
-                (
-                    format!("(e.index_meta->>'{}')::{}", f.field.name, t),
-                    format!("(index_meta->>'{}')::{}", f.field.name, t),
-                    f.mode.as_sort().unwrap().ascending,
-                )
-            }
             None => ("e.created_at".to_string(), "created_at".to_string(), false),
         }
     }
@@ -890,26 +884,24 @@ impl PostgresAdapter {
         filters
             .iter()
             .filter(|f| f.value.as_array().is_none())
-            .filter_map(|f| {
-                let ascending = f.mode.as_sort()?.ascending;
-                // Native columns: direct reference so composite indexes are hit
-                if matches!(f.field.name, "created_at" | "updated_at") {
-                    return Some((format!("{}{}", prefix, f.field.name), ascending));
-                }
-                let index_type = match &f.value {
-                    IndexValue::String(_) => "text",
-                    IndexValue::Int(_) => "bigint",
-                    IndexValue::Float(_) => "double precision",
-                    IndexValue::Bool(_) => "boolean",
-                    IndexValue::Timestamp(_) => "timestamptz",
-                    _ => "text",
-                };
-                Some((
-                    format!("({}index_meta->>'{}')::{}", prefix, f.field.name, index_type),
-                    ascending,
-                ))
-            })
+            .filter_map(|f| Some((Self::sort_expr(prefix, f.field), f.mode.as_sort()?.ascending)))
             .collect()
+    }
+
+    /// Expression a sort on `field` orders by. The type comes from the field
+    /// (`IndexField::sort_as`), not the sort filter's placeholder value.
+    fn sort_expr(prefix: &str, field: &IndexField) -> String {
+        let name = field.name;
+        // Native columns: direct reference so composite indexes are hit
+        if matches!(name, "created_at" | "updated_at") {
+            return format!("{prefix}{name}");
+        }
+        match field.sort_as {
+            SortAs::Timestamp => format!("({prefix}index_meta->>'{name}')::timestamptz"),
+            // jsonb ordering: numbers by value, strings as text. A JSON null
+            // becomes SQL NULL so it sorts like a missing field.
+            SortAs::Json => format!("NULLIF({prefix}index_meta->'{name}', 'null'::jsonb)"),
+        }
     }
 
     pub(super) fn build_order_clause_aliased(

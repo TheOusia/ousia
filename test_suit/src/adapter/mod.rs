@@ -191,6 +191,8 @@ impl Default for EventTime {
 }
 
 impl ToIndexValue for EventTime {
+    const SORT_AS: ousia::query::SortAs = ousia::query::SortAs::Timestamp;
+
     fn to_index_value(&self) -> ousia::query::IndexValue {
         ousia::query::IndexValue::Timestamp(self.0)
     }

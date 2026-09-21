@@ -5,7 +5,7 @@ use quote::{format_ident, quote};
 use syn::{Data, DeriveInput, Expr, ExprLit, Field, Fields, Lit, Meta, Result, Type};
 
 use crate::shared::{
-    get_field_default_value, get_ousia_attr, get_rename_value, import_ousia, is_meta_field, is_private_field,
+    get_field_default_value, get_ousia_attr, get_rename_value, import_ousia, sort_as_tokens, is_meta_field, is_private_field,
     parse_geo_source_fields, parse_index_kinds, parse_ousia_attr,
 };
 
@@ -447,11 +447,13 @@ pub fn generate_object_impl(input: &DeriveInput) -> Result<TokenStream> {
             }
 
             let kinds = parse_index_kinds(kind);
+            let sort_as = sort_as_tokens(&ousia, &non_meta_fields, name);
 
             quote! {
                 #ousia::query::IndexField {
                     name: #name,
                     kinds: &[#(#kinds),*],
+                    sort_as: #sort_as,
                 }
             }
         })
@@ -558,10 +560,12 @@ pub fn generate_object_impl(input: &DeriveInput) -> Result<TokenStream> {
                 .collect::<Vec<_>>()
         };
 
+        let sort_as = sort_as_tokens(&ousia, &non_meta_fields, name_str);
         quote! {
             #field_ident: #ousia::query::IndexField {
                 name: #name_str,
                 kinds: &[#(#unique_kinds),*],
+                sort_as: #sort_as,
             }
         }
     });
@@ -982,10 +986,12 @@ pub fn generate_object_impl(input: &DeriveInput) -> Result<TokenStream> {
                 created_at: #ousia::query::IndexField {
                     name: "created_at",
                     kinds: &[#ousia::query::IndexKind::Search, #ousia::query::IndexKind::Sort],
+                    sort_as: #ousia::query::SortAs::Timestamp,
                 },
                 updated_at: #ousia::query::IndexField {
                     name: "updated_at",
                     kinds: &[#ousia::query::IndexKind::Search, #ousia::query::IndexKind::Sort],
+                    sort_as: #ousia::query::SortAs::Timestamp,
                 },
                 #(#indexes_const_fields),*
             };

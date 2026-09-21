@@ -183,6 +183,11 @@ impl ToIndexValue for PostStatus {
 }
 ```
 
+A custom type that returns `IndexValue::Timestamp` should also set
+`const SORT_AS: SortAs = SortAs::Timestamp;` in its `ToIndexValue` impl so
+`sort_asc` / `sort_desc` order it chronologically. Every other type sorts by
+its stored value (numbers numerically, strings as text) with no extra code.
+
 The `OusiaObject` derive generates:
 
 - `impl Object` — type name, meta accessors, index metadata

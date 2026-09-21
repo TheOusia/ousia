@@ -75,6 +75,22 @@ pub fn get_field_default_value(field: &Field) -> Option<proc_macro2::TokenStream
     None
 }
 
+/// `SortAs` for an indexed field: its Rust type's `ToIndexValue::SORT_AS`, or
+/// `Json` when `name` isn't a struct field (a geo field's virtual name).
+pub fn sort_as_tokens(
+    ousia: &proc_macro2::TokenStream,
+    fields: &[&Field],
+    name: &str,
+) -> proc_macro2::TokenStream {
+    match fields.iter().find(|f| f.ident.as_ref().is_some_and(|i| i == name)) {
+        Some(f) => {
+            let ty = &f.ty;
+            quote! { <#ty as #ousia::query::ToIndexValue>::SORT_AS }
+        }
+        None => quote! { #ousia::query::SortAs::Json },
+    }
+}
+
 /// `#[ousia(rename = "old_name")]`: previous name of a field, still accepted when decoding.
 pub fn get_rename_value(field: &Field) -> Option<String> {
     for attr in &field.attrs {
