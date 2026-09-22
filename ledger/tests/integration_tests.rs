@@ -1057,3 +1057,240 @@ async fn test_interleaved_mints_and_spends_balance_integrity() {
     assert_eq!(user_balance.available, expected_user as u64);
     assert_eq!(merchant_balance.available, expected_merchant as u64);
 }
+
+// ── Idempotent mint/burn (MemoryAdapter) ──────────────────────────────────────
+//
+// `test_mint_and_reserve` above already exercises the happy path for
+// `mint_idempotent`, but nothing here previously covered the duplicate-key
+// rejection path or `burn_idempotent` at all — the equivalent gap that let
+// a Postgres-only bug (idempotency-key row inserted before the transaction
+// row it FK-references) ship unnoticed. `MemoryAdapter` has no real foreign
+// keys so it never hit that specific bug, but it had its own: the duplicate
+// error carried the new (never-stored) transaction's id instead of the
+// original one's, and it stored the idempotency key differently from the
+// Postgres adapter (raw key vs. hash) — covered below.
+
+#[tokio::test]
+async fn test_mint_idempotent_duplicate_key_rejected_and_not_double_minted() {
+    let (system, ctx, user) = setup();
+    create_usd_asset(&system).await;
+
+    Money::atomic(&ctx, |tx| async move {
+        tx.mint_idempotent(
+            "USD",
+            user,
+            100_00,
+            "deposit".to_string(),
+            "order-456".to_string(),
+        )
+        .await?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+
+    let result = Money::atomic(&ctx, |tx| async move {
+        tx.mint_idempotent(
+            "USD",
+            user,
+            100_00,
+            "deposit retry".to_string(),
+            "order-456".to_string(),
+        )
+        .await?;
+        Ok(())
+    })
+    .await;
+
+    assert!(matches!(result, Err(MoneyError::DuplicateIdempotencyKey(_))));
+
+    let balance = Balance::get("USD", user, &ctx).await.unwrap();
+    assert_eq!(balance.available, 100_00);
+}
+
+#[tokio::test]
+async fn test_burn_idempotent_duplicate_key_rejected_and_not_double_burned() {
+    let (system, ctx, user) = setup();
+    create_usd_asset(&system).await;
+
+    Money::atomic(&ctx, |tx| async move {
+        tx.mint("USD", user, 100_00, "deposit".to_string()).await?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+
+    Money::atomic(&ctx, |tx| async move {
+        tx.burn_idempotent(
+            "USD",
+            user,
+            30_00,
+            "fee".to_string(),
+            "fee-001".to_string(),
+        )
+        .await?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+
+    let result = Money::atomic(&ctx, |tx| async move {
+        tx.burn_idempotent(
+            "USD",
+            user,
+            30_00,
+            "fee retry".to_string(),
+            "fee-001".to_string(),
+        )
+        .await?;
+        Ok(())
+    })
+    .await;
+
+    assert!(matches!(result, Err(MoneyError::DuplicateIdempotencyKey(_))));
+
+    let balance = Balance::get("USD", user, &ctx).await.unwrap();
+    assert_eq!(
+        balance.available, 70_00,
+        "only the first burn should have taken effect"
+    );
+}
+
+/// The duplicate-key error used to carry the id of the new, never-persisted
+/// transaction instead of the transaction that actually owns the key.
+#[tokio::test]
+async fn test_duplicate_idempotency_key_error_references_original_transaction() {
+    let (system, ctx, user) = setup();
+    create_usd_asset(&system).await;
+
+    Money::atomic(&ctx, |tx| async move {
+        tx.mint_idempotent(
+            "USD",
+            user,
+            50_00,
+            "deposit".to_string(),
+            "order-789".to_string(),
+        )
+        .await?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+
+    let original = system
+        .adapter()
+        .get_transaction_by_idempotency_key("order-789")
+        .await
+        .unwrap();
+
+    let result = Money::atomic(&ctx, |tx| async move {
+        tx.mint_idempotent(
+            "USD",
+            user,
+            50_00,
+            "deposit retry".to_string(),
+            "order-789".to_string(),
+        )
+        .await?;
+        Ok(())
+    })
+    .await;
+
+    match result {
+        Err(MoneyError::DuplicateIdempotencyKey(id)) => {
+            assert_eq!(
+                id, original.id,
+                "error should reference the original transaction, not a phantom one"
+            );
+        }
+        other => panic!("expected DuplicateIdempotencyKey, got {other:?}"),
+    }
+}
+
+/// `get_transaction(id)` on the Postgres adapter used to query a nonexistent
+/// `assets` table (should have been `ledger_assets`) and fail unconditionally.
+/// `MemoryAdapter` never had that bug, but this keeps both adapters covered
+/// with the same lookup-by-id path.
+#[tokio::test]
+async fn test_get_transaction_by_id() {
+    let (system, ctx, user) = setup();
+    create_usd_asset(&system).await;
+
+    Money::atomic(&ctx, |tx| async move {
+        tx.mint_idempotent(
+            "USD",
+            user,
+            25_00,
+            "deposit".to_string(),
+            "lookup-1".to_string(),
+        )
+        .await?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+
+    let by_key = system
+        .adapter()
+        .get_transaction_by_idempotency_key("lookup-1")
+        .await
+        .unwrap();
+
+    let by_id = system.adapter().get_transaction(by_key.id).await.unwrap();
+    assert_eq!(by_id.id, by_key.id);
+    assert_eq!(by_id.code, "USD");
+    assert_eq!(by_id.minted_amount, 25_00);
+}
+
+/// The Postgres adapter only ever persists the blake3 hash of an idempotency
+/// key (`ledger_transaction_idempotency_keys.key`), never the raw value —
+/// `MemoryAdapter` used to store and return the raw key instead, so the two
+/// adapters disagreed on what `Transaction.idempotency_key` contains for the
+/// same logical operation. It should be the hash on both.
+#[tokio::test]
+async fn test_memory_adapter_idempotency_key_is_hashed_like_postgres() {
+    let (system, ctx, user) = setup();
+    create_usd_asset(&system).await;
+
+    Money::atomic(&ctx, |tx| async move {
+        tx.mint_idempotent(
+            "USD",
+            user,
+            10_00,
+            "deposit".to_string(),
+            "raw-key-should-not-round-trip".to_string(),
+        )
+        .await?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+
+    let stored = system
+        .adapter()
+        .get_transaction_by_idempotency_key("raw-key-should-not-round-trip")
+        .await
+        .unwrap();
+
+    let key = stored
+        .idempotency_key
+        .expect("idempotency_key should be set");
+    assert_ne!(
+        key, "raw-key-should-not-round-trip",
+        "stored idempotency_key must be the hash, not the raw key"
+    );
+    assert_eq!(key.len(), 64, "blake3 hex digest is 64 chars");
+}
+
+// ── Asset decimal conversion ──────────────────────────────────────────────────
+
+/// `to_internal` used to truncate `display_amount * 10^decimals` straight to
+/// `u64` — for values where that multiplication isn't exactly representable in
+/// f64 (e.g. `19.99 * 100 == 1998.9999999999998`), truncation silently lost a
+/// cent. It must round to the nearest integer instead.
+#[tokio::test]
+async fn test_asset_to_internal_rounds_against_float_error() {
+    let usd = Asset::new("USD", 10_00, 2);
+    assert_eq!(usd.to_internal(19.99), 1999);
+    assert_eq!(usd.to_internal(0.29), 29);
+}

@@ -47,12 +47,30 @@ impl LedgerAdapter for MemoryAdapter {
         plan: &ExecutionPlan,
         locks: &[(Uuid, Uuid, u64)],
     ) -> Result<(), MoneyError> {
-        // Hold the mutex for the ENTIRE operation — this is the MemoryAdapter's
-        // equivalent of BEGIN/SELECT FOR UPDATE/COMMIT. No other task can enter
-        // execute_plan while we hold it.
-        let mut value_objects = self.store.value_objects.lock().unwrap();
+        // Hold the mutexes for the ENTIRE operation — this is the MemoryAdapter's
+        // equivalent of BEGIN/SELECT FOR UPDATE. No other task can enter
+        // execute_plan while we hold them.
+        //
+        // Phases 0-3 below operate on LOCAL clones, not the guards directly:
+        // an error returned partway through (e.g. Phase 1's InsufficientFunds,
+        // or Phase 2's DuplicateIdempotencyKey — which can be discovered only
+        // *after* Phase 0 already minted new value objects for the same plan)
+        // must leave the shared store completely untouched. Writing straight
+        // into the guarded maps and returning early on error — the previous
+        // behaviour — committed whatever had mutated so far with no rollback,
+        // silently double-minting on a duplicate idempotency key. The clones
+        // are written back to the guards only once every phase has succeeded,
+        // which is this adapter's equivalent of COMMIT; on any early return
+        // they're simply dropped and the guards (hence the shared store)
+        // never see the partial work.
+        let mut value_objects_guard = self.store.value_objects.lock().unwrap();
         let assets = self.store.assets.lock().unwrap();
-        let mut transactions = self.store.transactions.lock().unwrap();
+        let mut transactions_guard = self.store.transactions.lock().unwrap();
+        let mut idempotency_keys_guard = self.store.idempotency_keys.lock().unwrap();
+
+        let mut value_objects = value_objects_guard.clone();
+        let mut transactions = transactions_guard.clone();
+        let mut idempotency_keys = idempotency_keys_guard.clone();
 
         // ── Phase 0: Apply mints ──────────────────────────────────────────────
         // Mints create new value; they don't compete for existing VOs. Running
@@ -253,20 +271,27 @@ impl LedgerAdapter for MemoryAdapter {
                 }
 
                 Operation::RecordTransaction { transaction } => {
+                    let mut transaction = transaction.clone();
+
                     if let Some(ref raw_key) = transaction.idempotency_key {
                         let hash = crate::hash_idempotency_key(raw_key);
 
-                        let mut keys = self.store.idempotency_keys.lock().unwrap();
-
-                        // Check for duplicate while holding the mutex — atomic with the insert
-                        if keys.contains_key(&hash) {
-                            return Err(MoneyError::DuplicateIdempotencyKey(transaction.id));
+                        // Checked against the local staging map — still race-free,
+                        // since the real `idempotency_keys` mutex has been held
+                        // (via `idempotency_keys_guard`) since the top of this call.
+                        if let Some(existing_id) = idempotency_keys.get(&hash) {
+                            return Err(MoneyError::DuplicateIdempotencyKey(*existing_id));
                         }
 
-                        keys.insert(hash, transaction.id);
+                        idempotency_keys.insert(hash.clone(), transaction.id);
+                        // Match the Postgres adapter, which only ever persists the
+                        // hash (`ledger_transaction_idempotency_keys.key`), never the
+                        // raw key — otherwise the two adapters return different
+                        // `idempotency_key` content for the same stored transaction.
+                        transaction.idempotency_key = Some(hash);
                     }
 
-                    transactions.insert(transaction.id, transaction.clone());
+                    transactions.insert(transaction.id, transaction);
                 }
             }
         }
@@ -299,6 +324,11 @@ impl LedgerAdapter for MemoryAdapter {
                 }
             }
         }
+
+        // Every phase succeeded — commit the staged state into the shared store.
+        *value_objects_guard = value_objects;
+        *transactions_guard = transactions;
+        *idempotency_keys_guard = idempotency_keys;
 
         Ok(())
     }

@@ -378,29 +378,13 @@ where
         tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
         transaction: Transaction,
     ) -> Result<(), MoneyError> {
-        // Insert idempotency key FIRST — if it conflicts, bail before touching transactions
-        if let Some(ref raw_key) = transaction.idempotency_key {
-            let hash = crate::hash_idempotency_key(raw_key);
-
-            let inserted = sqlx::query(
-                r#"
-                INSERT INTO ledger_transaction_idempotency_keys (key, transaction_id, created_at)
-                VALUES ($1, $2, NOW())
-                ON CONFLICT (key) DO NOTHING
-                RETURNING key
-                "#,
-            )
-            .bind(&hash)
-            .bind(transaction.id)
-            .fetch_optional(&mut **tx)
-            .await
-            .map_err(|e| MoneyError::Storage(e.to_string()))?;
-
-            if inserted.is_none() {
-                return Err(MoneyError::DuplicateIdempotencyKey(transaction.id));
-            }
-        }
-
+        // Insert the transaction FIRST. `ledger_transaction_idempotency_keys.transaction_id`
+        // is a NOT DEFERRABLE FK into this table, so the referenced row must already
+        // exist in this same DB transaction before the idempotency key can reference
+        // it — inserting the key first (as this used to) makes every idempotent
+        // mint/burn violate the FK unconditionally. Returning an error below still
+        // rolls back this whole transaction (including this insert), so ordering it
+        // this way costs nothing on the duplicate-key path.
         sqlx::query(
             r#"
             INSERT INTO ledger_transactions
@@ -419,6 +403,47 @@ where
         .execute(&mut **tx)
         .await
         .map_err(|e| MoneyError::Storage(e.to_string()))?;
+
+        if let Some(ref raw_key) = transaction.idempotency_key {
+            let hash = crate::hash_idempotency_key(raw_key);
+
+            let inserted = sqlx::query(
+                r#"
+                INSERT INTO ledger_transaction_idempotency_keys (key, transaction_id, created_at)
+                VALUES ($1, $2, NOW())
+                ON CONFLICT (key) DO NOTHING
+                RETURNING key
+                "#,
+            )
+            .bind(&hash)
+            .bind(transaction.id)
+            .fetch_optional(&mut **tx)
+            .await
+            .map_err(|e| MoneyError::Storage(e.to_string()))?;
+
+            if inserted.is_none() {
+                // Someone already holds this key — look up the transaction that
+                // actually owns it so the error points somewhere real, rather than
+                // at this transaction's id, which is about to be rolled back.
+                let existing = sqlx::query(
+                    r#"
+                    SELECT transaction_id
+                    FROM ledger_transaction_idempotency_keys
+                    WHERE key = $1
+                    "#,
+                )
+                .bind(&hash)
+                .fetch_one(&mut **tx)
+                .await
+                .map_err(|e| MoneyError::Storage(e.to_string()))?;
+
+                let existing_id: Uuid = existing
+                    .try_get("transaction_id")
+                    .map_err(|e| MoneyError::Storage(e.to_string()))?;
+
+                return Err(MoneyError::DuplicateIdempotencyKey(existing_id));
+            }
+        }
 
         Ok(())
     }
@@ -827,7 +852,7 @@ where
             r#"
             SELECT lt.id, ik.key as idempotency_key, lt.asset, a.code, lt.sender, lt.receiver, lt.burned_amount, lt.minted_amount, lt.metadata, lt.created_at
             FROM ledger_transactions lt
-            LEFT JOIN assets a ON lt.asset = a.id
+            LEFT JOIN ledger_assets a ON lt.asset = a.id
             LEFT JOIN ledger_transaction_idempotency_keys ik ON ik.transaction_id = lt.id
             WHERE lt.id = $1
             "#,
