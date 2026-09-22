@@ -8,7 +8,7 @@ use uuid::Uuid;
 
 use crate::{
     adapters::{Adapter, EdgeQuery, EdgeRecord, Error, ObjectRecord, Query, TraversalDirection},
-    query::QueryFilter,
+    query::{GeoPoint, QueryFilter},
 };
 use sqlx::Row;
 
@@ -113,6 +113,59 @@ impl Adapter for PostgresAdapter {
         .map_err(|err| Error::Storage(err.to_string()))?;
 
         Ok(())
+    }
+
+    async fn create_object_atomic(
+        &self,
+        record: ObjectRecord,
+        unique: Vec<(String, &'static str)>,
+        geo: Vec<GeoPoint>,
+    ) -> Result<(), Error> {
+        self.create_object_tx(record, unique, geo).await
+    }
+
+    async fn update_object_atomic(
+        &self,
+        record: ObjectRecord,
+        unique: Option<Vec<(String, &'static str)>>,
+        geo: Option<Vec<GeoPoint>>,
+    ) -> Result<(), Error> {
+        self.update_object_tx(record, unique, geo).await
+    }
+
+    async fn transfer_object_atomic(
+        &self,
+        type_name: &'static str,
+        id: Uuid,
+        from_owner: Uuid,
+        to_owner: Uuid,
+        snapshot: serde_json::Value,
+        unique: Vec<(String, &'static str)>,
+    ) -> Result<Option<ObjectRecord>, Error> {
+        self.transfer_object_tx(type_name, id, from_owner, to_owner, snapshot, unique)
+            .await
+    }
+
+    async fn delete_object_atomic(
+        &self,
+        type_name: &'static str,
+        id: Uuid,
+        owner: Uuid,
+        unique: bool,
+        geo: bool,
+    ) -> Result<Option<ObjectRecord>, Error> {
+        self.delete_object_tx(type_name, id, owner, unique, geo).await
+    }
+
+    async fn delete_objects_atomic(
+        &self,
+        type_name: &'static str,
+        owner: Uuid,
+        ids: Option<Vec<Uuid>>,
+        unique: bool,
+        geo: bool,
+    ) -> Result<u64, Error> {
+        self.delete_objects_tx(type_name, owner, ids, unique, geo).await
     }
 
     async fn transfer_object(

@@ -1,4 +1,5 @@
 mod adapter_impl;
+mod atomic_impl;
 mod geo_impl;
 mod helper;
 mod traversal_impl;

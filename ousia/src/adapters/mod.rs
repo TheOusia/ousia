@@ -225,6 +225,72 @@ pub trait Adapter: UniqueAdapter + GeoAdapter + EdgeTraversal + Send + Sync + 's
     ) -> Result<Vec<ObjectRecord>, Error>;
     async fn update_object(&self, record: ObjectRecord) -> Result<(), Error>;
 
+    // Atomic variants used by `Engine` when an adapter provides them. The
+    // defaults return `Unsupported`, and `Engine` then falls back to the
+    // separate calls above, so adapters written against earlier 1.x versions
+    // keep working unchanged.
+
+    /// Insert the object with its unique keys and geo points in one transaction.
+    async fn create_object_atomic(
+        &self,
+        _record: ObjectRecord,
+        _unique: Vec<(String, &'static str)>,
+        _geo: Vec<GeoPoint>,
+    ) -> Result<(), Error> {
+        Err(Error::Unsupported("create_object_atomic".into()))
+    }
+
+    /// Update the object and reconcile its unique keys / geo points to the given
+    /// full sets (`None` = leave untouched), in one transaction.
+    async fn update_object_atomic(
+        &self,
+        _record: ObjectRecord,
+        _unique: Option<Vec<(String, &'static str)>>,
+        _geo: Option<Vec<GeoPoint>>,
+    ) -> Result<(), Error> {
+        Err(Error::Unsupported("update_object_atomic".into()))
+    }
+
+    /// Transfer and reconcile unique keys in one transaction, only if the stored
+    /// `data` still equals `snapshot`. `Ok(None)` means it changed concurrently.
+    async fn transfer_object_atomic(
+        &self,
+        _type_name: &'static str,
+        _id: Uuid,
+        _from_owner: Uuid,
+        _to_owner: Uuid,
+        _snapshot: serde_json::Value,
+        _unique: Vec<(String, &'static str)>,
+    ) -> Result<Option<ObjectRecord>, Error> {
+        Err(Error::Unsupported("transfer_object_atomic".into()))
+    }
+
+    /// Delete the object and, when flagged, its unique keys and geo rows, in
+    /// one transaction.
+    async fn delete_object_atomic(
+        &self,
+        _type_name: &'static str,
+        _id: Uuid,
+        _owner: Uuid,
+        _unique: bool,
+        _geo: bool,
+    ) -> Result<Option<ObjectRecord>, Error> {
+        Err(Error::Unsupported("delete_object_atomic".into()))
+    }
+
+    /// Delete `ids` (or, with `None`, every object of the type owned by
+    /// `owner`) with their unique keys and geo rows, in one transaction.
+    async fn delete_objects_atomic(
+        &self,
+        _type_name: &'static str,
+        _owner: Uuid,
+        _ids: Option<Vec<Uuid>>,
+        _unique: bool,
+        _geo: bool,
+    ) -> Result<u64, Error> {
+        Err(Error::Unsupported("delete_objects_atomic".into()))
+    }
+
     /// Explicit ownership transfer
     async fn transfer_object(
         &self,

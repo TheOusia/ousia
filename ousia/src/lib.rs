@@ -144,8 +144,23 @@ impl Engine {
     }
 
     // ==================== Object CRUD ====================
-    /// Create a new object in storage
+    /// Create a new object in storage. On adapters that support it, the row,
+    /// its unique keys and geo points are written in one transaction.
     pub async fn create_object<T: Object>(&self, obj: &T) -> Result<(), Error> {
+        let unique = if T::HAS_UNIQUE_FIELDS { obj.derive_unique_hashes() } else { vec![] };
+        let geo = if T::HAS_GEO_FIELDS { obj.geo_points() } else { vec![] };
+        match self
+            .inner
+            .adapter
+            .create_object_atomic(ObjectRecord::from_object(obj), unique, geo)
+            .await
+        {
+            Err(Error::Unsupported(_)) => self.create_object_sequential(obj).await,
+            other => other,
+        }
+    }
+
+    async fn create_object_sequential<T: Object>(&self, obj: &T) -> Result<(), Error> {
         if !T::HAS_UNIQUE_FIELDS {
             self.inner
                 .adapter
@@ -192,10 +207,24 @@ impl Engine {
         records.into_iter().map(|r| r.to_object()).collect()
     }
 
-    /// Update an existing object
+    /// Update an existing object. On adapters that support it, the row, its
+    /// unique keys and geo points are updated in one transaction.
     pub async fn update_object<T: Object>(&self, obj: &mut T) -> Result<(), Error> {
-        let meta = obj.meta_mut();
-        meta.updated_at = Utc::now();
+        obj.meta_mut().updated_at = Utc::now();
+        let unique = T::HAS_UNIQUE_FIELDS.then(|| obj.derive_unique_hashes());
+        let geo = T::HAS_GEO_FIELDS.then(|| obj.geo_points());
+        match self
+            .inner
+            .adapter
+            .update_object_atomic(ObjectRecord::from_object(obj), unique, geo)
+            .await
+        {
+            Err(Error::Unsupported(_)) => self.update_object_sequential(obj).await,
+            other => other,
+        }
+    }
+
+    async fn update_object_sequential<T: Object>(&self, obj: &mut T) -> Result<(), Error> {
 
         if !T::HAS_UNIQUE_FIELDS {
             // No unique fields, just update the object
@@ -323,8 +352,26 @@ impl Engine {
         Ok(())
     }
 
-    /// Delete an object
+    /// Delete an object, with its unique keys and geo rows (in one transaction
+    /// on adapters that support it).
     pub async fn delete_object<T: Object>(
+        &self,
+        id: Uuid,
+        owner: Uuid,
+    ) -> Result<Option<T>, Error> {
+        match self
+            .inner
+            .adapter
+            .delete_object_atomic(T::TYPE, id, owner, T::HAS_UNIQUE_FIELDS, T::HAS_GEO_FIELDS)
+            .await
+        {
+            Err(Error::Unsupported(_)) => self.delete_object_sequential(id, owner).await,
+            Err(e) => Err(e),
+            Ok(record) => record.map(|r| r.to_object()).transpose(),
+        }
+    }
+
+    async fn delete_object_sequential<T: Object>(
         &self,
         id: Uuid,
         owner: Uuid,
@@ -346,7 +393,25 @@ impl Engine {
         }
     }
 
+    /// Delete `ids` owned by `owner`, with their unique keys and geo rows (in
+    /// one transaction on adapters that support it). Returns the rows deleted.
     pub async fn delete_objects<T: Object>(
+        &self,
+        ids: Vec<Uuid>,
+        owner: Uuid,
+    ) -> Result<u64, Error> {
+        match self
+            .inner
+            .adapter
+            .delete_objects_atomic(T::TYPE, owner, Some(ids.clone()), T::HAS_UNIQUE_FIELDS, T::HAS_GEO_FIELDS)
+            .await
+        {
+            Err(Error::Unsupported(_)) => self.delete_objects_sequential::<T>(ids, owner).await,
+            other => other,
+        }
+    }
+
+    async fn delete_objects_sequential<T: Object>(
         &self,
         ids: Vec<Uuid>,
         owner: Uuid,
@@ -379,7 +444,21 @@ impl Engine {
         Ok(record)
     }
 
+    /// Delete every `T` owned by `owner`, with their unique keys and geo rows
+    /// (in one transaction on adapters that support it).
     pub async fn delete_owned_objects<T: Object>(&self, owner: Uuid) -> Result<u64, Error> {
+        match self
+            .inner
+            .adapter
+            .delete_objects_atomic(T::TYPE, owner, None, T::HAS_UNIQUE_FIELDS, T::HAS_GEO_FIELDS)
+            .await
+        {
+            Err(Error::Unsupported(_)) => self.delete_owned_objects_sequential::<T>(owner).await,
+            other => other,
+        }
+    }
+
+    async fn delete_owned_objects_sequential<T: Object>(&self, owner: Uuid) -> Result<u64, Error> {
         // Geo cleanup needs ids; capture them before the rows disappear.
         let geo_cleanup_ids: Vec<Uuid> = if T::HAS_GEO_FIELDS {
             self.fetch_owned_objects::<T>(owner)
@@ -411,8 +490,50 @@ impl Engine {
         Ok(record)
     }
 
-    /// Transfer ownership of an object
+    /// Transfer ownership of an object. Unique constraints that include
+    /// `owner` are re-keyed (in the same transaction on adapters that support it).
     pub async fn transfer_object<T: Object>(
+        &self,
+        id: Uuid,
+        from_owner: Uuid,
+        to_owner: Uuid,
+    ) -> Result<T, Error> {
+        if !T::HAS_UNIQUE_FIELDS {
+            return self.transfer_object_sequential(id, from_owner, to_owner).await;
+        }
+        // Unique keys are derived from a snapshot of the object; the adapter
+        // only commits if the stored data is unchanged, else we re-read.
+        const ATTEMPTS: usize = 3;
+        for _ in 0..ATTEMPTS {
+            let record = match self.inner.adapter.fetch_object(T::TYPE, id).await? {
+                Some(record) if record.owner == from_owner => record,
+                _ => return Err(Error::NotFound),
+            };
+            let snapshot = record.data.clone();
+            let mut obj: T = record.to_object()?;
+            obj.meta_mut().owner = to_owner;
+            let unique = obj.derive_unique_hashes();
+            match self
+                .inner
+                .adapter
+                .transfer_object_atomic(T::TYPE, id, from_owner, to_owner, snapshot, unique)
+                .await
+            {
+                Err(Error::Unsupported(_)) => {
+                    return self.transfer_object_sequential(id, from_owner, to_owner).await;
+                }
+                Err(e) => return Err(e),
+                Ok(Some(record)) => return record.to_object(),
+                Ok(None) => continue,
+            }
+        }
+        Err(Error::Storage(format!(
+            "transfer_object: {} {id} changed concurrently {ATTEMPTS} times; giving up",
+            T::TYPE
+        )))
+    }
+
+    async fn transfer_object_sequential<T: Object>(
         &self,
         id: Uuid,
         from_owner: Uuid,
