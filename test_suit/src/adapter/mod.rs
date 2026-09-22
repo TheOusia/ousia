@@ -102,6 +102,14 @@ struct Follow {
     notification: bool,
 }
 
+/// Edge with a numeric sort field, for edge sort and cursor tests.
+#[derive(Debug, OusiaEdge)]
+#[ousia(type_name = "Ranked", index = "position:search+sort")]
+pub struct Ranked {
+    _meta: EdgeMeta,
+    pub position: i64,
+}
+
 /// Test object with a single geo index. The virtual field name `"location"`
 /// does NOT exist as a struct field — only the referenced `lat` / `lon` do.
 #[derive(OusiaObject, OusiaDefault, Debug)]

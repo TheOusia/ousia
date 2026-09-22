@@ -242,6 +242,7 @@ impl Adapter for PostgresAdapter {
     ) -> Result<Vec<ObjectRecord>, Error> {
         // ── Plan params (WHERE side) ────────────────────────────────────────
         let mut param_idx = 3;
+        let cursor_p = param_idx;
         let (mut where_clause, geo_plan) = Self::build_object_query_conditions_with_geo(
             &plan.filters,
             plan.cursor,
@@ -257,6 +258,15 @@ impl Adapter for PostgresAdapter {
             &plan.geo_filters,
             &geo_plan,
         );
+        if plan.cursor.is_some() {
+            let geo = plan
+                .geo_order
+                .as_ref()
+                .zip(geo_plan.order_alias.as_deref())
+                .map(|(go, alias)| (alias, go, order_lon_p, order_lat_p));
+            where_clause.push_str(" AND ");
+            where_clause.push_str(&Self::build_object_cursor_condition(&plan.filters, geo, cursor_p));
+        }
 
         let scalar_order = Self::build_order_clause(&plan.filters, false);
         if plan.owner.is_nil() {
@@ -332,6 +342,7 @@ impl Adapter for PostgresAdapter {
         }
 
         let mut param_idx = 3;
+        let cursor_p = param_idx;
         let (mut where_clause, geo_plan) = Self::build_object_query_conditions_with_geo(
             &plan.filters,
             plan.cursor,
@@ -351,6 +362,15 @@ impl Adapter for PostgresAdapter {
             .order_alias
             .as_deref()
             .expect("geo_order set → order_alias planned");
+        if plan.cursor.is_some() {
+            let go = plan.geo_order.as_ref().expect("checked above");
+            where_clause.push_str(" AND ");
+            where_clause.push_str(&Self::build_object_cursor_condition(
+                &plan.filters,
+                Some((order_alias, go, lon_p, lat_p)),
+                cursor_p,
+            ));
+        }
 
         let geo_term = Self::build_geo_order_suffix(plan.geo_order.as_ref(), &geo_plan, lon_p, lat_p)
             .expect("geo_order set");
