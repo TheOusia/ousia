@@ -113,7 +113,8 @@ impl PostgresAdapter {
             &plan.filters,
             plan.cursor,
         );
-        let order_clause = Self::build_edge_order_clause(&plan.filters);
+        let order_clause =
+            Self::build_traversal_order_clause(direction.clone(), obj_filters, &plan.filters);
         let join_col = match direction {
             TraversalDirection::Forward => "to",
             TraversalDirection::Reverse => "from",
@@ -188,6 +189,28 @@ impl PostgresAdapter {
         }
     }
 
+    /// `created_at` / `updated_at` compared with a timestamp use the real
+    /// column: it has btree indexes, it's the value `transfer_object` updates
+    /// (the `index_meta` copy isn't touched), and edges don't copy it into
+    /// `index_meta` at all. Returns the SQL operator when that applies.
+    fn native_timestamp_op(filter: &QueryFilter) -> Option<&'static str> {
+        use crate::query::Comparison::*;
+        if !matches!(filter.field.name, "created_at" | "updated_at")
+            || !matches!(filter.value, IndexValue::Timestamp(_))
+        {
+            return None;
+        }
+        match filter.mode.as_search()?.comparison {
+            Equal => Some("="),
+            NotEqual => Some("<>"),
+            GreaterThan => Some(">"),
+            LessThan => Some("<"),
+            GreaterThanOrEqual => Some(">="),
+            LessThanOrEqual => Some("<="),
+            _ => None,
+        }
+    }
+
     pub(super) fn build_filter_condition(
         alias: &str,
         filter: &QueryFilter,
@@ -201,6 +224,12 @@ impl PostgresAdapter {
             crate::query::Operator::And => "AND",
             _ => "OR",
         };
+
+        if let Some(op) = Self::native_timestamp_op(filter) {
+            let cond = format!("{}.{} {} ${}", alias, filter.field.name, op, param_idx);
+            *param_idx += 1;
+            return Some((cond, operator));
+        }
 
         use crate::query::Comparison::*;
 
@@ -719,6 +748,64 @@ impl PostgresAdapter {
         Self::build_order_clause_aliased(filters, "", is_edge)
     }
 
+    /// Keys an edge→object traversal is ordered by: target-object sorts, then
+    /// the edge sort (default `created_at` newest first), then the target id.
+    /// `cursor_p` is the cursor's `$N` (a target id) used by the lookups in
+    /// `at_cursor`; params `$1` = object type, `$2` = edge type, `$3` = pivot.
+    fn traversal_keys(
+        direction: TraversalDirection,
+        obj_filters: &[QueryFilter],
+        edge_filters: &[QueryFilter],
+        cursor_p: usize,
+    ) -> Vec<KeysetKey> {
+        let (join_col, join_bare, anchor_bare) = match direction {
+            TraversalDirection::Forward => (r#"e."to""#, r#""to""#, r#""from""#),
+            TraversalDirection::Reverse => (r#"e."from""#, r#""from""#, r#""to""#),
+        };
+        let native = |bare: &str| matches!(bare, "created_at" | "updated_at");
+        let mut keys: Vec<KeysetKey> = Self::sort_keys(obj_filters, "o.")
+            .into_iter()
+            .zip(Self::sort_keys(obj_filters, ""))
+            .map(|((outer, ascending), (bare, _))| KeysetKey {
+                outer,
+                at_cursor: format!(
+                    "(SELECT {bare} FROM objects WHERE type = $1 AND id = ${cursor_p})"
+                ),
+                ascending,
+                nullable: !native(&bare),
+            })
+            .collect();
+        let (outer, bare, ascending) = Self::resolve_edge_sort(edge_filters);
+        keys.push(KeysetKey {
+            outer,
+            at_cursor: format!(
+                "(SELECT {bare} FROM edges WHERE type = $2 AND {anchor_bare} = $3 AND {join_bare} = ${cursor_p})"
+            ),
+            ascending,
+            nullable: !native(&bare),
+        });
+        keys.push(KeysetKey {
+            outer: join_col.to_string(),
+            at_cursor: format!("${cursor_p}"),
+            ascending,
+            nullable: false,
+        });
+        keys
+    }
+
+    /// ORDER BY for edge→object traversals; see `traversal_keys`.
+    pub(super) fn build_traversal_order_clause(
+        direction: TraversalDirection,
+        obj_filters: &[QueryFilter],
+        edge_filters: &[QueryFilter],
+    ) -> String {
+        let terms: Vec<String> = Self::traversal_keys(direction, obj_filters, edge_filters, 0)
+            .into_iter()
+            .map(|k| format!("{} {}", k.outer, if k.ascending { "ASC" } else { "DESC" }))
+            .collect();
+        format!("ORDER BY {}", terms.join(", "))
+    }
+
     pub(super) fn build_edge_order_clause(filters: &[QueryFilter]) -> String {
         let (outer, _, ascending) = Self::resolve_edge_sort(filters);
         format!("ORDER BY {outer} {}", if ascending { "ASC" } else { "DESC" })
@@ -849,7 +936,10 @@ impl PostgresAdapter {
         let mut obj_conditions: Vec<(String, &str)> = vec![("o.type = $1".to_string(), "AND")];
 
         if cursor.is_some() {
-            obj_conditions.push((format!("o.id < ${}", param_idx), "AND"));
+            // The cursor is the last target id; page over the same keys the
+            // ORDER BY uses (`build_traversal_order_clause`).
+            let keys = Self::traversal_keys(direction.clone(), obj_filters, edge_filters, param_idx);
+            obj_conditions.push((keyset_condition(&keys), "AND"));
             param_idx += 1;
         }
 
@@ -889,6 +979,10 @@ impl PostgresAdapter {
     ) -> PgQuery<'a, Postgres, PgArguments> {
         use crate::query::Comparison::*;
         for filter in filters.iter().filter(|f| f.mode.as_search().is_some()) {
+            if let (Some(_), IndexValue::Timestamp(t)) = (Self::native_timestamp_op(filter), &filter.value) {
+                query = query.bind(*t);
+                continue;
+            }
             let search = filter.mode.as_search().unwrap();
             match (&search.comparison, &filter.value) {
                 // GIN @> binds: {"field": value}
@@ -959,6 +1053,10 @@ impl PostgresAdapter {
     ) -> QueryScalar<'a, Postgres, O, PgArguments> {
         use crate::query::Comparison::*;
         for filter in filters.iter().filter(|f| f.mode.as_search().is_some()) {
+            if let (Some(_), IndexValue::Timestamp(t)) = (Self::native_timestamp_op(filter), &filter.value) {
+                query = query.bind(*t);
+                continue;
+            }
             let search = filter.mode.as_search().unwrap();
             match (&search.comparison, &filter.value) {
                 // GIN @> binds: {"field": value}
@@ -1039,7 +1137,8 @@ impl PostgresAdapter {
             &plan.filters,
             plan.cursor,
         );
-        let order_clause = Self::build_edge_order_clause(&plan.filters);
+        let order_clause =
+            Self::build_traversal_order_clause(direction.clone(), filters, &plan.filters);
 
         let mut sql = format!(
             r#"
@@ -1308,4 +1407,31 @@ fn keyset_condition(keys: &[KeysetKey]) -> String {
         })
         .collect();
     format!("({})", branches.join(" OR "))
+}
+
+#[cfg(test)]
+mod timestamp_filter_tests {
+    use super::PostgresAdapter;
+    use crate::query::{IndexField, IndexKind};
+    use crate::Query;
+
+    static CREATED_AT: IndexField = IndexField {
+        name: "created_at",
+        kinds: &[IndexKind::Search, IndexKind::Sort],
+    };
+
+    #[test]
+    fn range_filters_on_meta_timestamps_use_the_indexed_column() {
+        let q = Query::default()
+            .where_gt(&CREATED_AT, chrono::Utc::now())
+            .where_lte(&CREATED_AT, chrono::Utc::now());
+        let mut idx = 3;
+        let conds: Vec<String> = q
+            .filters
+            .iter()
+            .filter_map(|f| PostgresAdapter::build_filter_condition("o", f, &mut idx))
+            .map(|(c, _)| c)
+            .collect();
+        assert_eq!(conds, ["o.created_at > $3", "o.created_at <= $4"]);
+    }
 }

@@ -444,3 +444,51 @@ async fn test_count_objects_wide_query_spans_all_owners() {
         .unwrap();
     assert_eq!(rows.len(), 6);
 }
+
+#[tokio::test]
+async fn test_timestamp_filters_read_the_real_columns() {
+    let (_r, pool) = setup_test_db().await;
+    let adapter = PostgresAdapter::from_pool(pool);
+    adapter.init_schema().await.unwrap();
+    let engine = Engine::new(Box::new(adapter));
+
+    let owner = uuid::Uuid::now_v7();
+    let mut ids = Vec::new();
+    let mut marks = Vec::new();
+    for title in ["p0", "p1", "p2"] {
+        marks.push(chrono::Utc::now());
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        let mut post = Post::default();
+        post.set_owner(owner);
+        post.title = title.into();
+        engine.create_object(&post).await.unwrap();
+        ids.push(post.id());
+    }
+    let titles = |rows: Vec<Post>| {
+        let mut t: Vec<String> = rows.into_iter().map(|p| p.title).collect();
+        t.sort();
+        t
+    };
+
+    let q = Query::new(owner).where_gt(&Post::FIELDS.created_at, marks[1]);
+    assert_eq!(titles(engine.query_objects(q).await.unwrap()), ["p1", "p2"]);
+    let q = Query::new(owner).where_lt(&Post::FIELDS.created_at, marks[1]);
+    assert_eq!(titles(engine.query_objects(q).await.unwrap()), ["p0"]);
+
+    // equality against the timestamp as stored (microsecond precision)
+    let stored: Post = engine.fetch_object(ids[2]).await.unwrap().unwrap();
+    let q = Query::new(owner).where_eq(&Post::FIELDS.created_at, stored.created_at());
+    assert_eq!(titles(engine.query_objects(q).await.unwrap()), ["p2"]);
+
+    // transfer_object bumps the updated_at column, not the index_meta copy
+    let before = chrono::Utc::now();
+    let other = uuid::Uuid::now_v7();
+    engine.transfer_object::<Post>(ids[0], owner, other).await.unwrap();
+    let q = Query::new(other).where_gt(&Post::FIELDS.updated_at, before);
+    assert_eq!(titles(engine.query_objects(q).await.unwrap()), ["p0"]);
+    let n = engine
+        .count_objects::<Post>(Some(Query::wide().where_gt(&Post::FIELDS.updated_at, before)))
+        .await
+        .unwrap();
+    assert_eq!(n, 1);
+}

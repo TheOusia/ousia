@@ -60,7 +60,11 @@ impl EdgeTraversal for PostgresAdapter {
             obj_filters,
             &plan.filters,
         );
-        let order_clause = Self::build_edge_order_clause(&plan.filters);
+        let order_clause = Self::build_traversal_order_clause(
+            TraversalDirection::Forward,
+            obj_filters,
+            &plan.filters,
+        );
         let mut sql = format!(
             r#"
             SELECT
@@ -107,7 +111,11 @@ impl EdgeTraversal for PostgresAdapter {
             obj_filters,
             &plan.filters,
         );
-        let order_clause = Self::build_edge_order_clause(&plan.filters);
+        let order_clause = Self::build_traversal_order_clause(
+            TraversalDirection::Reverse,
+            obj_filters,
+            &plan.filters,
+        );
         let mut sql = format!(
             r#"
             SELECT

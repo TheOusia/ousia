@@ -224,3 +224,50 @@ async fn test_count_edges_with_plan() {
         .unwrap();
     assert_eq!(notif_count, 3);
 }
+
+#[tokio::test]
+async fn test_edge_timestamp_filters() {
+    let (_r, pool) = setup_test_db().await;
+    let adapter = PostgresAdapter::from_pool(pool);
+    adapter.init_schema().await.unwrap();
+    let engine = Engine::new(Box::new(adapter));
+
+    let mut hub = User::default();
+    hub.username = "hub".into();
+    engine.create_object(&hub).await.unwrap();
+    let mut mark = None;
+    for position in 0..4i64 {
+        if position == 2 {
+            mark = Some(chrono::Utc::now());
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        let mut u = User::default();
+        u.username = format!("u{position}");
+        engine.create_object(&u).await.unwrap();
+        engine
+            .create_edge(&Ranked { _meta: EdgeMeta::new(hub.id(), u.id()), position })
+            .await
+            .unwrap();
+    }
+    let mark = mark.unwrap();
+    let positions = |edges: Vec<Ranked>| {
+        let mut p: Vec<i64> = edges.into_iter().map(|e| e.position).collect();
+        p.sort();
+        p
+    };
+
+    let edges: Vec<Ranked> = engine
+        .query_edges(hub.id(), EdgeQuery::default().where_gt(&Ranked::FIELDS.created_at, mark))
+        .await
+        .unwrap();
+    assert_eq!(positions(edges), [2, 3]);
+
+    let edges = engine
+        .preload_object::<User>(hub.id())
+        .edge::<Ranked, User>()
+        .edge_lt(&Ranked::FIELDS.created_at, mark)
+        .collect_edges()
+        .await
+        .unwrap();
+    assert_eq!(positions(edges), [0, 1]);
+}
