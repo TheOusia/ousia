@@ -943,10 +943,8 @@ pub fn generate_object_impl(input: &DeriveInput) -> Result<TokenStream> {
             }
 
             fn index_meta(&self) -> #ousia::query::IndexMeta {
+                // created_at / updated_at are real columns; queries never read them here.
                 let mut values = std::collections::BTreeMap::new();
-                values.insert("created_at".to_string(), #ousia::query::ToIndexValue::to_index_value(&self.#meta_field_ident.created_at));
-                values.insert("updated_at".to_string(), #ousia::query::ToIndexValue::to_index_value(&self.#meta_field_ident.updated_at));
-
                 #(#index_meta_insertions)*
                 #ousia::query::IndexMeta(values)
             }
