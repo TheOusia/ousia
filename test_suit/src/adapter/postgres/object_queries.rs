@@ -491,7 +491,7 @@ async fn test_timestamp_filters_read_the_real_columns() {
     let q = Query::new(owner).where_eq(&Post::FIELDS.created_at, stored.created_at());
     assert_eq!(titles(engine.query_objects(q).await.unwrap()), ["p2"]);
 
-    // transfer_object bumps the updated_at column, not the index_meta copy
+    // transfer_object bumps the updated_at column
     let before = chrono::Utc::now();
     let other = uuid::Uuid::now_v7();
     engine.transfer_object::<Post>(ids[0], owner, other).await.unwrap();
@@ -502,4 +502,38 @@ async fn test_timestamp_filters_read_the_real_columns() {
         .await
         .unwrap();
     assert_eq!(n, 1);
+}
+
+#[tokio::test]
+async fn test_meta_timestamps_are_not_copied_into_index_meta() {
+    let (_r, pool) = setup_test_db().await;
+    let adapter = PostgresAdapter::from_pool(pool.clone());
+    adapter.init_schema().await.unwrap();
+    let engine = Engine::new(Box::new(adapter));
+
+    let mut post = Post::default();
+    post.title = "t".into();
+    engine.create_object(&post).await.unwrap();
+    post.title = "t2".into();
+    engine.update_object(&mut post).await.unwrap();
+
+    let keys: Vec<String> =
+        sqlx::query_scalar("SELECT jsonb_object_keys(index_meta) FROM objects WHERE id = $1")
+            .bind(post.id())
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert!(keys.contains(&"title".to_string()), "{keys:?}");
+    assert!(!keys.iter().any(|k| k == "created_at" || k == "updated_at"), "{keys:?}");
+
+    // filtering and sorting on them still works, from the columns
+    let rows: Vec<Post> = engine
+        .query_objects(
+            Query::default()
+                .where_lte(&Post::FIELDS.created_at, chrono::Utc::now())
+                .sort_desc(&Post::FIELDS.updated_at),
+        )
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
 }
