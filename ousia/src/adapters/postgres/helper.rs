@@ -189,25 +189,58 @@ impl PostgresAdapter {
         }
     }
 
-    /// `created_at` / `updated_at` compared with a timestamp use the real
-    /// column: it has btree indexes, it's the value `transfer_object` updates
-    /// (the `index_meta` copy isn't touched), and edges don't copy it into
-    /// `index_meta` at all. Returns the SQL operator when that applies.
-    fn native_timestamp_op(filter: &QueryFilter) -> Option<&'static str> {
+    /// `created_at` / `updated_at` always use the real column: it has btree
+    /// indexes, it's what `transfer_object` updates (the `index_meta` copy
+    /// isn't), and edges don't copy it into `index_meta` at all.
+    fn is_native_timestamp(filter: &QueryFilter) -> bool {
+        matches!(filter.field.name, "created_at" | "updated_at") && filter.mode.as_search().is_some()
+    }
+
+    /// Condition for a `created_at` / `updated_at` filter; always one `$idx`.
+    /// Non-timestamp values are cast `::timestamptz`, so a bad value errors
+    /// instead of silently matching nothing. Pattern comparisons match the
+    /// column's text form (e.g. `begins_with("2026-09")`).
+    fn native_timestamp_condition(alias: &str, filter: &QueryFilter, idx: usize) -> String {
         use crate::query::Comparison::*;
-        if !matches!(filter.field.name, "created_at" | "updated_at")
-            || !matches!(filter.value, IndexValue::Timestamp(_))
-        {
-            return None;
+        let col = format!("{alias}.{}", filter.field.name);
+        let value = match filter.value {
+            IndexValue::Timestamp(_) => format!("${idx}"),
+            _ => format!("${idx}::timestamptz"),
+        };
+        match filter.mode.as_search().expect("search filter").comparison {
+            Equal => format!("{col} = {value}"),
+            NotEqual => format!("{col} <> {value}"),
+            GreaterThan => format!("{col} > {value}"),
+            LessThan => format!("{col} < {value}"),
+            GreaterThanOrEqual => format!("{col} >= {value}"),
+            LessThanOrEqual => format!("{col} <= {value}"),
+            BeginsWith | Contains | ContainsAll => format!("{col}::text ILIKE ${idx}"),
+            NotContains => format!("{col}::text NOT ILIKE ${idx}"),
         }
-        match filter.mode.as_search()?.comparison {
-            Equal => Some("="),
-            NotEqual => Some("<>"),
-            GreaterThan => Some(">"),
-            LessThan => Some("<"),
-            GreaterThanOrEqual => Some(">="),
-            LessThanOrEqual => Some("<="),
-            _ => None,
+    }
+
+    fn native_timestamp_bind(filter: &QueryFilter) -> NativeTimestampBind {
+        use crate::query::Comparison::*;
+        let text = || Self::index_value_text(&filter.value);
+        match filter.mode.as_search().expect("search filter").comparison {
+            BeginsWith => NativeTimestampBind::Text(format!("{}%", text())),
+            Contains | NotContains | ContainsAll => NativeTimestampBind::Text(format!("%{}%", text())),
+            _ => match &filter.value {
+                IndexValue::Timestamp(t) => NativeTimestampBind::Timestamp(*t),
+                _ => NativeTimestampBind::Text(text()),
+            },
+        }
+    }
+
+    fn index_value_text(value: &IndexValue) -> String {
+        match value {
+            IndexValue::String(s) => s.clone(),
+            IndexValue::Int(i) => i.to_string(),
+            IndexValue::Float(f) => f.to_string(),
+            IndexValue::Bool(b) => b.to_string(),
+            IndexValue::Uuid(u) => u.to_string(),
+            IndexValue::Timestamp(t) => t.to_rfc3339(),
+            IndexValue::Array(a) => format!("{a:?}"),
         }
     }
 
@@ -225,8 +258,8 @@ impl PostgresAdapter {
             _ => "OR",
         };
 
-        if let Some(op) = Self::native_timestamp_op(filter) {
-            let cond = format!("{}.{} {} ${}", alias, filter.field.name, op, param_idx);
+        if Self::is_native_timestamp(filter) {
+            let cond = Self::native_timestamp_condition(alias, filter, *param_idx);
             *param_idx += 1;
             return Some((cond, operator));
         }
@@ -979,8 +1012,12 @@ impl PostgresAdapter {
     ) -> PgQuery<'a, Postgres, PgArguments> {
         use crate::query::Comparison::*;
         for filter in filters.iter().filter(|f| f.mode.as_search().is_some()) {
-            if let (Some(_), IndexValue::Timestamp(t)) = (Self::native_timestamp_op(filter), &filter.value) {
-                query = query.bind(*t);
+            if Self::is_native_timestamp(filter) {
+                query = match Self::native_timestamp_bind(filter) {
+                    NativeTimestampBind::Timestamp(t) => query.bind(t),
+                    NativeTimestampBind::Text(s) => query.bind(s),
+                    NativeTimestampBind::TextArray(v) => query.bind(v),
+                };
                 continue;
             }
             let search = filter.mode.as_search().unwrap();
@@ -1053,8 +1090,12 @@ impl PostgresAdapter {
     ) -> QueryScalar<'a, Postgres, O, PgArguments> {
         use crate::query::Comparison::*;
         for filter in filters.iter().filter(|f| f.mode.as_search().is_some()) {
-            if let (Some(_), IndexValue::Timestamp(t)) = (Self::native_timestamp_op(filter), &filter.value) {
-                query = query.bind(*t);
+            if Self::is_native_timestamp(filter) {
+                query = match Self::native_timestamp_bind(filter) {
+                    NativeTimestampBind::Timestamp(t) => query.bind(t),
+                    NativeTimestampBind::Text(s) => query.bind(s),
+                    NativeTimestampBind::TextArray(v) => query.bind(v),
+                };
                 continue;
             }
             let search = filter.mode.as_search().unwrap();
@@ -1434,4 +1475,39 @@ mod timestamp_filter_tests {
             .collect();
         assert_eq!(conds, ["o.created_at > $3", "o.created_at <= $4"]);
     }
+
+    #[test]
+    fn every_filter_on_meta_timestamps_reads_the_column() {
+        let q = Query::default()
+            .where_eq(&CREATED_AT, "2026-01-01T00:00:00Z")
+            .where_ne(&CREATED_AT, chrono::Utc::now())
+            .where_begins_with(&CREATED_AT, "2026-09")
+            .where_contains(&CREATED_AT, "09-22")
+            .where_not_contains(&CREATED_AT, "12:00");
+        let mut idx = 3;
+        let conds: Vec<String> = q
+            .filters
+            .iter()
+            .filter_map(|f| PostgresAdapter::build_filter_condition("o", f, &mut idx))
+            .map(|(c, _)| c)
+            .collect();
+        assert_eq!(
+            conds,
+            [
+                "o.created_at = $3::timestamptz",
+                "o.created_at <> $4",
+                "o.created_at::text ILIKE $5",
+                "o.created_at::text ILIKE $6",
+                "o.created_at::text NOT ILIKE $7",
+            ]
+        );
+        assert_eq!(idx, 8, "exactly one parameter per filter");
+    }
+}
+
+enum NativeTimestampBind {
+    Timestamp(chrono::DateTime<chrono::Utc>),
+    Text(String),
+    #[allow(dead_code)]
+    TextArray(Vec<String>),
 }
