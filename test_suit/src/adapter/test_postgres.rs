@@ -636,6 +636,33 @@ async fn test_count_objects() {
 }
 
 #[tokio::test]
+async fn test_count_objects_wide_query_spans_all_owners() {
+    let (_r, pool) = setup_test_db().await;
+    let adapter = PostgresAdapter::from_pool(pool);
+    adapter.init_schema().await.unwrap();
+    let engine = Engine::new(Box::new(adapter));
+
+    for owner in [uuid::Uuid::now_v7(), uuid::Uuid::now_v7(), system_owner()] {
+        for title in ["wide", "wide", "other"] {
+            let mut post = Post::default();
+            post.set_owner(owner);
+            post.title = title.into();
+            engine.create_object(&post).await.unwrap();
+        }
+    }
+
+    assert_eq!(engine.count_objects::<Post>(Some(Query::wide())).await.unwrap(), 9);
+    let wide_titled = Query::wide().where_eq(&Post::FIELDS.title, "wide");
+    assert_eq!(engine.count_objects::<Post>(Some(wide_titled)).await.unwrap(), 6);
+    // counts match what query_objects returns for the same query
+    let rows: Vec<Post> = engine
+        .query_objects(Query::wide().where_eq(&Post::FIELDS.title, "wide"))
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 6);
+}
+
+#[tokio::test]
 async fn test_query_all_index_value_variants() {
     let (_r, pool) = setup_test_db().await;
     let adapter = PostgresAdapter::from_pool(pool);

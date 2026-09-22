@@ -418,13 +418,16 @@ impl Adapter for PostgresAdapter {
         match plan {
             Some(plan) => {
                 let mut param_idx = 3;
-                let (where_clause, geo_plan) = Self::build_object_query_conditions_with_geo(
+                let (mut where_clause, geo_plan) = Self::build_object_query_conditions_with_geo(
                     &plan.filters,
                     None,
                     &plan.geo_filters,
                     plan.geo_order.as_ref(),
                     &mut param_idx,
                 );
+                if plan.owner.is_nil() {
+                    where_clause = where_clause.replace("owner = ", "owner > ");
+                }
 
                 let mut sql = format!(
                     r#"
