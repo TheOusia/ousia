@@ -5,3 +5,4 @@ resolver = "2"
 [patch.crates-io]
 ousia = { path = "ousia" }
 ousia_derive = { path = "ousia_derive" }
+ousia-ledger = { path = "ledger" }
