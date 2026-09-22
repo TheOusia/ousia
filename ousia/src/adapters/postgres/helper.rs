@@ -289,6 +289,28 @@ impl PostgresAdapter {
         }
     }
 
+    /// `created_at` / `updated_at` compared with a timestamp use the real
+    /// column: it has btree indexes, it's the value `transfer_object` updates
+    /// (the `index_meta` copy isn't touched), and edges don't copy it into
+    /// `index_meta` at all. Returns the SQL operator when that applies.
+    fn native_timestamp_op(filter: &QueryFilter) -> Option<&'static str> {
+        use crate::query::Comparison::*;
+        if !matches!(filter.field.name, "created_at" | "updated_at")
+            || !matches!(filter.value, IndexValue::Timestamp(_))
+        {
+            return None;
+        }
+        match filter.mode.as_search()?.comparison {
+            Equal => Some("="),
+            NotEqual => Some("<>"),
+            GreaterThan => Some(">"),
+            LessThan => Some("<"),
+            GreaterThanOrEqual => Some(">="),
+            LessThanOrEqual => Some("<="),
+            _ => None,
+        }
+    }
+
     pub(super) fn build_filter_condition(
         alias: &str,
         filter: &QueryFilter,
@@ -302,6 +324,12 @@ impl PostgresAdapter {
             crate::query::Operator::And => "AND",
             _ => "OR",
         };
+
+        if let Some(op) = Self::native_timestamp_op(filter) {
+            let cond = format!("{}.{} {} ${}", alias, filter.field.name, op, param_idx);
+            *param_idx += 1;
+            return Some((cond, operator));
+        }
 
         use crate::query::Comparison::*;
 
@@ -1105,6 +1133,10 @@ impl PostgresAdapter {
     ) -> PgQuery<'a, Postgres, PgArguments> {
         use crate::query::Comparison::*;
         for filter in filters.iter().filter(|f| f.mode.as_search().is_some()) {
+            if let (Some(_), IndexValue::Timestamp(t)) = (Self::native_timestamp_op(filter), &filter.value) {
+                query = query.bind(*t);
+                continue;
+            }
             let search = filter.mode.as_search().unwrap();
             match (&search.comparison, &filter.value) {
                 // GIN @> binds: {"field": value}
@@ -1191,6 +1223,10 @@ impl PostgresAdapter {
     ) -> QueryScalar<'a, Postgres, O, PgArguments> {
         use crate::query::Comparison::*;
         for filter in filters.iter().filter(|f| f.mode.as_search().is_some()) {
+            if let (Some(_), IndexValue::Timestamp(t)) = (Self::native_timestamp_op(filter), &filter.value) {
+                query = query.bind(*t);
+                continue;
+            }
             let search = filter.mode.as_search().unwrap();
             match (&search.comparison, &filter.value) {
                 // GIN @> binds: {"field": value}
@@ -1652,4 +1688,32 @@ fn keyset_condition(keys: &[KeysetKey]) -> String {
         })
         .collect();
     format!("({})", branches.join(" OR "))
+}
+
+#[cfg(test)]
+mod timestamp_filter_tests {
+    use super::PostgresAdapter;
+    use crate::query::{IndexField, IndexKind, SortAs};
+    use crate::Query;
+
+    static CREATED_AT: IndexField = IndexField {
+        name: "created_at",
+        kinds: &[IndexKind::Search, IndexKind::Sort],
+        sort_as: SortAs::Timestamp,
+    };
+
+    #[test]
+    fn range_filters_on_meta_timestamps_use_the_indexed_column() {
+        let q = Query::default()
+            .where_gt(&CREATED_AT, chrono::Utc::now())
+            .where_lte(&CREATED_AT, chrono::Utc::now());
+        let mut idx = 3;
+        let conds: Vec<String> = q
+            .filters
+            .iter()
+            .filter_map(|f| PostgresAdapter::build_filter_condition("o", f, &mut idx))
+            .map(|(c, _)| c)
+            .collect();
+        assert_eq!(conds, ["o.created_at > $3", "o.created_at <= $4"]);
+    }
 }

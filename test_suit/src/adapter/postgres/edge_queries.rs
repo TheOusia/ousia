@@ -303,3 +303,49 @@ async fn test_count_edges_with_plan() {
         .unwrap();
     assert_eq!(notif_count, 3);
 }
+
+#[tokio::test]
+async fn test_edge_timestamp_filters() {
+    let (_r, pool) = setup_test_db().await;
+    let adapter = PostgresAdapter::from_pool(pool);
+    adapter.init_schema().await.unwrap();
+    let engine = Engine::new(Box::new(adapter));
+
+    let mut hub = Hub::default();
+    hub.name = "hub".into();
+    engine.create_object(&hub).await.unwrap();
+    let mut mark = None;
+    for position in 0..4i64 {
+        if position == 2 {
+            mark = Some(chrono::Utc::now());
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        let spoke = Spoke::default();
+        engine.create_object(&spoke).await.unwrap();
+        engine
+            .create_edge(&HubSpoke { _meta: EdgeMeta::new(hub.id(), spoke.id()), position })
+            .await
+            .unwrap();
+    }
+    let mark = mark.unwrap();
+    let positions = |edges: Vec<HubSpoke>| {
+        let mut p: Vec<i64> = edges.into_iter().map(|e| e.position).collect();
+        p.sort();
+        p
+    };
+
+    let edges: Vec<HubSpoke> = engine
+        .query_edges(hub.id(), EdgeQuery::default().where_gt(&HubSpoke::FIELDS.created_at, mark))
+        .await
+        .unwrap();
+    assert_eq!(positions(edges), [2, 3]);
+
+    let edges = engine
+        .preload_object::<Hub>(hub.id())
+        .edge::<HubSpoke, Spoke>()
+        .edge_lt(&HubSpoke::FIELDS.created_at, mark)
+        .collect_edges()
+        .await
+        .unwrap();
+    assert_eq!(positions(edges), [0, 1]);
+}
