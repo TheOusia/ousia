@@ -466,3 +466,156 @@ async fn test_edge_traversal_with_limit_and_cursor() {
         .unwrap();
     assert_eq!(limited.len(), 3);
 }
+
+// ── Traversal ordering & cursor paging ──────────────────────────────────────
+
+/// Hub → 7 spokes with duplicate names and positions, and 7 hubs → one spoke
+/// for the reverse direction.
+async fn traversal_fixture(engine: &Engine) -> (Hub, Spoke) {
+    let mut hub = Hub::default();
+    hub.name = "hub".into();
+    engine.create_object(&hub).await.unwrap();
+    let mut target = Spoke::default();
+    target.name = "target".into();
+    engine.create_object(&target).await.unwrap();
+    for (name, position) in [("c", 3i64), ("a", 1), ("b", 2), ("a", 2), ("c", 1), ("b", 3), ("a", 1)] {
+        let mut spoke = Spoke::default();
+        spoke.name = name.into();
+        engine.create_object(&spoke).await.unwrap();
+        engine
+            .create_edge(&HubSpoke { _meta: EdgeMeta::new(hub.id(), spoke.id()), position })
+            .await
+            .unwrap();
+        let mut source = Hub::default();
+        source.name = name.into();
+        engine.create_object(&source).await.unwrap();
+        engine
+            .create_edge(&HubSpoke { _meta: EdgeMeta::new(source.id(), target.id()), position })
+            .await
+            .unwrap();
+    }
+    (hub, target)
+}
+
+/// Pages of `page` via `run(cursor, limit)`, cursor = last id, until exhausted.
+async fn walk<F, Fut>(run: F, page: u32) -> Vec<uuid::Uuid>
+where
+    F: Fn(Option<uuid::Uuid>, Option<u32>) -> Fut,
+    Fut: std::future::Future<Output = Vec<uuid::Uuid>>,
+{
+    let mut out = Vec::new();
+    let mut cursor = None;
+    loop {
+        let ids = run(cursor, Some(page)).await;
+        out.extend(&ids);
+        if ids.len() < page as usize {
+            return out;
+        }
+        cursor = ids.last().copied();
+    }
+}
+
+#[tokio::test]
+async fn test_traversal_sorts_by_target_fields() {
+    let (_r, pool) = setup_test_db().await;
+    let adapter = PostgresAdapter::from_pool(pool);
+    adapter.init_schema().await.unwrap();
+    let engine = Engine::new(Box::new(adapter));
+    let (hub, target) = traversal_fixture(&engine).await;
+
+    let names: Vec<String> = engine
+        .preload_object::<Hub>(hub.id())
+        .edge::<HubSpoke, Spoke>()
+        .sort_asc(&Spoke::FIELDS.name)
+        .collect()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|s| s.name)
+        .collect();
+    assert_eq!(names, ["a", "a", "a", "b", "b", "c", "c"]);
+
+    let names: Vec<String> = engine
+        .preload_object::<Spoke>(target.id())
+        .edge::<HubSpoke, Hub>()
+        .sort_desc(&Hub::FIELDS.name)
+        .collect_reverse_with_target()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|oe| oe.object().name.clone())
+        .collect();
+    assert_eq!(names, ["c", "c", "b", "b", "a", "a", "a"]);
+}
+
+#[tokio::test]
+async fn test_traversal_cursor_pages_follow_the_order() {
+    let (_r, pool) = setup_test_db().await;
+    let adapter = PostgresAdapter::from_pool(pool);
+    adapter.init_schema().await.unwrap();
+    let engine = Engine::new(Box::new(adapter));
+    let (hub, target) = traversal_fixture(&engine).await;
+    let (hub_id, target_id) = (hub.id(), target.id());
+
+    #[derive(Clone, Copy, Debug)]
+    enum Order {
+        Default,
+        EdgeAsc,
+        TargetAscEdgeDesc,
+    }
+    for order in [Order::Default, Order::EdgeAsc, Order::TargetAscEdgeDesc] {
+        let forward = |cursor: Option<uuid::Uuid>, limit: Option<u32>| {
+            let engine = engine.clone();
+            async move {
+                let mut q = engine.preload_object::<Hub>(hub_id).edge::<HubSpoke, Spoke>();
+                q = match order {
+                    Order::Default => q,
+                    Order::EdgeAsc => q.edge_sort_asc(&HubSpoke::FIELDS.position),
+                    Order::TargetAscEdgeDesc => q
+                        .sort_asc(&Spoke::FIELDS.name)
+                        .edge_sort_desc(&HubSpoke::FIELDS.position),
+                };
+                if let Some(c) = cursor {
+                    q = q.with_cursor(c);
+                }
+                if let Some(l) = limit {
+                    q = q.with_limit(l);
+                }
+                q.collect().await.unwrap().iter().map(|s| s.id()).collect::<Vec<_>>()
+            }
+        };
+        let reverse = |cursor: Option<uuid::Uuid>, limit: Option<u32>| {
+            let engine = engine.clone();
+            async move {
+                let mut q = engine.preload_object::<Spoke>(target_id).edge::<HubSpoke, Hub>();
+                q = match order {
+                    Order::Default => q,
+                    Order::EdgeAsc => q.edge_sort_asc(&HubSpoke::FIELDS.position),
+                    Order::TargetAscEdgeDesc => q
+                        .sort_asc(&Hub::FIELDS.name)
+                        .edge_sort_desc(&HubSpoke::FIELDS.position),
+                };
+                if let Some(c) = cursor {
+                    q = q.with_cursor(c);
+                }
+                if let Some(l) = limit {
+                    q = q.with_limit(l);
+                }
+                q.collect_reverse_with_target()
+                    .await
+                    .unwrap()
+                    .iter()
+                    .map(|oe| oe.object().id())
+                    .collect::<Vec<_>>()
+            }
+        };
+
+        let full_fwd = forward(None, None).await;
+        let full_rev = reverse(None, None).await;
+        assert_eq!((full_fwd.len(), full_rev.len()), (7, 7), "{order:?}");
+        for page in [1, 2, 3] {
+            assert_eq!(walk(&forward, page).await, full_fwd, "forward {order:?}, page {page}");
+            assert_eq!(walk(&reverse, page).await, full_rev, "reverse {order:?}, page {page}");
+        }
+    }
+}

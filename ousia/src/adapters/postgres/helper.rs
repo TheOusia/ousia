@@ -211,7 +211,8 @@ impl PostgresAdapter {
             &plan.filters,
             plan.cursor,
         );
-        let order_clause = Self::build_edge_order_clause(&plan.filters);
+        let order_clause =
+            Self::build_traversal_order_clause(direction.clone(), obj_filters, &plan.filters);
         let join_col = match direction {
             TraversalDirection::Forward => "to",
             TraversalDirection::Reverse => "from",
@@ -869,6 +870,68 @@ impl PostgresAdapter {
         Self::build_order_clause_aliased(filters, "", is_edge)
     }
 
+    /// Keys an edge→object traversal is ordered by: target-object sorts, then
+    /// the edge sort (default `created_at` newest first), then the target id.
+    /// `cursor_p` is the cursor's `$N` (a target id) used by the lookups in
+    /// `at_cursor`; params `$1` = object type, `$2` = edge type, `$3` = pivot.
+    fn traversal_keys(
+        direction: TraversalDirection,
+        obj_filters: &[QueryFilter],
+        edge_filters: &[QueryFilter],
+        cursor_p: usize,
+    ) -> Vec<KeysetKey> {
+        let (join_col, join_bare, anchor_bare) = match direction {
+            TraversalDirection::Forward => (r#"e."to""#, r#""to""#, r#""from""#),
+            TraversalDirection::Reverse => (r#"e."from""#, r#""from""#, r#""to""#),
+        };
+        let native = |bare: &str| matches!(bare, "created_at" | "updated_at");
+        let mut keys: Vec<KeysetKey> = Self::sort_keys(obj_filters, "o.")
+            .into_iter()
+            .zip(Self::sort_keys(obj_filters, ""))
+            .map(|((outer, ascending), (bare, _))| KeysetKey {
+                outer,
+                at_cursor: format!(
+                    "(SELECT {bare} FROM objects WHERE type = $1 AND id = ${cursor_p})"
+                ),
+                ascending,
+                nullable: !native(&bare),
+            })
+            .collect();
+        let (outer, bare, ascending) = Self::resolve_edge_sort(edge_filters);
+        keys.push(KeysetKey {
+            outer,
+            at_cursor: format!(
+                "(SELECT {bare} FROM object_edges WHERE type = $2 AND {anchor_bare} = $3 AND {join_bare} = ${cursor_p})"
+            ),
+            ascending,
+            nullable: !native(&bare),
+        });
+        keys.push(KeysetKey {
+            outer: join_col.to_string(),
+            at_cursor: format!("${cursor_p}"),
+            ascending,
+            nullable: false,
+        });
+        keys
+    }
+
+    /// ORDER BY for edge→object traversals; see `traversal_keys`.
+    pub(super) fn build_traversal_order_clause(
+        direction: TraversalDirection,
+        obj_filters: &[QueryFilter],
+        edge_filters: &[QueryFilter],
+    ) -> String {
+        let random = obj_filters.iter().chain(edge_filters).any(|f| f.mode.is_random_sort());
+        if random {
+            return "ORDER BY RANDOM()".to_string();
+        }
+        let terms: Vec<String> = Self::traversal_keys(direction, obj_filters, edge_filters, 0)
+            .into_iter()
+            .map(|k| format!("{} {}", k.outer, if k.ascending { "ASC" } else { "DESC" }))
+            .collect();
+        format!("ORDER BY {}", terms.join(", "))
+    }
+
     pub(super) fn build_edge_order_clause(filters: &[QueryFilter]) -> String {
         if filters.iter().any(|f| f.mode.is_random_sort()) {
             return "ORDER BY RANDOM()".to_string();
@@ -999,7 +1062,10 @@ impl PostgresAdapter {
         let mut obj_conditions: Vec<(String, &str)> = vec![("o.type = $1".to_string(), "AND")];
 
         if cursor.is_some() {
-            obj_conditions.push((format!("o.id < ${}", param_idx), "AND"));
+            // The cursor is the last target id; page over the same keys the
+            // ORDER BY uses (`build_traversal_order_clause`).
+            let keys = Self::traversal_keys(direction.clone(), obj_filters, edge_filters, param_idx);
+            obj_conditions.push((keyset_condition(&keys), "AND"));
             param_idx += 1;
         }
 
@@ -1222,7 +1288,8 @@ impl PostgresAdapter {
             &plan.filters,
             plan.cursor,
         );
-        let order_clause = Self::build_edge_order_clause(&plan.filters);
+        let order_clause =
+            Self::build_traversal_order_clause(direction.clone(), filters, &plan.filters);
 
         let mut sql = format!(
             r#"
