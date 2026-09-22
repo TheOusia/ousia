@@ -1,4 +1,5 @@
-pub mod test_postgres;
+#[cfg(test)]
+mod postgres;
 
 use ousia::{EdgeMeta, Meta, OusiaDefault, OusiaEdge, OusiaObject, query::ToIndexValue};
 use serde::{Deserialize, Serialize};
