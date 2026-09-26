@@ -335,6 +335,32 @@ async fn test_edge_negated_filters_and_random_sort() {
     assert_eq!(positions(&edges), [3, 4]);
 
     let edges: Vec<HubSpoke> = engine
+        .query_edges(
+            hub.id(),
+            EdgeQuery::default().where_in(&HubSpoke::FIELDS.position, vec![1i64, 2]),
+        )
+        .await
+        .unwrap();
+    assert_eq!(positions(&edges), [1, 2]);
+
+    let edges: Vec<HubSpoke> = engine
+        .query_edges(
+            hub.id(),
+            EdgeQuery::default()
+                .where_eq(&HubSpoke::FIELDS.position, 4i64)
+                .or_in(&HubSpoke::FIELDS.position, vec![1i64]),
+        )
+        .await
+        .unwrap();
+    assert_eq!(positions(&edges), [1, 4]);
+
+    let edges: Vec<HubSpoke> = engine
+        .query_edges(hub.id(), EdgeQuery::default().where_in(&HubSpoke::FIELDS.position, Vec::<i64>::new()))
+        .await
+        .unwrap();
+    assert!(edges.is_empty(), "EdgeQuery::where_in([]) must match nothing");
+
+    let edges: Vec<HubSpoke> = engine
         .query_edges(hub.id(), EdgeQuery::default().sort_random())
         .await
         .unwrap();
@@ -351,6 +377,52 @@ async fn test_edge_negated_filters_and_random_sort() {
         .unwrap();
     assert_eq!(spokes.len(), 1);
     assert_eq!(spokes[0].name, "s-b");
+
+    // EdgeQueryContext: edge-side and target-side In together
+    let spokes: Vec<Spoke> = engine
+        .preload_object::<Hub>(hub.id())
+        .edge::<HubSpoke, Spoke>()
+        .edge_in(&HubSpoke::FIELDS.position, vec![1i64, 3, 4])
+        .where_in(&Spoke::FIELDS.name, vec!["s-a", "t-c"])
+        .collect()
+        .await
+        .unwrap();
+    let mut names: Vec<String> = spokes.into_iter().map(|s| s.name).collect();
+    names.sort();
+    assert_eq!(names, ["s-a", "t-c"]);
+
+    let spokes: Vec<Spoke> = engine
+        .preload_object::<Hub>(hub.id())
+        .edge::<HubSpoke, Spoke>()
+        .edge_eq(&HubSpoke::FIELDS.position, 2i64)
+        .edge_or_in(&HubSpoke::FIELDS.position, vec![4i64])
+        .collect()
+        .await
+        .unwrap();
+    let mut names: Vec<String> = spokes.into_iter().map(|s| s.name).collect();
+    names.sort();
+    assert_eq!(names, ["s-b", "t-d"]);
+
+    let spokes: Vec<Spoke> = engine
+        .preload_object::<Hub>(hub.id())
+        .edge::<HubSpoke, Spoke>()
+        .where_eq(&Spoke::FIELDS.name, "s-a")
+        .or_in(&Spoke::FIELDS.name, vec!["t-d"])
+        .collect()
+        .await
+        .unwrap();
+    let mut names: Vec<String> = spokes.into_iter().map(|s| s.name).collect();
+    names.sort();
+    assert_eq!(names, ["s-a", "t-d"]);
+
+    let spokes: Vec<Spoke> = engine
+        .preload_object::<Hub>(hub.id())
+        .edge::<HubSpoke, Spoke>()
+        .edge_in(&HubSpoke::FIELDS.position, Vec::<i64>::new())
+        .collect()
+        .await
+        .unwrap();
+    assert!(spokes.is_empty(), "edge_in([]) must match nothing");
 
     let edges: Vec<HubSpoke> = engine
         .preload_object::<Hub>(hub.id())

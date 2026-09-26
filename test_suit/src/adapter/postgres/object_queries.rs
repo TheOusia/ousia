@@ -501,6 +501,18 @@ async fn test_timestamp_filters_read_the_real_columns() {
     let q = Query::new(owner)
         .where_not_in(&Post::FIELDS.created_at, vec![stored0.created_at().to_rfc3339()]);
     assert_eq!(titles(engine.query_objects(q).await.unwrap()), ["p1", "p2"]);
+    let stored1: Post = engine.fetch_object(ids[1]).await.unwrap().unwrap();
+    let q = Query::new(owner).where_in(
+        &Post::FIELDS.created_at,
+        vec![stored0.created_at().to_rfc3339(), stored1.created_at().to_rfc3339()],
+    );
+    assert_eq!(titles(engine.query_objects(q).await.unwrap()), ["p0", "p1"]);
+    let q = Query::new(owner)
+        .where_eq(&Post::FIELDS.title, "p2")
+        .or_in(&Post::FIELDS.created_at, vec![stored0.created_at().to_rfc3339()]);
+    assert_eq!(titles(engine.query_objects(q).await.unwrap()), ["p0", "p2"]);
+    let q = Query::new(owner).where_in(&Post::FIELDS.created_at, Vec::<String>::new());
+    assert!(titles(engine.query_objects(q).await.unwrap()).is_empty(), "created_at IN [] matches nothing");
 
     // equality against the timestamp as stored (microsecond precision)
     let stored: Post = engine.fetch_object(ids[2]).await.unwrap().unwrap();

@@ -316,6 +316,7 @@ impl PostgresAdapter {
             LessThanOrEqual => format!("{col} <= {value}"),
             BeginsWith | Contains | ContainsAll => format!("{col}::text ILIKE ${idx}"),
             NotBeginsWith | NotContains | NotContainsAll => format!("{col}::text NOT ILIKE ${idx}"),
+            In => format!("{col} = ANY(${idx}::timestamptz[])"),
             NotIn => format!("NOT ({col} = ANY(${idx}::timestamptz[]))"),
         }
     }
@@ -326,7 +327,7 @@ impl PostgresAdapter {
         match filter.mode.as_search().expect("search filter").comparison {
             BeginsWith | NotBeginsWith => NativeTimestampBind::Text(format!("{}%", text())),
             Contains | NotContains | ContainsAll | NotContainsAll => NativeTimestampBind::Text(format!("%{}%", text())),
-            NotIn => match &filter.value {
+            In | NotIn => match &filter.value {
                 IndexValue::Array(arr) => NativeTimestampBind::TextArray(
                     arr.iter()
                         .map(|e| match e {
@@ -381,9 +382,9 @@ impl PostgresAdapter {
 
         // GIN jsonb_path_ops @> path: hits the index for equality and array containment
         match (&qs.comparison, &filter.value) {
-            // ── Equality: scalar types safe for @> ───────────────────────────────────
+            // ── Equality: scalar types safe for @> (a scalar `In` is one-value equality)
             (
-                Equal,
+                Equal | In,
                 IndexValue::String(_)
                 | IndexValue::Int(_)
                 | IndexValue::Float(_)
@@ -434,22 +435,32 @@ impl PostgresAdapter {
                 return Some((cond, operator));
             }
 
-            // ── NotIn: scalar field is none of the values (missing key never matches)
-            (NotIn, IndexValue::Array(arr)) if !arr.is_empty() => {
+            // ── In / NotIn: scalar field is (none of) the values; a missing key never matches
+            (In | NotIn, IndexValue::Array(arr)) if !arr.is_empty() => {
                 let elem_type = match arr[0] {
                     IndexValueInner::String(_) => "text",
                     IndexValueInner::Int(_) => "bigint",
                     IndexValueInner::Float(_) => "double precision",
                 };
-                let cond = format!(
-                    "NOT (({alias}.index_meta->>'{field}')::{t} = ANY(${idx}::{t}[]))",
+                let in_list = format!(
+                    "({alias}.index_meta->>'{field}')::{t} = ANY(${idx}::{t}[])",
                     alias = alias,
                     field = filter.field.name,
                     t = elem_type,
                     idx = param_idx
                 );
+                let cond = match qs.comparison {
+                    In => in_list,
+                    _ => format!("NOT ({in_list})"),
+                };
                 *param_idx += 1;
                 return Some((cond, operator));
+            }
+
+            // ── In with an empty list: nothing is in the empty set. Dropping the
+            // condition would match every row, so emit FALSE (no bind).
+            (In, IndexValue::Array(_)) => {
+                return Some(("FALSE".to_string(), operator));
             }
 
             // ── Contains / NotContains / ContainsAll on a single string ──────────────
@@ -516,7 +527,7 @@ impl PostgresAdapter {
             Contains => "ILIKE",
             ContainsAll => "ILIKE",
             NotBeginsWith | NotContains | NotContainsAll => "NOT ILIKE",
-            NotIn => unreachable!("NotIn handled above"),
+            In | NotIn => unreachable!("In / NotIn handled above"),
         };
 
         let condition = format!(
@@ -1191,7 +1202,7 @@ impl PostgresAdapter {
             match (&search.comparison, &filter.value) {
                 // GIN @> binds: {"field": value}
                 (
-                    Equal | NotEqual,
+                    Equal | NotEqual | In,
                     IndexValue::String(_)
                     | IndexValue::Int(_)
                     | IndexValue::Float(_)
@@ -1221,7 +1232,7 @@ impl PostgresAdapter {
                         ));
                     }
                 }
-                (NotIn, IndexValue::Array(arr)) if !arr.is_empty() => {
+                (In | NotIn, IndexValue::Array(arr)) if !arr.is_empty() => {
                     query = match arr[0] {
                         IndexValueInner::String(_) => query.bind(
                             arr.iter()
@@ -1235,8 +1246,9 @@ impl PostgresAdapter {
                             .bind(arr.iter().filter_map(|e| e.as_float()).collect::<Vec<f64>>()),
                     };
                 }
-                // NotIn without a list emitted no condition, so nothing to bind
-                (NotIn, _) => {}
+                // NotIn without a list emitted no condition, and In with an empty
+                // list emitted FALSE, so nothing to bind
+                (NotIn, _) | (In, IndexValue::Array(_)) => {}
                 // Extraction-based binds: range ops, ILIKE
                 (_, IndexValue::String(s)) => {
                     query = match search.comparison {
@@ -1285,7 +1297,7 @@ impl PostgresAdapter {
             match (&search.comparison, &filter.value) {
                 // GIN @> binds: {"field": value}
                 (
-                    Equal | NotEqual,
+                    Equal | NotEqual | In,
                     IndexValue::String(_)
                     | IndexValue::Int(_)
                     | IndexValue::Float(_)
@@ -1315,7 +1327,7 @@ impl PostgresAdapter {
                         ));
                     }
                 }
-                (NotIn, IndexValue::Array(arr)) if !arr.is_empty() => {
+                (In | NotIn, IndexValue::Array(arr)) if !arr.is_empty() => {
                     query = match arr[0] {
                         IndexValueInner::String(_) => query.bind(
                             arr.iter()
@@ -1329,8 +1341,9 @@ impl PostgresAdapter {
                             .bind(arr.iter().filter_map(|e| e.as_float()).collect::<Vec<f64>>()),
                     };
                 }
-                // NotIn without a list emitted no condition, so nothing to bind
-                (NotIn, _) => {}
+                // NotIn without a list emitted no condition, and In with an empty
+                // list emitted FALSE, so nothing to bind
+                (NotIn, _) | (In, IndexValue::Array(_)) => {}
                 // Extraction-based binds: range ops, ILIKE
                 (_, IndexValue::String(s)) => {
                     query = match search.comparison {
@@ -1779,7 +1792,8 @@ mod timestamp_filter_tests {
             .where_begins_with(&CREATED_AT, "2026-09")
             .where_not_begins_with(&CREATED_AT, "2025")
             .where_contains(&CREATED_AT, "09-22")
-            .where_not_in(&CREATED_AT, vec!["2026-01-01T00:00:00Z"]);
+            .where_not_in(&CREATED_AT, vec!["2026-01-01T00:00:00Z"])
+            .where_in(&CREATED_AT, vec!["2026-01-01T00:00:00Z"]);
         let mut idx = 3;
         let conds: Vec<String> = q
             .filters
@@ -1796,9 +1810,80 @@ mod timestamp_filter_tests {
                 "o.created_at::text NOT ILIKE $6",
                 "o.created_at::text ILIKE $7",
                 "NOT (o.created_at = ANY($8::timestamptz[]))",
+                "o.created_at = ANY($9::timestamptz[])",
             ]
         );
-        assert_eq!(idx, 9, "exactly one parameter per filter");
+        assert_eq!(idx, 10, "exactly one parameter per filter");
+    }
+}
+
+#[cfg(test)]
+mod in_filter_tests {
+    use super::PostgresAdapter;
+    use crate::query::{IndexField, IndexKind, SortAs, ToIndexValue};
+    use crate::Query;
+
+    static NAME: IndexField = IndexField {
+        name: "name",
+        kinds: &[IndexKind::Search],
+        sort_as: SortAs::Json,
+    };
+
+    fn conds(q: &Query, idx: &mut usize) -> Vec<String> {
+        q.filters
+            .iter()
+            .filter_map(|f| PostgresAdapter::build_filter_condition("o", f, idx))
+            .map(|(c, _)| c)
+            .collect()
+    }
+
+    #[test]
+    fn in_casts_the_placeholder_to_the_element_type() {
+        let q = Query::default()
+            .where_in(&NAME, vec!["a", "b"])
+            .where_in(&NAME, vec![1i64, 2])
+            .where_in(&NAME, vec![1.5f64])
+            .where_not_in(&NAME, vec!["c"]);
+        let mut idx = 1;
+        assert_eq!(
+            conds(&q, &mut idx),
+            [
+                "(o.index_meta->>'name')::text = ANY($1::text[])",
+                "(o.index_meta->>'name')::bigint = ANY($2::bigint[])",
+                "(o.index_meta->>'name')::double precision = ANY($3::double precision[])",
+                "NOT ((o.index_meta->>'name')::text = ANY($4::text[]))",
+            ]
+        );
+        assert_eq!(idx, 5);
+    }
+
+    #[test]
+    fn in_with_an_empty_list_matches_nothing() {
+        let q = Query::default()
+            .where_in(&NAME, Vec::<String>::new())
+            .where_eq(&NAME, "x");
+        let mut idx = 1;
+        // FALSE takes no parameter, so the next filter still gets $1
+        assert_eq!(conds(&q, &mut idx), ["FALSE", "o.index_meta @> $1"]);
+        assert_eq!(idx, 2);
+    }
+
+    #[test]
+    fn in_with_a_scalar_is_equality() {
+        let q = Query::default().where_in(&NAME, "a");
+        let mut idx = 1;
+        assert_eq!(conds(&q, &mut idx), ["o.index_meta @> $1"]);
+    }
+
+    #[test]
+    fn vec_uuid_matches_single_uuid_storage() {
+        let id = uuid::Uuid::now_v7();
+        let stored = serde_json::to_value(id.to_index_value()).unwrap();
+        let listed = match vec![id].to_index_value() {
+            crate::query::IndexValue::Array(a) => serde_json::to_value(&a[0]).unwrap(),
+            other => panic!("expected array, got {other:?}"),
+        };
+        assert_eq!(stored, listed);
     }
 }
 

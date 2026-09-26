@@ -210,6 +210,17 @@ impl EdgeQuery {
         self
     }
 
+    /// Scalar field is one of the given values. An empty list matches nothing.
+    pub fn where_in(mut self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
+        self.filters.push(QueryFilter::search(
+            field,
+            value.to_index_value(),
+            Comparison::In,
+            Operator::And,
+        ));
+        self
+    }
+
     /// Scalar field is none of the given values.
     pub fn where_not_in(mut self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
         self.filters.push(QueryFilter::search(
@@ -381,6 +392,17 @@ impl EdgeQuery {
             field,
             value.to_index_value(),
             Comparison::NotContainsAll,
+            Operator::Or,
+        ));
+        self
+    }
+
+    /// OR: scalar field is one of the given values. An empty list matches nothing.
+    pub fn or_in(mut self, field: &'static IndexField, value: impl ToIndexValue) -> Self {
+        self.filters.push(QueryFilter::search(
+            field,
+            value.to_index_value(),
+            Comparison::In,
             Operator::Or,
         ));
         self

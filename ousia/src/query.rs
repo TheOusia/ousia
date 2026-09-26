@@ -217,6 +217,18 @@ impl ToIndexValue for Vec<f64> {
     }
 }
 
+/// Elements use the same hyphenated lowercase text that a single `Uuid`
+/// serializes to in `index_meta`, so `where_in` compares equal to stored ids.
+impl ToIndexValue for Vec<Uuid> {
+    fn to_index_value(&self) -> IndexValue {
+        IndexValue::Array(
+            self.iter()
+                .map(|u| IndexValueInner::String(u.hyphenated().to_string()))
+                .collect(),
+        )
+    }
+}
+
 impl ToIndexValue for Uuid {
     fn to_index_value(&self) -> IndexValue {
         IndexValue::Uuid(self.clone())
@@ -392,6 +404,9 @@ pub enum Comparison {
     NotContains,
     ContainsAll,
     NotContainsAll,
+    /// Scalar field is one of the supplied array values. An empty array
+    /// matches no rows.
+    In,
     /// Scalar field is not any of the supplied array values.
     NotIn,
     GreaterThan,

@@ -132,6 +132,11 @@ async fn test_query_all_index_value_variants() {
         .await
         .unwrap();
     assert_eq!(r.len(), 2, "Float where_lte");
+    let r: Vec<Variants> = engine
+        .query_objects(Query::default().where_in(&Variants::FIELDS.price, vec![1.5f64, 3.5]))
+        .await
+        .unwrap();
+    assert_eq!(r.len(), 2, "Float where_in");
 
     // Bool (IndexValue::Bool)
     let r: Vec<Variants> = engine
@@ -156,6 +161,23 @@ async fn test_query_all_index_value_variants() {
         .await
         .unwrap();
     assert_eq!(r.len(), 1, "Uuid where_ne");
+    let r: Vec<Variants> = engine
+        .query_objects(Query::default().where_in(&Variants::FIELDS.uid, vec![uid_b]))
+        .await
+        .unwrap();
+    assert_eq!(r.len(), 1, "Vec<Uuid> where_in");
+    let r: Vec<Variants> = engine
+        .query_objects(
+            Query::default().where_in(&Variants::FIELDS.uid, vec![uid_a, uid_b, uuid::Uuid::now_v7()]),
+        )
+        .await
+        .unwrap();
+    assert_eq!(r.len(), 3, "Vec<Uuid> where_in, all");
+    let r: Vec<Variants> = engine
+        .query_objects(Query::default().where_not_in(&Variants::FIELDS.uid, vec![uid_a]))
+        .await
+        .unwrap();
+    assert_eq!(r.len(), 1, "Vec<Uuid> where_not_in");
 
     // Timestamp (IndexValue::Timestamp)
     let r: Vec<Variants> = engine
@@ -355,6 +377,108 @@ async fn test_query_not_in_strings_and_ints() {
         .await
         .unwrap();
     assert_eq!(sorted_names(&rows), ["a", "d"]);
+}
+
+#[tokio::test]
+async fn test_query_in_strings_and_ints() {
+    let (_r, pool) = setup_test_db().await;
+    let adapter = PostgresAdapter::from_pool(pool);
+    adapter.init_schema().await.unwrap();
+    let engine = Engine::new(Box::new(adapter));
+
+    seed_variants(&engine, &[("a", 1, &[]), ("b", 2, &[]), ("c", 3, &[]), ("d", 4, &[])]).await;
+
+    let rows: Vec<Variants> = engine
+        .query_objects(Query::default().where_in(&Variants::FIELDS.name, vec!["a", "b", "zz"]))
+        .await
+        .unwrap();
+    assert_eq!(sorted_names(&rows), ["a", "b"]);
+
+    let rows: Vec<Variants> = engine
+        .query_objects(Query::default().where_in(&Variants::FIELDS.count, vec![1i64, 4]))
+        .await
+        .unwrap();
+    assert_eq!(sorted_names(&rows), ["a", "d"]);
+
+    // AND-ed with a range filter: count >= 2 AND name IN [a, b, c]
+    let rows: Vec<Variants> = engine
+        .query_objects(
+            Query::default()
+                .where_gte(&Variants::FIELDS.count, 2i64)
+                .where_in(&Variants::FIELDS.name, vec!["a", "b", "c"]),
+        )
+        .await
+        .unwrap();
+    assert_eq!(sorted_names(&rows), ["b", "c"]);
+
+    // OR form: name = a OR count IN [3, 4]
+    let rows: Vec<Variants> = engine
+        .query_objects(
+            Query::default()
+                .where_eq(&Variants::FIELDS.name, "a")
+                .or_in(&Variants::FIELDS.count, vec![3i64, 4]),
+        )
+        .await
+        .unwrap();
+    assert_eq!(sorted_names(&rows), ["a", "c", "d"]);
+
+    // a single value is equality
+    let rows: Vec<Variants> = engine
+        .query_objects(Query::default().where_in(&Variants::FIELDS.name, "c"))
+        .await
+        .unwrap();
+    assert_eq!(sorted_names(&rows), ["c"]);
+}
+
+/// "In the empty set" is false for every row. Dropping the filter instead
+/// would return the whole table (e.g. a feed for a user who follows nobody).
+#[tokio::test]
+async fn test_query_in_empty_list_matches_nothing() {
+    let (_r, pool) = setup_test_db().await;
+    let adapter = PostgresAdapter::from_pool(pool);
+    adapter.init_schema().await.unwrap();
+    let engine = Engine::new(Box::new(adapter));
+
+    seed_variants(&engine, &[("a", 1, &[]), ("b", 2, &[]), ("c", 3, &[])]).await;
+
+    let rows: Vec<Variants> = engine
+        .query_objects(Query::default().where_in(&Variants::FIELDS.name, Vec::<String>::new()))
+        .await
+        .unwrap();
+    assert!(rows.is_empty(), "where_in([]) must match nothing: {:?}", sorted_names(&rows));
+
+    let rows: Vec<Variants> = engine
+        .query_objects(Query::default().where_in(&Variants::FIELDS.uid, Vec::<uuid::Uuid>::new()))
+        .await
+        .unwrap();
+    assert!(rows.is_empty(), "where_in(Vec<Uuid>[]) must match nothing");
+
+    let n = engine
+        .count_objects::<Variants>(Some(
+            Query::default().where_in(&Variants::FIELDS.count, Vec::<i64>::new()),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(n, 0);
+
+    // parameters after the FALSE still line up
+    let rows: Vec<Variants> = engine
+        .query_objects(
+            Query::default()
+                .where_in(&Variants::FIELDS.name, Vec::<String>::new())
+                .or_eq(&Variants::FIELDS.name, "b")
+                .where_gte(&Variants::FIELDS.count, 1i64),
+        )
+        .await
+        .unwrap();
+    assert_eq!(sorted_names(&rows), ["b"]);
+
+    // the negation still keeps everything
+    let rows: Vec<Variants> = engine
+        .query_objects(Query::default().where_not_in(&Variants::FIELDS.name, Vec::<String>::new()))
+        .await
+        .unwrap();
+    assert_eq!(sorted_names(&rows), ["a", "b", "c"]);
 }
 
 #[tokio::test]

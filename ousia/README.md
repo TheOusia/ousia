@@ -294,7 +294,7 @@ let published: u64 = engine
     .await?;
 ```
 
-Available comparisons: `where_eq`, `where_ne`, `where_gt`, `where_gte`, `where_lt`, `where_lte`, `where_contains`, `where_not_contains`, `where_contains_all`, `where_not_contains_all`, `where_begins_with`, `where_not_begins_with`, `where_not_in`. Each has an `or_` variant for OR conditions. Sort with `sort_asc` / `sort_desc` (numbers by value, timestamps chronologically), or `sort_random` (ignores a cursor, with a warning). Cursor pagination follows the sort order.
+Available comparisons: `where_eq`, `where_ne`, `where_gt`, `where_gte`, `where_lt`, `where_lte`, `where_contains`, `where_not_contains`, `where_contains_all`, `where_not_contains_all`, `where_begins_with`, `where_not_begins_with`, `where_in`, `where_not_in` (`where_in` with an empty list matches nothing; `Vec<Uuid>` works as a list). Each has an `or_` variant for OR conditions. Sort with `sort_asc` / `sort_desc` (numbers by value, timestamps chronologically), or `sort_random` (ignores a cursor, with a warning). Cursor pagination follows the sort order.
 
 ### Uniqueness Constraints
 
