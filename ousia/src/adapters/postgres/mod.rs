@@ -63,7 +63,10 @@ impl PostgresAdapter {
     ///    `FK (from) → objects_<from_type>(id)` and
     ///    `FK (to) → objects_<to_type>(id)`, both `ON DELETE CASCADE`.
     /// 6. Drops empty orphaned partitions whose type is no longer in
-    ///    the manifest (non-empty orphans are logged and skipped).
+    ///    the manifest, dependents (edges, constraints, geo) before the
+    ///    object partitions they reference. Non-empty orphans, and object
+    ///    partitions a surviving table still has an FK to, are logged and
+    ///    skipped.
     /// 7. Writes the manifest to `target/ousia.json` as a tooling
     ///    artifact (best-effort — write failure is logged, not fatal).
     ///
@@ -133,12 +136,14 @@ impl PostgresAdapter {
         }
 
         // Drop orphaned (empty) partitions for types removed from the manifest.
-        Self::drop_orphaned_partitions(&mut tx, "objects", &object_types).await?;
-        Self::drop_orphaned_partitions(&mut tx, "object_constraints", &object_types).await?;
-        Self::drop_orphaned_partitions(&mut tx, "object_geo", &object_types).await?;
+        // Edge, constraint and geo partitions hold FKs to object partitions,
+        // so they go first; an object partition goes last.
         let edge_type_names: Vec<&'static str> =
             edge_entries.iter().map(|e| e.type_name).collect();
         Self::drop_orphaned_partitions(&mut tx, "object_edges", &edge_type_names).await?;
+        Self::drop_orphaned_partitions(&mut tx, "object_constraints", &object_types).await?;
+        Self::drop_orphaned_partitions(&mut tx, "object_geo", &object_types).await?;
+        Self::drop_orphaned_partitions(&mut tx, "objects", &object_types).await?;
 
         tx.commit()
             .await
@@ -915,7 +920,26 @@ impl PostgresAdapter {
             .await
             .map_err(|e| Error::Storage(e.to_string()))?;
 
-            if count == 0 {
+            // A table that is staying — an edge still declared with this
+            // type as an endpoint, or one ousia doesn't manage — may still
+            // hold an FK to it. Dropping would fail and abort startup.
+            let referenced_by: Vec<String> = sqlx::query_scalar(
+                "SELECT DISTINCT conrelid::regclass::text FROM pg_constraint \
+                 WHERE contype = 'f' AND confrelid = $1::regclass AND conrelid <> confrelid",
+            )
+            .bind(&partition)
+            .fetch_all(&mut **tx)
+            .await
+            .map_err(|e| Error::Storage(e.to_string()))?;
+
+            if !referenced_by.is_empty() {
+                eprintln!(
+                    "[ousia warn] Orphaned partition '{}' is still referenced by {} — \
+                     skipping drop. Remove those foreign keys to let it go.",
+                    partition,
+                    referenced_by.join(", ")
+                );
+            } else if count == 0 {
                 sqlx::query(&format!("DROP TABLE IF EXISTS {}", partition))
                     .execute(&mut **tx)
                     .await
