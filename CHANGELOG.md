@@ -3,6 +3,20 @@
 `ousia` and `ousia_derive` are released together; a minor release of the
 derive is a minor release of `ousia`. `ousia-ledger` versions separately.
 
+## ousia 2.5.1 — 2026-09-28
+
+### Fixed
+
+- `init_schema` failed at startup once an object type had been removed from
+  the manifest: it dropped the type's empty `objects_<t>` partition before the
+  `object_constraints_<t>`, `object_geo_<t>` and edge partitions holding
+  foreign keys to it, and Postgres refused (`cannot drop table … because other
+  objects depend on it`). Orphans are now dropped dependents first. An orphaned
+  object partition that a table ousia keeps (or doesn't manage) still
+  references is logged and skipped instead of aborting startup.
+
+ousia 2.5.0 is yanked. The same fix is released for the 2.4 line as 2.4.3.
+
 ## ousia 2.5.0 / ousia_derive 2.3.0 — 2026-09-27
 
 ### Added
@@ -54,6 +68,12 @@ rows match, and on filters over a few very busy values, where the plain query
 stayed about 2 ms faster. Each index cost about 6–9% on single-row writes and
 roughly a quarter of the partition's size in the benchmark. See
 [TUNING.md](TUNING.md#when-to-use-it) for the full numbers.
+
+## ousia 2.4.3 — 2026-09-28
+
+### Fixed
+
+- The same orphaned-partition startup failure as 2.5.1, backported.
 
 ## ousia 2.4.2 — 2026-09-26
 
