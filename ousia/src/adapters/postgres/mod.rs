@@ -1,5 +1,6 @@
 mod adapter_impl;
 mod atomic_impl;
+mod composite_query;
 mod geo_impl;
 mod helper;
 mod traversal_impl;
@@ -8,7 +9,7 @@ mod unique_impl;
 #[cfg(feature = "ledger")]
 mod ledger_impl;
 
-use sqlx::{PgPool, Postgres, Row, Transaction};
+use sqlx::{PgConnection, PgPool, Postgres, Row, Transaction};
 
 use crate::adapters::Error;
 
@@ -64,12 +65,16 @@ impl PostgresAdapter {
     ///    `FK (to) → objects_<to_type>(id)`, both `ON DELETE CASCADE`.
     /// 6. Drops empty orphaned partitions whose type is no longer in
     ///    the manifest (non-empty orphans are logged and skipped).
-    /// 7. Writes the manifest to `target/ousia.json` as a tooling
+    /// 7. After committing, syncs each Object type's
+    ///    `#[ousia(composite_index = "...")]` declarations onto its
+    ///    `objects_<t>` partition with `CREATE INDEX CONCURRENTLY` — see
+    ///    [`Self::sync_composite_indexes`].
+    /// 8. Writes the manifest to `target/ousia.json` as a tooling
     ///    artifact (best-effort — write failure is logged, not fatal).
     ///
     /// Safe to call on every application start: all schema operations
-    /// use `IF NOT EXISTS` / `IF EXISTS` and run inside a single
-    /// transaction.
+    /// use `IF NOT EXISTS` / `IF EXISTS`, and steps 1–6 run inside a
+    /// single transaction.
     ///
     /// Composed schema-hash drift checking lives in
     /// [`crate::Engine::check_schema`] and runs separately after
@@ -143,6 +148,23 @@ impl PostgresAdapter {
         tx.commit()
             .await
             .map_err(|e| Error::Storage(e.to_string()))?;
+
+        // Outside the transaction so the builds can run CONCURRENTLY, on a
+        // connection of their own: an index build on a large partition can
+        // outlast any `statement_timeout` the deployment sets, so it is
+        // lifted for this session. The connection is detached so that setting
+        // never reaches the pool; dropping it (on error too) closes it.
+        let mut conn = self
+            .pool
+            .acquire()
+            .await
+            .map_err(|e| Error::Storage(e.to_string()))?
+            .detach();
+        run_outside_tx(&mut conn, "SET statement_timeout = 0").await?;
+        for type_name in &object_types {
+            Self::sync_composite_indexes(&mut conn, &schema, type_name).await?;
+        }
+        let _ = sqlx::Connection::close(conn).await;
 
         // Warn (not fail) about field-name drift: a struct field renamed
         // or removed since a row was last written stops matching that
@@ -878,6 +900,109 @@ impl PostgresAdapter {
         Ok(())
     }
 
+    /// Make the composite indexes on `objects_<t>` match the type's
+    /// `composite_index` declarations: build the missing ones, rebuild any
+    /// whose definition changed or whose earlier build failed (an `INVALID`
+    /// index left by an interrupted concurrent build), and drop the ones no
+    /// longer declared.
+    ///
+    /// Each index ousia builds carries a `COMMENT ON INDEX` holding its
+    /// definition. That comment is how a changed definition is spotted
+    /// (the name only encodes the element names and directions, not the
+    /// casts), and how ousia's indexes are told apart from ones added to the
+    /// partition by hand, which are never touched.
+    ///
+    /// Runs after `init_schema` commits, one autocommit statement at a time,
+    /// because `CREATE INDEX CONCURRENTLY` cannot run inside a transaction.
+    /// A concurrent build doesn't block reads or writes on the partition,
+    /// but `init_schema` does wait for it, so the first start after adding a
+    /// composite index to a large type takes as long as the build.
+    async fn sync_composite_indexes(
+        conn: &mut PgConnection,
+        schema: &str,
+        type_name: &str,
+    ) -> Result<(), Error> {
+        let safe = partition_name_segment(type_name);
+        let schema_q = quote_ident(schema);
+
+        // Two structs sharing a type name can declare the same elements with
+        // different field types: same index name, different definitions.
+        // The first wins; building both would rebuild one on every start.
+        let mut desired: Vec<(String, String)> = Vec::new();
+        for idx in crate::manifest::composite_indexes_for(type_name) {
+            let (name, columns) = (composite_index_name(&safe, idx), composite_index_columns(idx));
+            match desired.iter().find(|(wanted, _)| *wanted == name) {
+                Some((_, first)) if *first != columns => eprintln!(
+                    "[ousia warn] {type_name} declares composite index {name} twice with \
+                     different definitions ({first} vs {columns}); keeping the first"
+                ),
+                Some(_) => {}
+                None => desired.push((name, columns)),
+            }
+        }
+
+        // name -> (valid, comment) for every index on the partition.
+        let existing: std::collections::HashMap<String, (bool, String)> = sqlx::query(
+            "SELECT i.relname::text, ix.indisvalid, \
+                    COALESCE(obj_description(i.oid, 'pg_class'), '') \
+             FROM pg_index ix \
+             JOIN pg_class i ON i.oid = ix.indexrelid \
+             JOIN pg_class t ON t.oid = ix.indrelid \
+             JOIN pg_namespace n ON n.oid = t.relnamespace \
+             WHERE n.nspname = $1 AND t.relname = $2",
+        )
+        .bind(schema)
+        .bind(format!("objects_{safe}"))
+        .fetch_all(&mut *conn)
+        .await
+        .map_err(|e| Error::Storage(e.to_string()))?
+        .into_iter()
+        .map(|row| {
+            let name: String = row.get(0);
+            let valid: bool = row.get(1);
+            let comment: String = row.get(2);
+            (name, (valid, comment))
+        })
+        .collect();
+
+        for (name, columns) in &desired {
+            let comment = format!("{COMPOSITE_INDEX_COMMENT}{columns}");
+            match existing.get(name) {
+                Some((true, current)) if *current == comment => continue,
+                Some(_) => {
+                    run_outside_tx(conn, &format!(
+                        "DROP INDEX CONCURRENTLY IF EXISTS {schema_q}.{name}"
+                    ))
+                    .await?
+                }
+                None => {}
+            }
+            run_outside_tx(conn, &format!(
+                "CREATE INDEX CONCURRENTLY IF NOT EXISTS {name} \
+                 ON {schema_q}.objects_{safe} ({columns})"
+            ))
+            .await?;
+            run_outside_tx(conn, &format!(
+                "COMMENT ON INDEX {schema_q}.{name} IS '{}'",
+                comment.replace('\'', "''")
+            ))
+            .await?;
+        }
+
+        for (name, (_, comment)) in &existing {
+            if comment.starts_with(COMPOSITE_INDEX_COMMENT)
+                && !desired.iter().any(|(wanted, _)| wanted == name)
+            {
+                run_outside_tx(conn, &format!(
+                    "DROP INDEX CONCURRENTLY IF EXISTS {schema_q}.{name}"
+                ))
+                .await?;
+            }
+        }
+
+        Ok(())
+    }
+
     /// Drop empty orphaned partitions of `parent_table` whose names
     /// follow the `{parent}_{safe}` convention but aren't in
     /// `known_types`. Non-empty orphans are warned and skipped.
@@ -986,6 +1111,84 @@ fn partition_name_segment(type_name: &str) -> String {
     type_name.to_lowercase().replace('-', "_")
 }
 
+/// Prefix of the `COMMENT ON INDEX` ousia puts on each composite index it
+/// builds; the rest of the comment is the index's column list.
+const COMPOSITE_INDEX_COMMENT: &str = "ousia composite_index: ";
+
+/// Postgres truncates identifiers longer than this many bytes.
+const MAX_IDENTIFIER_BYTES: usize = 63;
+
+/// `objects_<t>_<element>[_desc]..._idx`, lowercased so Postgres stores it
+/// exactly as generated. Past 63 bytes it is cut short and suffixed with a
+/// hash of the full name, so two long declarations never truncate to the
+/// same identifier and the name is the same on every start.
+fn composite_index_name(safe: &str, idx: &crate::manifest::CompositeIndex) -> String {
+    let mut name = format!("objects_{safe}");
+    for element in idx.elements {
+        name.push('_');
+        name.push_str(element.name);
+        if element.descending {
+            name.push_str("_desc");
+        }
+    }
+    let name: String = name
+        .to_lowercase()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect();
+
+    let full = format!("{name}_idx");
+    if full.len() <= MAX_IDENTIFIER_BYTES {
+        return full;
+    }
+    let hash = blake3::hash(full.as_bytes()).to_hex();
+    let suffix = format!("_{}_idx", &hash[..8]);
+    format!("{}{suffix}", &name[..MAX_IDENTIFIER_BYTES - suffix.len()])
+}
+
+/// The index's column list. An `index_meta` element is written the way the
+/// query builder writes the field — `(index_meta->>'f')` for text, with a
+/// `::bigint` / `::double precision` / `::boolean` cast otherwise — since
+/// Postgres only uses an expression index for a query with the same
+/// expression.
+fn composite_index_columns(idx: &crate::manifest::CompositeIndex) -> String {
+    use crate::manifest::IndexSource;
+    use crate::query::IndexCast;
+
+    idx.elements
+        .iter()
+        .map(|element| {
+            let key = element.name.replace('\'', "''");
+            let expr = match element.source {
+                IndexSource::Column => element.name.to_string(),
+                IndexSource::IndexMeta(IndexCast::Text) => format!("(index_meta->>'{key}')"),
+                IndexSource::IndexMeta(IndexCast::BigInt) => {
+                    format!("((index_meta->>'{key}')::bigint)")
+                }
+                IndexSource::IndexMeta(IndexCast::Double) => {
+                    format!("((index_meta->>'{key}')::double precision)")
+                }
+                IndexSource::IndexMeta(IndexCast::Boolean) => {
+                    format!("((index_meta->>'{key}')::boolean)")
+                }
+                IndexSource::IndexMeta(cast @ (IndexCast::Timestamp | IndexCast::Array)) => {
+                    unreachable!("the derive rejects {cast:?} fields in a composite_index")
+                }
+            };
+            if element.descending {
+                format!("{expr} DESC")
+            } else {
+                expr
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn quote_ident(ident: &str) -> String {
+    format!("\"{}\"", ident.replace('"', "\"\""))
+}
+
 /// `major.minor` derived from `CARGO_PKG_VERSION` at compile time.
 /// Example: `"2.0.4"` → `"2.0"`. Used to tag the composed schema hash
 /// in `ousia_meta` so a major version bump trips the migration error.
@@ -1010,6 +1213,16 @@ fn parse_schema_entry(entry: &str) -> (&str, &str) {
         }
         None => ("0", entry),
     }
+}
+
+/// One statement over the simple-query protocol, in its own implicit
+/// transaction — what `CREATE/DROP INDEX CONCURRENTLY` require.
+async fn run_outside_tx(conn: &mut PgConnection, sql: &str) -> Result<(), Error> {
+    sqlx::raw_sql(sql)
+        .execute(&mut *conn)
+        .await
+        .map_err(|e| Error::Storage(format!("{e} (while running: {sql})")))?;
+    Ok(())
 }
 
 /// PG has no `ADD CONSTRAINT IF NOT EXISTS` — emulate by checking
@@ -1137,6 +1350,80 @@ mod search_path_tests {
         assert_eq!(
             first_search_path_entry("\"odd\"\"name\"").as_deref(),
             Some("odd\"name")
+        );
+    }
+}
+
+#[cfg(test)]
+mod composite_index_tests {
+    use super::{MAX_IDENTIFIER_BYTES, composite_index_columns, composite_index_name};
+    use crate::manifest::{CompositeIndex, IndexElement, IndexSource};
+    use crate::query::IndexCast;
+
+    const fn meta(name: &'static str, cast: IndexCast, descending: bool) -> IndexElement {
+        IndexElement { name, source: IndexSource::IndexMeta(cast), descending }
+    }
+
+    const fn column(name: &'static str, descending: bool) -> IndexElement {
+        IndexElement { name, source: IndexSource::Column, descending }
+    }
+
+    #[test]
+    fn short_names_spell_out_the_elements_and_directions() {
+        const IDX: CompositeIndex = CompositeIndex {
+            elements: &[meta("actor", IndexCast::Text, false), column("created_at", true)],
+        };
+        assert_eq!(
+            composite_index_name("event", &IDX),
+            "objects_event_actor_created_at_desc_idx"
+        );
+    }
+
+    #[test]
+    fn names_are_lowercase() {
+        const IDX: CompositeIndex =
+            CompositeIndex { elements: &[meta("actorId", IndexCast::Text, false)] };
+        assert_eq!(composite_index_name("feed", &IDX), "objects_feed_actorid_idx");
+    }
+
+    #[test]
+    fn long_names_fit_and_do_not_collide() {
+        const A: CompositeIndex = CompositeIndex {
+            elements: &[
+                meta("a_rather_long_field_name_for_testing", IndexCast::Text, false),
+                meta("another_rather_long_field_name_one", IndexCast::Text, false),
+            ],
+        };
+        const B: CompositeIndex = CompositeIndex {
+            elements: &[
+                meta("a_rather_long_field_name_for_testing", IndexCast::Text, false),
+                meta("another_rather_long_field_name_two", IndexCast::Text, false),
+            ],
+        };
+        let (a, b) = (composite_index_name("t", &A), composite_index_name("t", &B));
+        assert_eq!(a.len(), MAX_IDENTIFIER_BYTES);
+        assert_eq!(b.len(), MAX_IDENTIFIER_BYTES);
+        assert_ne!(a, b);
+        assert!(a.ends_with("_idx"));
+        assert_eq!(a, composite_index_name("t", &A), "deterministic");
+    }
+
+    #[test]
+    fn columns_cast_each_field_like_the_query_builder() {
+        const IDX: CompositeIndex = CompositeIndex {
+            elements: &[
+                meta("actor", IndexCast::Text, false),
+                meta("count", IndexCast::BigInt, true),
+                meta("price", IndexCast::Double, false),
+                meta("live", IndexCast::Boolean, false),
+                column("created_at", true),
+            ],
+        };
+        assert_eq!(
+            composite_index_columns(&IDX),
+            "(index_meta->>'actor'), ((index_meta->>'count')::bigint) DESC, \
+             ((index_meta->>'price')::double precision), ((index_meta->>'live')::boolean), \
+             created_at DESC"
         );
     }
 }

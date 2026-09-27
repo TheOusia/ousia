@@ -170,7 +170,7 @@ pub mod query;
 
 #[doc(hidden)]
 pub use manifest::{__linkme, __rmp_serde};
-pub use manifest::{MANIFEST, ManifestKind, TypeManifestEntry};
+pub use manifest::{CompositeIndex, IndexElement, IndexSource, MANIFEST, ManifestKind, TypeManifestEntry};
 
 #[cfg(feature = "ledger")]
 pub use ledger;

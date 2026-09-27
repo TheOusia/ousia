@@ -261,3 +261,51 @@ pub struct Profile {
     #[ousia(rename = "handle")]
     pub display: String,
 }
+
+/// Composite-index fixture in the shape of an activity feed: an `index_meta`
+/// field + a native column (uuid-as-text and int variants), two `index_meta`
+/// fields together, and two `index_meta` fields (text + int) + a native column.
+#[derive(OusiaObject, OusiaDefault, Debug)]
+#[ousia(
+    type_name = "FeedEvent",
+    index = "actor:search",
+    index = "score:search",
+    index = "location_key:search",
+    index = "state:search",
+    composite_index = "actor, created_at desc",
+    composite_index = "score, created_at DESC",
+    index = "region:search",
+    index = "tier:search",
+    composite_index = "location_key, state",
+    composite_index = "region, tier, created_at desc"
+)]
+pub struct FeedEvent {
+    _meta: Meta,
+
+    pub actor: uuid::Uuid,
+    pub score: i64,
+    pub location_key: String,
+    pub state: String,
+    pub region: String,
+    pub tier: i64,
+}
+
+/// Composite indexes whose generated names run past Postgres' 63-byte
+/// identifier limit and share their first 63 bytes. Only its schema is used.
+#[allow(dead_code)]
+#[derive(OusiaObject, OusiaDefault, Debug)]
+#[ousia(
+    type_name = "LongIndexNames",
+    index = "a_rather_long_field_name_for_testing:search",
+    index = "another_rather_long_field_name_one:search",
+    index = "another_rather_long_field_name_two:search",
+    composite_index = "a_rather_long_field_name_for_testing, another_rather_long_field_name_one",
+    composite_index = "a_rather_long_field_name_for_testing, another_rather_long_field_name_two"
+)]
+pub struct LongIndexNames {
+    _meta: Meta,
+
+    pub a_rather_long_field_name_for_testing: String,
+    pub another_rather_long_field_name_one: String,
+    pub another_rather_long_field_name_two: String,
+}

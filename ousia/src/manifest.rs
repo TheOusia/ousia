@@ -44,6 +44,35 @@ pub struct TypeManifestEntry {
     pub field_names: &'static [&'static str],
     /// Old names still accepted on read via `#[ousia(rename = "old")]`.
     pub field_aliases: &'static [&'static str],
+    /// `#[ousia(composite_index = "...")]` declarations, in declaration
+    /// order. `init_schema` builds each one on the type's own partition.
+    /// Always empty for edges.
+    pub composite_indexes: &'static [CompositeIndex],
+}
+
+/// One `#[ousia(composite_index = "a, b desc")]` declaration: a btree over
+/// `elements`, in order, on the type's `objects_<t>` partition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CompositeIndex {
+    pub elements: &'static [IndexElement],
+}
+
+/// One column of a [`CompositeIndex`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct IndexElement {
+    /// A real column (`id`, `owner`, `created_at`, `updated_at`) or an
+    /// `index`-declared field of the struct.
+    pub name: &'static str,
+    pub source: IndexSource,
+    pub descending: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum IndexSource {
+    /// A column of `objects`.
+    Column,
+    /// A key of `index_meta`, read with the field type's cast.
+    IndexMeta(crate::query::IndexCast),
 }
 
 /// Compile-time set of every Object/Edge linked into the binary.
@@ -77,6 +106,24 @@ pub fn object_types_sorted() -> Vec<&'static str> {
     let mut v: Vec<&'static str> = object_types().collect();
     v.sort_unstable();
     v.dedup();
+    v
+}
+
+/// Composite indexes declared for object type `type_name`, unioned across
+/// every struct registered under that name (see [`object_types_sorted`])
+/// and deduplicated, in first-declared order.
+pub fn composite_indexes_for(type_name: &str) -> Vec<&'static CompositeIndex> {
+    let mut v: Vec<&'static CompositeIndex> = Vec::new();
+    for entry in MANIFEST
+        .iter()
+        .filter(|e| matches!(e.kind, ManifestKind::Object) && e.type_name == type_name)
+    {
+        for idx in entry.composite_indexes {
+            if !v.contains(&idx) {
+                v.push(idx);
+            }
+        }
+    }
     v
 }
 

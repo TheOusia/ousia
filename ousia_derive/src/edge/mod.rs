@@ -88,6 +88,11 @@ fn parse_edge_attr(attr: Option<&Attribute>, struct_name: &syn::Ident) -> EdgeAt
                             );
                         }
                     }
+                    Meta::NameValue(nv) if nv.path.is_ident("composite_index") => {
+                        panic!(
+                            "OusiaEdge `{struct_name}`: composite_index is only supported on OusiaObject"
+                        );
+                    }
                     _ => {}
                 }
             }
@@ -561,6 +566,7 @@ pub fn derive(input: TokenStream) -> TokenStream {
             to_type: Some(<#to_ty as #ousia::object::Object>::TYPE),
             field_names: &[#(#deserialize_field_names),*],
             field_aliases: &[],
+            composite_indexes: &[],
         };
 
         impl #ousia::edge::Edge for #ident {

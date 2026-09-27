@@ -538,6 +538,55 @@ impl PostgresAdapter {
         Some((condition, operator))
     }
 
+    /// `query_objects`'s SQL for a fan-in query: one ordered, limited lookup
+    /// per distinct value of the fanned-out `In` filter, merged by the
+    /// query's own `ORDER BY`. `where_clause` / `order_clause` are the ones
+    /// built for the plain query; the `In` condition is rewritten to compare
+    /// against the value being looked up, and its array parameter feeds the
+    /// value list, so the binds are unchanged.
+    ///
+    /// Each lookup keeps rows tied with its last one (`WITH TIES`), since the
+    /// index orders by the sort keys alone and the final `id` tie-break is
+    /// applied after the merge.
+    ///
+    /// `None` (use the plain query) if the `In` condition isn't found.
+    pub(super) fn fan_in_sql(
+        plan: &crate::adapters::Query,
+        fan: &super::composite_query::FanIn,
+        where_clause: &str,
+        order_clause: &str,
+    ) -> Option<String> {
+        let limit = plan.limit?;
+        let mut param_idx = if plan.cursor.is_some() { 4 } else { 3 };
+        for filter in &plan.filters[..fan.filter] {
+            Self::build_filter_condition("o", filter, &mut param_idx);
+        }
+        let elem_type = match plan.filters[fan.filter].value.as_array()?.first()? {
+            IndexValueInner::String(_) => "text",
+            IndexValueInner::Int(_) => "bigint",
+            IndexValueInner::Float(_) => "double precision",
+        };
+        let any = format!("= ANY(${param_idx}::{elem_type}[])");
+        if where_clause.matches(&any).count() != 1 {
+            return None;
+        }
+        let inner_where = where_clause.replace(&any, "= fan_in.v");
+        Some(format!(
+            "SELECT o.id, o.owner, o.created_at, o.updated_at, o.data \
+             FROM (SELECT DISTINCT unnest(${param_idx}::{elem_type}[]) AS v) fan_in \
+             CROSS JOIN LATERAL ( \
+                 SELECT o.id, o.owner, o.created_at, o.updated_at, o.data \
+                 FROM objects o \
+                 {inner_where} \
+                 ORDER BY {inner_order} \
+                 FETCH FIRST {limit} ROWS WITH TIES \
+             ) o \
+             {order_clause} \
+             LIMIT {limit}",
+            inner_order = fan.inner_order,
+        ))
+    }
+
     pub(super) fn join_conditions(conditions: &[(String, &str)]) -> String {
         if conditions.is_empty() {
             return String::new();

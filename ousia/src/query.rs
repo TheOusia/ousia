@@ -107,7 +107,35 @@ pub trait ToIndexValue {
     /// since timestamps are stored as text with a varying number of digits.
     const SORT_AS: SortAs = SortAs::Json;
 
+    /// How a `composite_index` reads this field out of `index_meta`. It has
+    /// to be the cast the query builder puts on the field, or Postgres never
+    /// matches the index to the query. The default (`Text`) fits any type
+    /// whose `to_index_value` returns a string; a custom type that returns
+    /// an int, float or bool should override it.
+    const INDEX_CAST: IndexCast = IndexCast::Text;
+
     fn to_index_value(&self) -> IndexValue;
+}
+
+/// The expression a `composite_index` element indexes for an `index_meta`
+/// field, matching what the query builder compares against.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum IndexCast {
+    /// `(index_meta->>'f')` — strings and uuids.
+    Text,
+    /// `((index_meta->>'f')::bigint)`
+    BigInt,
+    /// `((index_meta->>'f')::double precision)`
+    Double,
+    /// `((index_meta->>'f')::boolean)`
+    Boolean,
+    /// Not indexable: text → `timestamptz` depends on the session's
+    /// `TimeZone`/`DateStyle`, so Postgres rejects it in an index. The derive
+    /// refuses such a field in a `composite_index`.
+    Timestamp,
+    /// Not indexable by a btree over `->>`; array fields are served by the
+    /// GIN index. The derive refuses such a field in a `composite_index`.
+    Array,
 }
 
 /// How a sorted field is compared in the database.
@@ -132,30 +160,40 @@ impl ToIndexValue for &str {
 }
 
 impl ToIndexValue for i64 {
+    const INDEX_CAST: IndexCast = IndexCast::BigInt;
+
     fn to_index_value(&self) -> IndexValue {
         IndexValue::Int(*self)
     }
 }
 
 impl ToIndexValue for i32 {
+    const INDEX_CAST: IndexCast = IndexCast::BigInt;
+
     fn to_index_value(&self) -> IndexValue {
         IndexValue::Int(*self as i64)
     }
 }
 
 impl ToIndexValue for f64 {
+    const INDEX_CAST: IndexCast = IndexCast::Double;
+
     fn to_index_value(&self) -> IndexValue {
         IndexValue::Float(*self)
     }
 }
 
 impl ToIndexValue for f32 {
+    const INDEX_CAST: IndexCast = IndexCast::Double;
+
     fn to_index_value(&self) -> IndexValue {
         IndexValue::Float(*self as f64)
     }
 }
 
 impl ToIndexValue for bool {
+    const INDEX_CAST: IndexCast = IndexCast::Boolean;
+
     fn to_index_value(&self) -> IndexValue {
         IndexValue::Bool(*self)
     }
@@ -163,6 +201,7 @@ impl ToIndexValue for bool {
 
 impl ToIndexValue for chrono::DateTime<chrono::Utc> {
     const SORT_AS: SortAs = SortAs::Timestamp;
+    const INDEX_CAST: IndexCast = IndexCast::Timestamp;
 
     fn to_index_value(&self) -> IndexValue {
         IndexValue::Timestamp(*self)
@@ -180,12 +219,16 @@ impl ToIndexValue for IndexValueInner {
 }
 
 impl ToIndexValue for Vec<IndexValueInner> {
+    const INDEX_CAST: IndexCast = IndexCast::Array;
+
     fn to_index_value(&self) -> IndexValue {
         IndexValue::Array(self.clone())
     }
 }
 
 impl ToIndexValue for Vec<String> {
+    const INDEX_CAST: IndexCast = IndexCast::Array;
+
     fn to_index_value(&self) -> IndexValue {
         IndexValue::Array(
             self.iter()
@@ -196,6 +239,8 @@ impl ToIndexValue for Vec<String> {
 }
 
 impl ToIndexValue for Vec<&str> {
+    const INDEX_CAST: IndexCast = IndexCast::Array;
+
     fn to_index_value(&self) -> IndexValue {
         IndexValue::Array(
             self.iter()
@@ -206,12 +251,16 @@ impl ToIndexValue for Vec<&str> {
 }
 
 impl ToIndexValue for Vec<i64> {
+    const INDEX_CAST: IndexCast = IndexCast::Array;
+
     fn to_index_value(&self) -> IndexValue {
         IndexValue::Array(self.iter().map(|i| IndexValueInner::Int(*i)).collect())
     }
 }
 
 impl ToIndexValue for Vec<f64> {
+    const INDEX_CAST: IndexCast = IndexCast::Array;
+
     fn to_index_value(&self) -> IndexValue {
         IndexValue::Array(self.iter().map(|f| IndexValueInner::Float(*f)).collect())
     }
@@ -220,6 +269,8 @@ impl ToIndexValue for Vec<f64> {
 /// Elements use the same hyphenated lowercase text that a single `Uuid`
 /// serializes to in `index_meta`, so `where_in` compares equal to stored ids.
 impl ToIndexValue for Vec<Uuid> {
+    const INDEX_CAST: IndexCast = IndexCast::Array;
+
     fn to_index_value(&self) -> IndexValue {
         IndexValue::Array(
             self.iter()
@@ -236,6 +287,8 @@ impl ToIndexValue for Uuid {
 }
 
 impl<T: ToIndexValue + Default> ToIndexValue for Option<T> {
+    const INDEX_CAST: IndexCast = T::INDEX_CAST;
+
     fn to_index_value(&self) -> IndexValue {
         match self {
             Some(val) => val.to_index_value(),

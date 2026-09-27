@@ -193,6 +193,60 @@ pub fn parse_ousia_attr(attr: Option<&Attribute>) -> (Option<String>, Vec<(Strin
     (type_name, indexes)
 }
 
+/// Raw `#[ousia(composite_index = "a, b desc")]` values, in declaration order.
+pub fn parse_composite_index_attrs(attr: Option<&Attribute>) -> Vec<String> {
+    let Some(Meta::List(meta_list)) = attr.map(|a| &a.meta) else {
+        return vec![];
+    };
+    let nested = meta_list
+        .parse_args_with(syn::punctuated::Punctuated::<Meta, syn::Token![,]>::parse_terminated)
+        .expect("Failed to parse ousia attribute arguments");
+    nested
+        .iter()
+        .filter_map(|meta| match meta {
+            Meta::NameValue(nv) if nv.path.is_ident("composite_index") => match &nv.value {
+                Expr::Lit(ExprLit { lit: Lit::Str(s), .. }) => Some(s.value()),
+                _ => panic!("composite_index must be a string literal"),
+            },
+            _ => None,
+        })
+        .collect()
+}
+
+/// Split one `composite_index` value into `(element, descending)` pairs.
+/// Elements are comma-separated, each an optional `asc` / `desc` after the
+/// name (default `asc`).
+pub fn parse_composite_index_elements(decl: &str) -> Vec<(String, bool)> {
+    let elements: Vec<(String, bool)> = decl
+        .split(',')
+        .map(|part| {
+            let words: Vec<&str> = part.split_whitespace().collect();
+            match words.as_slice() {
+                [name] => (name.to_string(), false),
+                [name, dir] if dir.eq_ignore_ascii_case("asc") => (name.to_string(), false),
+                [name, dir] if dir.eq_ignore_ascii_case("desc") => (name.to_string(), true),
+                _ => panic!(
+                    "composite_index element must be `field`, `field asc` or `field desc`, \
+                     got `{}` in \"{}\"",
+                    part.trim(),
+                    decl
+                ),
+            }
+        })
+        .collect();
+    // Postgres' INDEX_MAX_KEYS.
+    if elements.len() > 32 {
+        panic!("composite_index \"{}\" has {} elements; Postgres allows 32", decl, elements.len());
+    }
+    let mut seen = std::collections::HashSet::new();
+    for (name, _) in &elements {
+        if !seen.insert(name) {
+            panic!("composite_index \"{}\" lists `{}` twice", decl, name);
+        }
+    }
+    elements
+}
+
 /// Check if a field has #[ousia(private)] attribute
 pub fn is_private_field(field: &Field) -> bool {
     field.attrs.iter().any(|attr| {

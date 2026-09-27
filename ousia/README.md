@@ -223,6 +223,34 @@ A custom type that returns `IndexValue::Timestamp` should also set
 `sort_asc` / `sort_desc` order it chronologically. Every other type sorts by
 its stored value (numbers numerically, strings as text) with no extra code.
 
+`index = "field:search"` makes a field filterable, but on its own it gives the
+field no Postgres index for `where_in` or range comparisons — those are
+filters applied while scanning the type's partition. When such a query is
+selective on a large type, declare a composite index over the fields it
+filters on:
+
+```rust
+#[ousia(
+    index = "actor:search",
+    composite_index = "actor, created_at desc",   // index field + native column
+)]
+```
+
+`init_schema` builds it on that type's partition with `CREATE INDEX
+CONCURRENTLY`, and drops it again if the declaration is removed. Queries are
+written the same way; ousia routes them to the index.
+
+Use it on types past roughly a million rows, for queries that filter by a
+field most rows don't match and page in `created_at` order — an account's
+history, a feed over followed accounts. There, read times stayed at 2–5 ms from
+1M to 3M rows while the plain query grew up to 40 ms. Skip it on small types,
+on filters most rows match, and when the filtered values are a few very busy
+ones (the plain query finds a page faster there). Each composite index costs
+about 6–9% on single-row writes and roughly a quarter of the partition's size
+in the measured setup. See
+[TUNING.md](https://github.com/TheOusia/ousia/blob/main/TUNING.md#composite-indexes)
+for the full rules, the benchmark, and how to confirm the index with `EXPLAIN`.
+
 The `OusiaObject` derive generates:
 
 - `impl Object` — type name, meta accessors, index metadata

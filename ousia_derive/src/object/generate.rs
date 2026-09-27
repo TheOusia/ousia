@@ -6,10 +6,14 @@ use syn::{Data, DeriveInput, Expr, ExprLit, Field, Fields, Lit, Meta, Result, Ty
 
 use crate::shared::{
     get_field_default_value, get_ousia_attr, get_rename_value, import_ousia, sort_as_tokens, is_meta_field, is_private_field,
-    parse_geo_source_fields, parse_index_kinds, parse_ousia_attr,
+    parse_composite_index_attrs, parse_composite_index_elements, parse_geo_source_fields,
+    parse_index_kinds, parse_ousia_attr,
 };
 
 const RESERVED_FIELDS: &[&str] = &["id", "owner", "type", "created_at", "updated_at"];
+
+/// Real `objects` columns a `composite_index` can name directly.
+const COMPOSITE_COLUMNS: &[&str] = &["id", "owner", "created_at", "updated_at"];
 
 /// Check if meta field has #[ousia_meta(private)] attribute
 fn is_meta_private(field: &Field) -> bool {
@@ -458,6 +462,76 @@ pub fn generate_object_impl(input: &DeriveInput) -> Result<TokenStream> {
             }
         })
         .collect();
+
+    // --- composite indexes (built on the type's partition by init_schema) ---
+    // Each element is a real column or a scalar `index` field. A field's
+    // cast comes from its type's `ToIndexValue::INDEX_CAST`, checked at
+    // compile time below: timestamp and array fields can't be indexed.
+    let mut composite_indexes: Vec<proc_macro2::TokenStream> = Vec::new();
+    let mut composite_checks: Vec<proc_macro2::TokenStream> = Vec::new();
+    let mut seen_composites: Vec<Vec<(String, bool)>> = Vec::new();
+    for decl in parse_composite_index_attrs(attr) {
+        let elements = parse_composite_index_elements(&decl);
+        if seen_composites.contains(&elements) {
+            panic!("composite_index \"{}\" is declared twice on {}", decl, ident);
+        }
+        seen_composites.push(elements.clone());
+
+        let mut element_tokens = Vec::new();
+        for (name, descending) in &elements {
+            let source = if COMPOSITE_COLUMNS.contains(&name.as_str()) {
+                quote! { #ousia::IndexSource::Column }
+            } else if name == "type" {
+                panic!(
+                    "composite_index \"{}\" on {}: `type` is implied — the index is built on \
+                     the type's own partition",
+                    decl, ident
+                );
+            } else {
+                let is_scalar_index = indexes
+                    .iter()
+                    .any(|(n, kind)| n == name && parse_geo_source_fields(kind).is_none());
+                if !is_scalar_index {
+                    panic!(
+                        "composite_index \"{}\" on {}: `{}` is not an indexed field. Elements \
+                         must be declared with `index = \"{}:search\"` (or `:sort`), or be one \
+                         of id, owner, created_at, updated_at",
+                        decl, ident, name, name
+                    );
+                }
+                let ty = &non_meta_fields
+                    .iter()
+                    .find(|f| f.ident.as_ref().unwrap() == name.as_str())
+                    .unwrap()
+                    .ty;
+                let timestamp_msg = format!(
+                    "composite_index on {ident}: `{name}` is a timestamp in index_meta, and \
+                     Postgres cannot index a text-to-timestamptz cast. Use created_at / \
+                     updated_at, or store the field as an integer"
+                );
+                let array_msg = format!(
+                    "composite_index on {ident}: `{name}` is an array field. Array fields \
+                     are served by the GIN index (where_contains), not a composite index"
+                );
+                composite_checks.push(quote! {
+                    const _: () = match <#ty as #ousia::query::ToIndexValue>::INDEX_CAST {
+                        #ousia::query::IndexCast::Timestamp => panic!(#timestamp_msg),
+                        #ousia::query::IndexCast::Array => panic!(#array_msg),
+                        _ => {}
+                    };
+                });
+                quote! {
+                    #ousia::IndexSource::IndexMeta(<#ty as #ousia::query::ToIndexValue>::INDEX_CAST)
+                }
+            };
+            element_tokens.push(quote! {
+                #ousia::IndexElement { name: #name, source: #source, descending: #descending }
+            });
+        }
+        composite_indexes.push(quote! {
+            #ousia::CompositeIndex { elements: &[#(#element_tokens),*] }
+        });
+    }
 
     // --- generate index_meta insertions (scalar fields only) ---
     let index_meta_insertions = indexes.iter().filter_map(|(name, kind)| {
@@ -929,7 +1003,10 @@ pub fn generate_object_impl(input: &DeriveInput) -> Result<TokenStream> {
             to_type: None,
             field_names: &[#(#deserialize_field_names),*],
             field_aliases: &[#(#manifest_aliases),*],
+            composite_indexes: &[#(#composite_indexes),*],
         };
+
+        #(#composite_checks)*
 
         impl #ousia::object::traits::Object for #ident {
             const TYPE: &'static str = #type_name;

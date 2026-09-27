@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use chrono::Utc;
 
-use super::PostgresAdapter;
+use super::{PostgresAdapter, composite_query};
 use uuid::Uuid;
 
 use crate::{
@@ -235,6 +235,12 @@ impl Adapter for PostgresAdapter {
         owner: Uuid,
         filters: &[QueryFilter],
     ) -> Result<Option<ObjectRecord>, Error> {
+        let mut filters = filters.to_vec();
+        composite_query::route_equalities(
+            &crate::manifest::composite_indexes_for(type_name),
+            &mut filters,
+        );
+        let filters = &filters[..];
         let where_clause = Self::build_object_query_conditions(filters, None);
         let order_clause = Self::build_order_clause(filters, false);
 
@@ -267,6 +273,9 @@ impl Adapter for PostgresAdapter {
         mut plan: Query,
     ) -> Result<Vec<ObjectRecord>, Error> {
         plan.cursor = crate::query::cursor_unless_random(plan.cursor, &[&plan.filters]);
+        let indexes = crate::manifest::composite_indexes_for(type_name);
+        composite_query::route_equalities(&indexes, &mut plan.filters);
+        let fan_in = composite_query::plan_fan_in(&indexes, &plan);
         // ── Plan params (WHERE side) ────────────────────────────────────────
         let mut param_idx = 3;
         let cursor_p = param_idx;
@@ -319,19 +328,28 @@ impl Adapter for PostgresAdapter {
         };
 
         // ── Build full SQL once ─────────────────────────────────────────────
-        let mut sql = format!(
-            r#"
+        let fan_in_sql = fan_in
+            .as_ref()
+            .and_then(|fan| Self::fan_in_sql(&plan, fan, &where_clause, &order_clause));
+        let sql = match &fan_in_sql {
+            Some(sql) => sql.clone(),
+            None => {
+                let mut sql = format!(
+                    r#"
                 SELECT o.id, o.owner, o.created_at, o.updated_at, o.data
                 FROM objects o
                 {}
                 {}
                 {}
                 "#,
-            geo_plan.joins, where_clause, order_clause
-        );
-        if let Some(limit) = plan.limit {
-            sql.push_str(&format!(" LIMIT {}", limit));
-        }
+                    geo_plan.joins, where_clause, order_clause
+                );
+                if let Some(limit) = plan.limit {
+                    sql.push_str(&format!(" LIMIT {}", limit));
+                }
+                sql
+            }
+        };
 
         // ── Bind in the exact same order the placeholders were assigned ─────
         let mut query = sqlx::query(&sql).bind(type_name).bind(plan.owner);
@@ -342,10 +360,28 @@ impl Adapter for PostgresAdapter {
         query =
             Self::bind_geo_filters(query, &plan.geo_filters, plan.geo_order.as_ref(), &geo_plan);
 
-        let rows = query
-            .fetch_all(&self.pool)
-            .await
-            .map_err(|err| Error::Storage(err.to_string()))?;
+        let rows = if fan_in_sql.is_some() {
+            // Each value's lookup must read the composite index in order and
+            // stop at the limit. Postgres plans it for an average value, and
+            // for a value with many rows that estimate makes it fetch and sort
+            // them all; with bitmap scans off, the ordered scan is the plan.
+            let mut tx = self
+                .pool
+                .begin_with("BEGIN READ ONLY; SET LOCAL enable_bitmapscan = off")
+                .await
+                .map_err(|err| Error::Storage(err.to_string()))?;
+            let rows = query
+                .fetch_all(&mut *tx)
+                .await
+                .map_err(|err| Error::Storage(err.to_string()))?;
+            tx.commit().await.map_err(|err| Error::Storage(err.to_string()))?;
+            rows
+        } else {
+            query
+                .fetch_all(&self.pool)
+                .await
+                .map_err(|err| Error::Storage(err.to_string()))?
+        };
 
         Ok(rows
             .into_iter()
@@ -457,7 +493,11 @@ impl Adapter for PostgresAdapter {
         plan: Option<Query>,
     ) -> Result<u64, Error> {
         match plan {
-            Some(plan) => {
+            Some(mut plan) => {
+                composite_query::route_equalities(
+                    &crate::manifest::composite_indexes_for(type_name),
+                    &mut plan.filters,
+                );
                 let mut param_idx = 3;
                 let (mut where_clause, geo_plan) = Self::build_object_query_conditions_with_geo(
                     &plan.filters,
